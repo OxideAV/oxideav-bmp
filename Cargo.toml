@@ -1,0 +1,19 @@
+[package]
+name = "oxideav-bmp"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-bmp"
+homepage = "https://github.com/OxideAV/oxideav-bmp"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust BMP (Windows bitmap) decoder + encoder + container for oxideav — also exposes the header-less DIB helpers used by .ico / .cur sub-images"
+readme = "README.md"
+keywords = ["multimedia", "image", "bmp", "codec", "pure-rust"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
+oxideav-core = "0.1"
+oxideav-codec = "0.1"
+oxideav-container = "0.1"
+oxideav-pixfmt = "0.1"
