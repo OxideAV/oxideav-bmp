@@ -5,12 +5,12 @@
 
 use std::io::{Read, SeekFrom, Write};
 
-use oxideav_container::{
-    ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
-};
 use oxideav_core::{
     CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, PixelFormat, Result,
     StreamInfo, TimeBase,
+};
+use oxideav_core::{
+    ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
 };
 
 use crate::types::{read_u16_le, read_u32_le, BMP_MAGIC};
@@ -27,7 +27,7 @@ fn probe(data: &ProbeData) -> ProbeScore {
     if data.buf.len() >= 2 && read_u16_le(data.buf, 0) == BMP_MAGIC {
         MAX_PROBE_SCORE
     } else if matches!(data.ext, Some("bmp") | Some("dib")) {
-        oxideav_container::PROBE_SCORE_EXTENSION
+        oxideav_core::PROBE_SCORE_EXTENSION
     } else {
         0
     }

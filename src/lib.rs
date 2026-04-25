@@ -24,9 +24,9 @@ pub mod decoder;
 pub mod encoder;
 pub mod types;
 
-use oxideav_codec::{CodecInfo, CodecRegistry};
-use oxideav_container::ContainerRegistry;
+use oxideav_core::ContainerRegistry;
 use oxideav_core::{CodecCapabilities, CodecId, PixelFormat};
+use oxideav_core::{CodecInfo, CodecRegistry};
 
 /// Codec id for BMP image frames.
 pub const CODEC_ID_STR: &str = "bmp";

@@ -9,7 +9,7 @@
 //! with `0xFF` alpha at encode time. Other pixel formats are rejected
 //! so the caller gets a clear error instead of a silent conversion.
 
-use oxideav_codec::Encoder;
+use oxideav_core::Encoder;
 use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
 };

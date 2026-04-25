@@ -20,7 +20,7 @@
 //! that uses those is almost always better represented in its native
 //! container anyway.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
     VideoPlane,
