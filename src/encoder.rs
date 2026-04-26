@@ -16,10 +16,14 @@ use oxideav_core::{
 
 use crate::types::*;
 
-pub fn make_encoder(_params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
+    let mut out_params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
+    out_params.width = params.width;
+    out_params.height = params.height;
+    out_params.pixel_format = params.pixel_format;
     Ok(Box::new(BmpEncoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
-        out_params: CodecParameters::video(CodecId::new(crate::CODEC_ID_STR)),
+        out_params,
         pending: None,
         eof: false,
     }))
@@ -44,7 +48,19 @@ impl Encoder for BmpEncoder {
             Frame::Video(v) => v,
             _ => return Err(Error::invalid("BMP encoder: expected video frame")),
         };
-        let bytes = encode_bmp(vf)?;
+        let format = self
+            .out_params
+            .pixel_format
+            .ok_or_else(|| Error::invalid("BMP encoder: pixel_format missing in CodecParameters"))?;
+        let width = self
+            .out_params
+            .width
+            .ok_or_else(|| Error::invalid("BMP encoder: width missing in CodecParameters"))?;
+        let height = self
+            .out_params
+            .height
+            .ok_or_else(|| Error::invalid("BMP encoder: height missing in CodecParameters"))?;
+        let bytes = encode_bmp(vf, format, width, height)?;
         self.pending = Some(bytes);
         Ok(())
     }
@@ -77,10 +93,18 @@ impl Encoder for BmpEncoder {
 /// Encode a [`VideoFrame`] into a complete BMP file (with the 14-byte
 /// `BITMAPFILEHEADER`). Always produces 32-bit BGRA `BI_RGB`. Rows are
 /// written bottom-up per the classic BMP convention.
-pub fn encode_bmp(frame: &VideoFrame) -> Result<Vec<u8>> {
-    let (pixels, stride) = pack_rgba(frame)?;
-    let w = frame.width;
-    let h = frame.height;
+///
+/// `format`, `width`, `height` are the stream-level pixel format and
+/// dimensions for the frame (read from the stream's `CodecParameters`).
+pub fn encode_bmp(
+    frame: &VideoFrame,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>> {
+    let (pixels, stride) = pack_rgba(frame, format, width, height)?;
+    let w = width;
+    let h = height;
     let pixel_bytes = pixels.len() as u32;
     let _ = stride;
     let file_size = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE + pixel_bytes;
@@ -103,16 +127,25 @@ pub fn encode_bmp(frame: &VideoFrame) -> Result<Vec<u8>> {
 /// Encode a [`VideoFrame`] into a headerless DIB suitable for `.ico`
 /// sub-images. `double_height_for_ico_mask` tells the encoder to:
 ///
-/// * Write the height field as 2×`frame.height` (ICO convention).
+/// * Write the height field as 2×`height` (ICO convention).
 /// * Append a 1-bit AND mask derived from the frame's alpha channel:
 ///   alpha == 0 ⇒ 1 (transparent), alpha != 0 ⇒ 0 (opaque).
 ///
 /// When `false`, the output is a plain 32bpp DIB suitable for embedding
 /// wherever someone expects a Windows DIB (clipboard, registry blob, …).
-pub fn encode_dib(frame: &VideoFrame, double_height_for_ico_mask: bool) -> Result<Vec<u8>> {
-    let (pixels, _) = pack_rgba(frame)?;
-    let w = frame.width;
-    let h = frame.height;
+///
+/// `format`, `width`, `height` are the stream-level pixel format and
+/// dimensions for the frame (read from the stream's `CodecParameters`).
+pub fn encode_dib(
+    frame: &VideoFrame,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    double_height_for_ico_mask: bool,
+) -> Result<Vec<u8>> {
+    let (pixels, _) = pack_rgba(frame, format, width, height)?;
+    let w = width;
+    let h = height;
     let mut out = Vec::new();
     // BITMAPINFOHEADER only — no file header.
     write_dib_header_v3(
@@ -123,7 +156,7 @@ pub fn encode_dib(frame: &VideoFrame, double_height_for_ico_mask: bool) -> Resul
     );
     out.extend_from_slice(&pixels);
     if double_height_for_ico_mask {
-        out.extend_from_slice(&build_and_mask_from_alpha(frame)?);
+        out.extend_from_slice(&build_and_mask_from_alpha(frame, format, width, height)?);
     }
     Ok(out)
 }
@@ -134,8 +167,13 @@ pub fn encode_dib(frame: &VideoFrame, double_height_for_ico_mask: bool) -> Resul
 
 /// Pack the input frame to 32-bit BGRA bottom-up rows (what BMP
 /// expects). Row stride is already a multiple of 4 (32 bpp × width).
-fn pack_rgba(frame: &VideoFrame) -> Result<(Vec<u8>, usize)> {
-    match frame.format {
+fn pack_rgba(
+    frame: &VideoFrame,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+) -> Result<(Vec<u8>, usize)> {
+    match format {
         PixelFormat::Rgba | PixelFormat::Rgb24 => {}
         other => {
             return Err(Error::invalid(format!(
@@ -143,13 +181,13 @@ fn pack_rgba(frame: &VideoFrame) -> Result<(Vec<u8>, usize)> {
             )))
         }
     }
-    let w = frame.width as usize;
-    let h = frame.height as usize;
+    let w = width as usize;
+    let h = height as usize;
     if frame.planes.is_empty() {
         return Err(Error::invalid("BMP encoder: empty frame plane"));
     }
     let in_stride = frame.planes[0].stride;
-    let in_bpp = match frame.format {
+    let in_bpp = match format {
         PixelFormat::Rgba => 4,
         PixelFormat::Rgb24 => 3,
         _ => unreachable!(),
@@ -198,13 +236,18 @@ fn write_dib_header_v3(out: &mut Vec<u8>, w: u32, stored_height: u32, _top_down:
 /// for a BMP embedded in a `.ico` / `.cur`. A set bit means "the pixel
 /// under this one in the XOR mask is TRANSPARENT", matching every
 /// `ICO` file you'll find in the wild.
-fn build_and_mask_from_alpha(frame: &VideoFrame) -> Result<Vec<u8>> {
-    let w = frame.width as usize;
-    let h = frame.height as usize;
+fn build_and_mask_from_alpha(
+    frame: &VideoFrame,
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
     let stride = row_stride(w, 1);
     let mut mask = vec![0u8; stride * h];
     let in_stride = frame.planes[0].stride;
-    let bpp = match frame.format {
+    let bpp = match format {
         PixelFormat::Rgba => 4,
         PixelFormat::Rgb24 => {
             // No alpha → fully opaque → all-zero AND mask. Short-circuit.

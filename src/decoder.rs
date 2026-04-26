@@ -246,12 +246,9 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
         flat.extend_from_slice(&row);
     }
 
+    let _ = (PixelFormat::Rgba, height, TimeBase::new(1, 1));
     Ok(VideoFrame {
-        format: PixelFormat::Rgba,
-        width,
-        height,
         pts: None,
-        time_base: TimeBase::new(1, 1),
         planes: vec![VideoPlane {
             stride: width as usize * 4,
             data: flat,

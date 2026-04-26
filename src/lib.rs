@@ -64,9 +64,9 @@ pub use types::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxideav_core::{PixelFormat, TimeBase, VideoFrame, VideoPlane};
+    use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 
-    fn rgba_checker(w: u32, h: u32) -> VideoFrame {
+    fn rgba_checker(w: u32, h: u32) -> (VideoFrame, u32, u32) {
         // 2×2 red/green/blue/white grid, tiled to w×h. Dumb but
         // easy to eyeball on roundtrip.
         let mut data = Vec::with_capacity((w * h * 4) as usize);
@@ -82,46 +82,43 @@ mod tests {
                 data.extend_from_slice(&rgba);
             }
         }
-        VideoFrame {
-            format: PixelFormat::Rgba,
-            width: w,
-            height: h,
+        let vf = VideoFrame {
             pts: None,
-            time_base: TimeBase::new(1, 1),
             planes: vec![VideoPlane {
                 stride: w as usize * 4,
                 data,
             }],
-        }
+        };
+        (vf, w, h)
     }
 
     #[test]
     fn roundtrip_32bpp_rgba() {
-        let src = rgba_checker(16, 12);
-        let bytes = encode_bmp(&src).unwrap();
+        let (src, w, h) = rgba_checker(16, 12);
+        let bytes = encode_bmp(&src, PixelFormat::Rgba, w, h).unwrap();
         assert_eq!(&bytes[..2], b"BM");
         let back = decode_bmp(&bytes).unwrap();
-        assert_eq!(back.width, src.width);
-        assert_eq!(back.height, src.height);
-        assert_eq!(back.format, PixelFormat::Rgba);
+        // Width can be derived from the Rgba plane stride (4 bytes/pixel).
+        assert_eq!(back.planes[0].stride / 4, w as usize);
+        assert_eq!(back.planes[0].data.len() / back.planes[0].stride, h as usize);
         assert_eq!(back.planes[0].data, src.planes[0].data);
     }
 
     #[test]
     fn dib_ico_roundtrip_with_and_mask() {
-        let src = rgba_checker(8, 8);
-        let dib = encode_dib(&src, /* doubled */ true).unwrap();
+        let (src, w, h) = rgba_checker(8, 8);
+        let dib = encode_dib(&src, PixelFormat::Rgba, w, h, /* doubled */ true).unwrap();
         // First 4 bytes are the header size = 40.
         assert_eq!(dib[0], 40);
         // The stored height should be 16 (2×8).
-        let h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
-        assert_eq!(h, 16);
+        let stored_h = i32::from_le_bytes([dib[8], dib[9], dib[10], dib[11]]);
+        assert_eq!(stored_h, 16);
         // Fully opaque quadrants have AND mask = 0; the q=3 (RGBA
         // 255,255,255,128) has alpha != 0 → mask bit = 0 too. With no
         // fully-transparent pixels the whole AND mask should be zero.
         let back = decode_dib(&dib, /* doubled */ true).unwrap();
-        assert_eq!(back.width, src.width);
-        assert_eq!(back.height, src.height);
+        assert_eq!(back.planes[0].stride / 4, w as usize);
+        assert_eq!(back.planes[0].data.len() / back.planes[0].stride, h as usize);
         assert_eq!(back.planes[0].data, src.planes[0].data);
     }
 
