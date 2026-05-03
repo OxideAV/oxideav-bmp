@@ -48,10 +48,9 @@ impl Encoder for BmpEncoder {
             Frame::Video(v) => v,
             _ => return Err(Error::invalid("BMP encoder: expected video frame")),
         };
-        let format = self
-            .out_params
-            .pixel_format
-            .ok_or_else(|| Error::invalid("BMP encoder: pixel_format missing in CodecParameters"))?;
+        let format = self.out_params.pixel_format.ok_or_else(|| {
+            Error::invalid("BMP encoder: pixel_format missing in CodecParameters")
+        })?;
         let width = self
             .out_params
             .width

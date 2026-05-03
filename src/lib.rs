@@ -100,7 +100,10 @@ mod tests {
         let back = decode_bmp(&bytes).unwrap();
         // Width can be derived from the Rgba plane stride (4 bytes/pixel).
         assert_eq!(back.planes[0].stride / 4, w as usize);
-        assert_eq!(back.planes[0].data.len() / back.planes[0].stride, h as usize);
+        assert_eq!(
+            back.planes[0].data.len() / back.planes[0].stride,
+            h as usize
+        );
         assert_eq!(back.planes[0].data, src.planes[0].data);
     }
 
@@ -118,7 +121,10 @@ mod tests {
         // fully-transparent pixels the whole AND mask should be zero.
         let back = decode_dib(&dib, /* doubled */ true).unwrap();
         assert_eq!(back.planes[0].stride / 4, w as usize);
-        assert_eq!(back.planes[0].data.len() / back.planes[0].stride, h as usize);
+        assert_eq!(
+            back.planes[0].data.len() / back.planes[0].stride,
+            h as usize
+        );
         assert_eq!(back.planes[0].data, src.planes[0].data);
     }
 
