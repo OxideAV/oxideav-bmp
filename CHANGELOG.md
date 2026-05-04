@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.2...v0.1.3) - 2026-05-04
+
+### Other
+
+- cargo fmt: reorder use statements in src/lib.rs
+- Standalone-friendly retrofit: gate oxideav-core behind `registry`
+
 ### Changed
 
 - Standalone-friendly retrofit (#360): `oxideav-core` is now an
