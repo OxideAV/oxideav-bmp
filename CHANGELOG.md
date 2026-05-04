@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Standalone-friendly retrofit (#360): `oxideav-core` is now an
+  optional dep behind a default-on `registry` cargo feature.
+  Image-library consumers can depend on `oxideav-bmp` with
+  `default-features = false` to get a framework-free build that
+  exposes the standalone `decode_bmp` / `encode_bmp` / `decode_dib` /
+  `encode_dib` API plus crate-local `BmpImage` / `BmpPixelFormat` /
+  `BmpError` types. The `Decoder` / `Encoder` trait surface and the
+  container registration stay behind the `registry` feature.
+- `encode_bmp` / `encode_dib` signatures now take a `&BmpImage`
+  (carrying width, height, format inline). New `encode_bmp_plane` /
+  `encode_dib_plane` helpers expose the underlying plane-based API.
+  `decode_bmp` / `decode_dib` now return `BmpImage` instead of
+  `oxideav_core::VideoFrame`. Compatibility wrappers
+  `decode_bmp_videoframe` / `decode_dib_videoframe` /
+  `encode_bmp_videoframe` / `encode_dib_videoframe` (registry-gated)
+  preserve the previous `oxideav_core::VideoFrame`-shaped API for
+  consumers like `oxideav-ico` mid-migration.
+- Dropped the unused `oxideav-pixfmt` dependency.
+
 ## [0.1.2](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.1...v0.1.2) - 2026-05-03
 
 ### Other

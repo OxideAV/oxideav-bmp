@@ -1,6 +1,7 @@
-//! BMP + DIB decode. Always produces an `Rgba` [`VideoFrame`] — palette
-//! lookup and BGR→RGB swapping happen at decode time so consumers don't
-//! need to know the on-disk quirks.
+//! BMP + DIB decode. Always produces an [`BmpImage`] tagged
+//! [`BmpPixelFormat::Rgba`] — palette lookup and BGR→RGB swapping
+//! happen at decode time so consumers don't need to know the on-disk
+//! quirks.
 //!
 //! Supports (enough to cover every common icon / texture / historical
 //! artifact you'd meet in the wild):
@@ -19,19 +20,24 @@
 //! Not supported: RLE4 / RLE8 / JPEG / PNG compression types. A BMP
 //! that uses those is almost always better represented in its native
 //! container anyway.
+//!
+//! With the default `registry` feature on, the gated `BmpDecoder` trait
+//! impl wraps [`decode_bmp`] for the `oxideav_core::Decoder` surface.
 
-use oxideav_core::Decoder;
-use oxideav_core::{
-    CodecId, CodecParameters, Error, Frame, Packet, PixelFormat, Result, TimeBase, VideoFrame,
-    VideoPlane,
-};
-
+use crate::error::{BmpError as Error, Result};
+use crate::image::{BmpImage, BmpPixelFormat, BmpPlane};
 use crate::types::*;
+
+#[cfg(feature = "registry")]
+use oxideav_core::Decoder;
+#[cfg(feature = "registry")]
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPlane};
 
 /// Factory registered with the codec registry. Consumes one packet per
 /// whole BMP file and produces one `Rgba` frame. BMP is a single-image
 /// format, so `flush()` just drains the one pending frame.
-pub fn make_decoder(_params: &CodecParameters) -> Result<Box<dyn Decoder>> {
+#[cfg(feature = "registry")]
+pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
     Ok(Box::new(BmpDecoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
         pending: None,
@@ -39,36 +45,53 @@ pub fn make_decoder(_params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     }))
 }
 
+#[cfg(feature = "registry")]
 struct BmpDecoder {
     codec_id: CodecId,
     pending: Option<VideoFrame>,
     eof: bool,
 }
 
+#[cfg(feature = "registry")]
 impl Decoder for BmpDecoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
     }
-    fn send_packet(&mut self, packet: &Packet) -> Result<()> {
-        let frame = decode_bmp(&packet.data)?;
-        self.pending = Some(frame);
+    fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
+        let image = decode_bmp(&packet.data)?;
+        self.pending = Some(image_to_video_frame(image));
         Ok(())
     }
-    fn receive_frame(&mut self) -> Result<Frame> {
+    fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
         match self.pending.take() {
             Some(f) => Ok(Frame::Video(f)),
             None => {
                 if self.eof {
-                    Err(Error::Eof)
+                    Err(oxideav_core::Error::Eof)
                 } else {
-                    Err(Error::NeedMore)
+                    Err(oxideav_core::Error::NeedMore)
                 }
             }
         }
     }
-    fn flush(&mut self) -> Result<()> {
+    fn flush(&mut self) -> oxideav_core::Result<()> {
         self.eof = true;
         Ok(())
+    }
+}
+
+#[cfg(feature = "registry")]
+fn image_to_video_frame(image: BmpImage) -> VideoFrame {
+    VideoFrame {
+        pts: image.pts,
+        planes: image
+            .planes
+            .into_iter()
+            .map(|p| VideoPlane {
+                stride: p.stride,
+                data: p.data,
+            })
+            .collect(),
     }
 }
 
@@ -77,8 +100,8 @@ impl Decoder for BmpDecoder {
 // ---------------------------------------------------------------------------
 
 /// Decode a complete BMP file (`BM` signature + file header + DIB +
-/// pixels) into an `Rgba` [`VideoFrame`].
-pub fn decode_bmp(input: &[u8]) -> Result<VideoFrame> {
+/// pixels) into an `Rgba` [`BmpImage`].
+pub fn decode_bmp(input: &[u8]) -> Result<BmpImage> {
     if input.len() < (BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE) as usize {
         return Err(Error::invalid("BMP: input shorter than header"));
     }
@@ -92,16 +115,16 @@ pub fn decode_bmp(input: &[u8]) -> Result<VideoFrame> {
 }
 
 /// Decode a headerless DIB (`BITMAPINFOHEADER` + pixels, no
-/// `BITMAPFILEHEADER`) into an `Rgba` [`VideoFrame`]. Used by
+/// `BITMAPFILEHEADER`) into an `Rgba` [`BmpImage`]. Used by
 /// `oxideav-ico`.
 ///
 /// When `dib_height_is_doubled_for_mask` is true, the incoming
 /// `biHeight` is 2× the real height (XOR mask + AND mask layout from
-/// `.ico` / `.cur`). The returned frame dimensions are halved on the
+/// `.ico` / `.cur`). The returned image dimensions are halved on the
 /// height axis and the AND mask following the XOR pixels is read into
 /// the alpha channel — a 1-bit in the AND mask maps to `alpha = 0`
 /// (transparent), a 0-bit keeps whatever the XOR mask wrote.
-pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<VideoFrame> {
+pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<BmpImage> {
     let (header, _header_bytes) = parse_dib_header(input)?;
     // For a "pure" DIB, pixel data starts right after the header (plus
     // any bitfields masks and color table). Compute the offset the same
@@ -122,15 +145,37 @@ pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<
     }
 }
 
+/// Compatibility wrapper around [`decode_bmp`] returning an
+/// `oxideav_core::VideoFrame`. Only available with the default
+/// `registry` feature; intended for `oxideav-core`-using consumers
+/// (e.g. `oxideav-ico`) that haven't migrated to the standalone
+/// [`BmpImage`] shape.
+#[cfg(feature = "registry")]
+pub fn decode_bmp_videoframe(input: &[u8]) -> oxideav_core::Result<VideoFrame> {
+    Ok(image_to_video_frame(decode_bmp(input)?))
+}
+
+/// Compatibility wrapper around [`decode_dib`] returning an
+/// `oxideav_core::VideoFrame`. Only available with the default
+/// `registry` feature; intended for `oxideav-core`-using consumers
+/// (e.g. `oxideav-ico`) that haven't migrated to the standalone
+/// [`BmpImage`] shape.
+#[cfg(feature = "registry")]
+pub fn decode_dib_videoframe(
+    input: &[u8],
+    dib_height_is_doubled_for_mask: bool,
+) -> oxideav_core::Result<VideoFrame> {
+    Ok(image_to_video_frame(decode_dib(
+        input,
+        dib_height_is_doubled_for_mask,
+    )?))
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
 
-fn decode_dib_with_offset(
-    dib: &[u8],
-    whole_file: &[u8],
-    pixel_offset: usize,
-) -> Result<VideoFrame> {
+fn decode_dib_with_offset(dib: &[u8], whole_file: &[u8], pixel_offset: usize) -> Result<BmpImage> {
     let (header, _) = parse_dib_header(dib)?;
     decode_dib_payload(&header, whole_file, pixel_offset)
 }
@@ -216,7 +261,7 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
     ))
 }
 
-fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Result<VideoFrame> {
+fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Result<BmpImage> {
     // Reject compressions we don't handle before we go any further.
     match h.compression {
         BI_RGB | BI_BITFIELDS => {}
@@ -246,22 +291,24 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
         flat.extend_from_slice(&row);
     }
 
-    let _ = (PixelFormat::Rgba, height, TimeBase::new(1, 1));
-    Ok(VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
+    Ok(BmpImage {
+        width,
+        height,
+        pixel_format: BmpPixelFormat::Rgba,
+        planes: vec![BmpPlane {
             stride: width as usize * 4,
             data: flat,
         }],
+        pts: None,
     })
 }
 
-fn decode_dib_with_mask(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Result<VideoFrame> {
+fn decode_dib_with_mask(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Result<BmpImage> {
     // Height in the DIB is doubled to cover the AND mask; actual
     // pixel height is the real image size.
     let mut xor_header = *h;
     xor_header.height = h.height / 2;
-    let mut frame = decode_dib_payload(&xor_header, whole, pixel_offset)?;
+    let mut image = decode_dib_payload(&xor_header, whole, pixel_offset)?;
 
     // The AND mask is 1bpp, bottom-up, width-padded to 4 bytes, placed
     // immediately after the XOR pixel array.
@@ -273,7 +320,7 @@ fn decode_dib_with_mask(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Res
     if whole.len() < and_start + and_bytes {
         // Some icons lie about the AND mask size. Warn-by-ignore: if
         // there's no AND mask we just keep the XOR alpha as-is.
-        return Ok(frame);
+        return Ok(image);
     }
     let and = &whole[and_start..and_start + and_bytes];
 
@@ -291,11 +338,11 @@ fn decode_dib_with_mask(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Res
             if bit == 1 {
                 // AND-mask bit set ⇒ transparent.
                 let rgba_off = y * w * 4 + x * 4;
-                frame.planes[0].data[rgba_off + 3] = 0;
+                image.planes[0].data[rgba_off + 3] = 0;
             }
         }
     }
-    Ok(frame)
+    Ok(image)
 }
 
 fn read_palette(h: &DibHeader, whole: &[u8], _pixel_offset: usize) -> Result<Vec<[u8; 4]>> {
