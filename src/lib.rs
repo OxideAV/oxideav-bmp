@@ -43,9 +43,9 @@ pub mod types;
 pub const CODEC_ID_STR: &str = "bmp";
 
 pub use decoder::{decode_bmp, decode_dib};
-pub use encoder::{encode_bmp, encode_bmp_plane, encode_dib, encode_dib_plane};
 #[cfg(feature = "registry")]
 pub use decoder::{decode_bmp_videoframe, decode_dib_videoframe};
+pub use encoder::{encode_bmp, encode_bmp_plane, encode_dib, encode_dib_plane};
 #[cfg(feature = "registry")]
 pub use encoder::{encode_bmp_videoframe, encode_dib_videoframe};
 pub use error::{BmpError, Result};
