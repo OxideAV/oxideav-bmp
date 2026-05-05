@@ -9,7 +9,7 @@
 //! has it; dev machines may not).
 
 use oxideav_bmp::{decode_bmp, encode_bmp, BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn magick_available() -> bool {
@@ -26,7 +26,7 @@ fn tmp_path(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-fn magick_identify(path: &PathBuf) -> String {
+fn magick_identify(path: &Path) -> String {
     let out = Command::new("magick")
         .args(["identify", path.to_str().unwrap()])
         .output()
@@ -34,7 +34,7 @@ fn magick_identify(path: &PathBuf) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
-fn magick_pixel_rgba(path: &PathBuf, x: u32, y: u32) -> [u8; 4] {
+fn magick_pixel_rgba(path: &Path, x: u32, y: u32) -> [u8; 4] {
     // Use `magick convert` to extract a single pixel as a PNM-style 8-bit
     // RGBA value.
     let out = Command::new("magick")
