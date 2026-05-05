@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Decoder**: `BI_RLE8` and `BI_RLE4` decode support. Both encoded-run
+  and absolute-mode packets are handled; delta (`0x02`) escape codes are
+  also accepted. Output is always top-down `Rgba`, same as every other
+  decode path.
+- **Encoder**: 24-bit BGR `BI_RGB` write path (`BmpPixelFormat::Rgb24`).
+  Input strides of 3 or 4 bytes/pixel are both accepted; output rows are
+  4-byte padded per spec.
+- **Encoder**: 16-bit `BI_BITFIELDS` RGB 5-6-5 write path
+  (`BmpPixelFormat::Rgb565`). Emits a BITMAPV4HEADER (108 B) with
+  canonical masks R=0xF800, G=0x07E0, B=0x001F, A=0x0000 and CS type
+  set to LCS_sRGB.
+- **Encoder**: 8-bit uncompressed indexed `BI_RGB` write path
+  (`BmpPixelFormat::Indexed8`). Requires a `BmpPalette`; unused colour
+  table slots are zero-padded to fill all 256 entries.
+- **Encoder**: 4-bit uncompressed indexed `BI_RGB` write path
+  (`BmpPixelFormat::Indexed4`). Same palette contract; full 16-entry
+  table written.
+- **Encoder**: `BI_RLE8` write path with automatic fallback. Encodes a
+  run-length compressed payload and chooses it only when it is strictly
+  smaller than the raw indexed bytes; otherwise falls back to
+  uncompressed `BI_RGB`.
+- **Encoder**: `BI_RLE4` write path with automatic fallback (same
+  heuristic as RLE8).
+- `BmpPixelFormat::Rgb565`, `BmpPixelFormat::Indexed8`,
+  `BmpPixelFormat::Indexed4` variants added to the pixel-format enum.
+- `BmpPalette` struct added for passing colour tables to indexed encode
+  paths.
+- `BmpImage::palette: Option<BmpPalette>` field added (always `None` on
+  the decode path, which always produces `Rgba`).
+- `EncodedBmpFormat` enum returned by `encode_bmp` / `encode_bmp_plane`
+  so callers can tell which compression was actually used.
+- `tests/magick_validate.rs` integration tests: 7 ImageMagick
+  cross-validation cases (32-bit, 24-bit, 16-bit, 8-bit indexed, 4-bit
+  indexed, RLE8, RLE4).
+
+### Changed
+
+- `encode_bmp` and `encode_bmp_plane` now return `Result<(Vec<u8>,
+  EncodedBmpFormat)>` instead of `Result<Vec<u8>>`. Callers that only
+  care about the bytes can destructure with `let (bytes, _) = …`.
+- `encode_bmp_plane` gains a `palette: Option<&BmpPalette>` parameter
+  (required for indexed formats, ignored otherwise).
+
 ## [0.1.3](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.2...v0.1.3) - 2026-05-04
 
 ### Other

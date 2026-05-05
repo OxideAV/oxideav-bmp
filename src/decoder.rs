@@ -17,9 +17,12 @@
 //!   or body (v4/v5). Unusual mask combos are expanded via the mask
 //!   shift-and-scale routine below.
 //!
-//! Not supported: RLE4 / RLE8 / JPEG / PNG compression types. A BMP
-//! that uses those is almost always better represented in its native
-//! container anyway.
+//! * 8-bit indexed `BI_RLE8` — decoded bottom-up, then flipped to top-down.
+//! * 4-bit indexed `BI_RLE4` — same. Delta codes + absolute mode are
+//!   both supported.
+//!
+//! Not supported: `BI_JPEG` / `BI_PNG` embedded payloads (those defeat
+//! the purpose of BMP wrapping).
 //!
 //! With the default `registry` feature on, the gated `BmpDecoder` trait
 //! impl wraps [`decode_bmp`] for the `oxideav_core::Decoder` surface.
@@ -264,8 +267,7 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
 fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Result<BmpImage> {
     // Reject compressions we don't handle before we go any further.
     match h.compression {
-        BI_RGB | BI_BITFIELDS => {}
-        BI_RLE4 | BI_RLE8 => return Err(Error::invalid("BMP: RLE compression not supported")),
+        BI_RGB | BI_BITFIELDS | BI_RLE4 | BI_RLE8 => {}
         BI_JPEG => return Err(Error::invalid("BMP: embedded JPEG not supported")),
         BI_PNG => return Err(Error::invalid("BMP: embedded PNG not supported")),
         c => return Err(Error::invalid(format!("BMP: unknown compression {c}"))),
@@ -278,6 +280,56 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
     }
 
     let palette = read_palette(h, whole, pixel_offset)?;
+
+    // RLE-compressed bitmaps have a special decode path.
+    if h.compression == BI_RLE8 {
+        if h.bpp != 8 {
+            return Err(Error::invalid("BMP: BI_RLE8 requires bpp=8"));
+        }
+        let rle_data = &whole[pixel_offset..];
+        // decode_rle8 returns rows in bottom-up order (row 0 = bottom of
+        // image). Reverse to produce the top-down output the caller expects.
+        let rows = decode_rle8(rle_data, width as usize, height as usize, &palette)?;
+        let mut flat = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in rows.into_iter().rev() {
+            flat.extend_from_slice(&row);
+        }
+        return Ok(BmpImage {
+            width,
+            height,
+            pixel_format: BmpPixelFormat::Rgba,
+            planes: vec![BmpPlane {
+                stride: width as usize * 4,
+                data: flat,
+            }],
+            palette: None,
+            pts: None,
+        });
+    }
+    if h.compression == BI_RLE4 {
+        if h.bpp != 4 {
+            return Err(Error::invalid("BMP: BI_RLE4 requires bpp=4"));
+        }
+        let rle_data = &whole[pixel_offset..];
+        // Same: bottom-up → reverse to top-down.
+        let rows = decode_rle4(rle_data, width as usize, height as usize, &palette)?;
+        let mut flat = Vec::with_capacity(width as usize * height as usize * 4);
+        for row in rows.into_iter().rev() {
+            flat.extend_from_slice(&row);
+        }
+        return Ok(BmpImage {
+            width,
+            height,
+            pixel_format: BmpPixelFormat::Rgba,
+            planes: vec![BmpPlane {
+                stride: width as usize * 4,
+                data: flat,
+            }],
+            palette: None,
+            pts: None,
+        });
+    }
+
     let rows = decode_pixels(h, whole, pixel_offset, &palette)?;
 
     // Flip if needed so output is always top-down (consumer-friendly).
@@ -299,6 +351,7 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
             stride: width as usize * 4,
             data: flat,
         }],
+        palette: None,
         pts: None,
     })
 }
@@ -537,6 +590,178 @@ fn decode_pixels(
             return Err(Error::invalid(format!(
                 "BMP: unsupported bit depth {other}"
             )))
+        }
+    }
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// RLE decoders
+// ---------------------------------------------------------------------------
+
+/// Decode a BI_RLE8 stream into bottom-up RGBA rows.
+///
+/// The stream encodes 8-bit indices; the caller provides the palette.
+/// Output rows are in bottom-up order (row 0 = bottom of image) to
+/// match the caller's `rev()` flip in `decode_dib_payload`.
+fn decode_rle8(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    palette: &[[u8; 4]],
+) -> Result<Vec<Vec<u8>>> {
+    let mut rows: Vec<Vec<u8>> = vec![vec![0u8; width * 4]; height];
+    let mut x = 0usize;
+    // RLE8 bitmaps are bottom-up: row 0 in the stream is the bottom row.
+    let mut y = 0usize;
+    let mut i = 0usize;
+
+    macro_rules! put_pixel {
+        ($idx:expr) => {
+            if x < width && y < height {
+                let rgba = palette
+                    .get($idx as usize)
+                    .copied()
+                    .unwrap_or([0, 0, 0, 0xFF]);
+                let off = x * 4;
+                rows[y][off..off + 4].copy_from_slice(&rgba);
+                x += 1;
+            }
+        };
+    }
+
+    while i + 1 < data.len() {
+        let b0 = data[i];
+        let b1 = data[i + 1];
+        i += 2;
+
+        if b0 != 0 {
+            // Encoded run: b0 pixels of palette index b1.
+            for _ in 0..b0 {
+                put_pixel!(b1);
+            }
+        } else {
+            match b1 {
+                0x00 => {
+                    // End of line.
+                    x = 0;
+                    y += 1;
+                }
+                0x01 => {
+                    // End of bitmap.
+                    break;
+                }
+                0x02 => {
+                    // Delta: move cursor.
+                    if i + 2 > data.len() {
+                        return Err(Error::invalid("BMP RLE8: delta truncated"));
+                    }
+                    x += data[i] as usize;
+                    y += data[i + 1] as usize;
+                    i += 2;
+                }
+                count => {
+                    // Absolute mode: `count` pixels follow.
+                    let count = count as usize;
+                    if i + count > data.len() {
+                        return Err(Error::invalid("BMP RLE8: absolute run truncated"));
+                    }
+                    for k in 0..count {
+                        put_pixel!(data[i + k]);
+                    }
+                    i += count;
+                    // Padded to word boundary.
+                    if count & 1 != 0 {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// Decode a BI_RLE4 stream into bottom-up RGBA rows.
+fn decode_rle4(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    palette: &[[u8; 4]],
+) -> Result<Vec<Vec<u8>>> {
+    let mut rows: Vec<Vec<u8>> = vec![vec![0u8; width * 4]; height];
+    let mut x = 0usize;
+    let mut y = 0usize;
+    let mut i = 0usize;
+
+    macro_rules! put_pixel {
+        ($idx:expr) => {
+            if x < width && y < height {
+                let rgba = palette
+                    .get(($idx & 0x0F) as usize)
+                    .copied()
+                    .unwrap_or([0, 0, 0, 0xFF]);
+                let off = x * 4;
+                rows[y][off..off + 4].copy_from_slice(&rgba);
+                x += 1;
+            }
+        };
+    }
+
+    while i + 1 < data.len() {
+        let b0 = data[i];
+        let b1 = data[i + 1];
+        i += 2;
+
+        if b0 != 0 {
+            // Encoded run: b0 pixels alternating between hi/lo nibble of b1.
+            let hi = b1 >> 4;
+            let lo = b1 & 0x0F;
+            for k in 0..b0 {
+                if k & 1 == 0 {
+                    put_pixel!(hi);
+                } else {
+                    put_pixel!(lo);
+                }
+            }
+        } else {
+            match b1 {
+                0x00 => {
+                    // End of line.
+                    x = 0;
+                    y += 1;
+                }
+                0x01 => {
+                    // End of bitmap.
+                    break;
+                }
+                0x02 => {
+                    // Delta.
+                    if i + 2 > data.len() {
+                        return Err(Error::invalid("BMP RLE4: delta truncated"));
+                    }
+                    x += data[i] as usize;
+                    y += data[i + 1] as usize;
+                    i += 2;
+                }
+                count => {
+                    // Absolute mode: `count` nibbles follow in packed bytes.
+                    let count = count as usize;
+                    let packed_bytes = count.div_ceil(2);
+                    if i + packed_bytes > data.len() {
+                        return Err(Error::invalid("BMP RLE4: absolute run truncated"));
+                    }
+                    for k in 0..count {
+                        let byte = data[i + k / 2];
+                        let nib = if k & 1 == 0 { byte >> 4 } else { byte & 0x0F };
+                        put_pixel!(nib);
+                    }
+                    i += packed_bytes;
+                    // Padded to word boundary (in bytes).
+                    if packed_bytes & 1 != 0 {
+                        i += 1;
+                    }
+                }
+            }
         }
     }
     Ok(rows)

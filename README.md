@@ -11,7 +11,9 @@ sub-images.
 | --------- | -------------- | ---------- |
 | 1         | `BI_RGB`       | `Rgba`     |
 | 4         | `BI_RGB`       | `Rgba`     |
+| 4         | `BI_RLE4`      | `Rgba` (delta + absolute mode) |
 | 8         | `BI_RGB`       | `Rgba`     |
+| 8         | `BI_RLE8`      | `Rgba` (delta + absolute mode) |
 | 16        | `BI_RGB`       | `Rgba` (5-5-5) |
 | 16        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
 | 24        | `BI_RGB`       | `Rgba` (BGR→RGB, α=0xFF) |
@@ -20,14 +22,26 @@ sub-images.
 
 `BITMAPINFOHEADER` (v3, 40 B), `BITMAPV4HEADER`, and `BITMAPV5HEADER`
 are all accepted. Bottom-up and top-down row orders are auto-detected
-from the sign of `biHeight`; output is always top-down. `BI_RLE4`,
-`BI_RLE8`, `BI_JPEG`, and `BI_PNG` are rejected at the boundary.
+from the sign of `biHeight`; output is always top-down. `BI_JPEG` and
+`BI_PNG` are rejected at the boundary.
 
 ## Encode
 
-Always writes **32-bit BGRA `BI_RGB`** — the simplest layout that
-preserves alpha without a `BI_BITFIELDS` negotiation. Input may be
-`Rgba` or `Rgb24` (the latter is padded with `α=0xFF` at encode time).
+| Input format        | BMP output                    | Header |
+| ------------------- | ----------------------------- | ------ |
+| `Rgba` (4 B/px)     | 32-bit BGRA `BI_RGB`          | V3     |
+| `Rgb24` (3 B/px)    | 24-bit BGR `BI_RGB`           | V3     |
+| `Rgb565` (2 B/px)   | 16-bit `BI_BITFIELDS` 5-6-5   | V4     |
+| `Indexed8` (1 B/px) | 8-bit indexed `BI_RGB` or `BI_RLE8` (auto) | V3 |
+| `Indexed4` (1 B/px) | 4-bit indexed `BI_RGB` or `BI_RLE4` (auto) | V3 |
+
+For `Rgb565` the V4 header carries canonical masks R=0xF800, G=0x07E0,
+B=0x001F. For indexed formats the encoder tries RLE compression first
+and falls back to uncompressed when RLE does not shrink the output.
+
+`Indexed8` and `Indexed4` require a `BmpPalette` alongside the image.
+Up to 256 (8-bit) or 16 (4-bit) entries; unused entries are
+zero-padded in the on-disk colour table.
 
 ## DIB helpers for `.ico`
 

@@ -16,12 +16,40 @@
 /// don't need to know the on-disk quirks). The encoder accepts
 /// [`Rgba`](Self::Rgba) (passes alpha through) or [`Rgb24`](Self::Rgb24)
 /// (alpha defaulted to `0xFF`).
+///
+/// Additional encode-only formats:
+/// * [`Rgb565`](Self::Rgb565) — 16-bit RGB 5-6-5, emit as BI_BITFIELDS V4.
+/// * [`Indexed8`](Self::Indexed8) — 8-bit palette index; the caller must
+///   supply a [`BmpPalette`] alongside the plane.
+/// * [`Indexed4`](Self::Indexed4) — 4-bit palette index (hi-nibble = left
+///   pixel); caller must supply a [`BmpPalette`] of up to 16 entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BmpPixelFormat {
     /// 8-bit packed RGBA, 4 bytes per pixel.
     Rgba,
     /// 8-bit packed RGB, 3 bytes per pixel (encode input only).
     Rgb24,
+    /// 16-bit RGB 5-6-5, 2 bytes per pixel (encode input only).
+    /// Emitted with a `BI_BITFIELDS` BITMAPV4HEADER and canonical masks
+    /// R=0xF800, G=0x07E0, B=0x001F.
+    Rgb565,
+    /// 8-bit palette index, 1 byte per pixel (encode input only).
+    /// Must be paired with a [`BmpPalette`] that owns the colour table.
+    Indexed8,
+    /// 4-bit palette index, hi-nibble = left pixel (encode input only).
+    /// Must be paired with a [`BmpPalette`] of up to 16 entries.
+    Indexed4,
+}
+
+/// A colour palette for use with indexed BMP formats.
+///
+/// Each entry is `[R, G, B]` (24-bit sRGB). Up to 256 entries for 8-bit
+/// mode; up to 16 for 4-bit mode. The encoder writes the entries in the
+/// BMP on-disk order (B, G, R, 0x00).
+#[derive(Debug, Clone, Default)]
+pub struct BmpPalette {
+    /// Colour entries in `[R, G, B]` order.
+    pub entries: Vec<[u8; 3]>,
 }
 
 /// One image plane: row-major bytes plus the row stride in bytes.
@@ -53,6 +81,10 @@ pub struct BmpImage {
     /// One [`BmpPlane`] per plane. BMP always packs into a single plane
     /// today, so this is always `len() == 1`.
     pub planes: Vec<BmpPlane>,
+    /// Colour table for indexed pixel formats ([`BmpPixelFormat::Indexed8`]
+    /// and [`BmpPixelFormat::Indexed4`]). `None` for direct-colour
+    /// formats and on the decode path (which always produces `Rgba`).
+    pub palette: Option<BmpPalette>,
     /// Optional presentation timestamp. Always `None` from the
     /// standalone decode path.
     pub pts: Option<i64>,
