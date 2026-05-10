@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.3...v0.1.4) - 2026-05-05
+
+### Other
+
+- fix clippy::ptr_arg in magick_validate (use &Path not &PathBuf)
+- add 24-bit / 16-bit RGB565 / indexed-8 / indexed-4 / RLE8 / RLE4 write paths
+
 ### Added
 
 - **Decoder**: `BI_RLE8` and `BI_RLE4` decode support. Both encoded-run
