@@ -46,14 +46,17 @@ pub const CODEC_ID_STR: &str = "bmp";
 pub use decoder::{decode_bmp, decode_dib};
 #[cfg(feature = "registry")]
 pub use decoder::{decode_bmp_videoframe, decode_dib_videoframe};
-pub use encoder::{encode_bmp, encode_bmp_plane, encode_dib, encode_dib_plane, EncodedBmpFormat};
+pub use encoder::{
+    encode_bmp, encode_bmp_plane, encode_bmp_plane_with_options, encode_bmp_with_options,
+    encode_dib, encode_dib_plane, BmpEncodeOptions, EncodedBmpFormat,
+};
 #[cfg(feature = "registry")]
 pub use encoder::{encode_bmp_videoframe, encode_dib_videoframe};
 pub use error::{BmpError, Result};
 pub use image::{BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
 pub use types::{
-    row_stride, DibHeader, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE,
-    BITMAPV5HEADER_SIZE, BI_BITFIELDS, BI_RGB, BMP_MAGIC,
+    row_stride, DibHeader, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE,
+    BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_BITFIELDS, BI_RGB, BMP_MAGIC,
 };
 
 #[cfg(feature = "registry")]
@@ -460,6 +463,210 @@ mod tests {
     // -----------------------------------------------------------------------
     // V4 header dimensions in encoded 16-bit file.
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Top-down DIB encoder
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encode_top_down_rgba_negative_height_and_roundtrip() {
+        let (src, w, h) = rgba_checker(8, 6);
+        let (bytes, fmt) =
+            encode_bmp_with_options(&src, BmpEncodeOptions { top_down: true }).unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Rgb32);
+        assert_eq!(&bytes[..2], b"BM");
+        // V3 header at file offset 14; biHeight is i32 at offset 22.
+        let stored_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(stored_h, -(h as i32), "top-down DIB must encode -biHeight");
+
+        // Decode should produce the same top-down Rgba pixels we put in.
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.width, w);
+        assert_eq!(back.height, h);
+        assert_eq!(back.planes[0].data, src.planes[0].data);
+    }
+
+    #[test]
+    fn encode_top_down_rgb24_roundtrip() {
+        let src = rgb24_checker(8, 6);
+        let (bytes, fmt) =
+            encode_bmp_with_options(&src, BmpEncodeOptions { top_down: true }).unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Rgb24);
+        let stored_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(stored_h, -6);
+        let back = decode_bmp(&bytes).unwrap();
+        // (0,0) should be red.
+        assert_eq!(&back.planes[0].data[..4], &[255u8, 0, 0, 255]);
+    }
+
+    #[test]
+    fn encode_top_down_indexed8_skips_rle() {
+        // Run-heavy image — bottom-up would emit RLE8, top-down must
+        // fall back to uncompressed since RLE + negative height is
+        // disallowed by the BMP spec.
+        let w = 32u32;
+        let h = 16u32;
+        let mut data = Vec::with_capacity(w as usize * h as usize);
+        for y in 0..h {
+            for _ in 0..w {
+                data.push((y % 4) as u8);
+            }
+        }
+        let palette = BmpPalette {
+            entries: vec![[255, 0, 0], [0, 255, 0], [0, 0, 255], [128, 128, 128]],
+        };
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane {
+                stride: w as usize,
+                data,
+            }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let (bytes, fmt) =
+            encode_bmp_with_options(&src, BmpEncodeOptions { top_down: true }).unwrap();
+        assert_eq!(
+            fmt,
+            EncodedBmpFormat::Indexed8,
+            "top-down must force uncompressed indexed"
+        );
+        let stored_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(stored_h, -(h as i32));
+        // Roundtrip: (0,0) in top-down output → first row of source →
+        // y=0 → index 0 → red.
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(&back.planes[0].data[..4], &[255u8, 0, 0, 255]);
+    }
+
+    // -----------------------------------------------------------------------
+    // OS/2 BITMAPCOREHEADER (12-byte) decode
+    // -----------------------------------------------------------------------
+
+    /// Hand-assemble a 4×2 RGB 24-bit BMP that uses the OS/2 1.x
+    /// `BITMAPCOREHEADER` instead of the V3 header. Rows are bottom-up
+    /// per the OS/2 spec (no negative-height support in this header).
+    fn build_os2_24bpp_bmp(w: u32, h: u32, pixels_top_down_rgb: &[(u8, u8, u8)]) -> Vec<u8> {
+        let row_stride = (w as usize * 3).div_ceil(4) * 4;
+        // Pixel array, bottom-up BGR.
+        let mut pixel_array = vec![0u8; row_stride * h as usize];
+        for y in 0..h as usize {
+            let src_y = h as usize - 1 - y;
+            let row = &mut pixel_array[y * row_stride..y * row_stride + row_stride];
+            for x in 0..w as usize {
+                let (r, g, b) = pixels_top_down_rgb[src_y * w as usize + x];
+                row[x * 3] = b;
+                row[x * 3 + 1] = g;
+                row[x * 3 + 2] = r;
+            }
+        }
+        // BITMAPFILEHEADER (14 B) + BITMAPCOREHEADER (12 B) + pixels.
+        let pixel_offset = 14u32 + BITMAPCOREHEADER_SIZE;
+        let file_size = pixel_offset + pixel_array.len() as u32;
+        let mut out = Vec::with_capacity(file_size as usize);
+        // 'BM'
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&pixel_offset.to_le_bytes());
+        // BITMAPCOREHEADER.
+        out.extend_from_slice(&BITMAPCOREHEADER_SIZE.to_le_bytes());
+        out.extend_from_slice(&(w as u16).to_le_bytes());
+        out.extend_from_slice(&(h as u16).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // planes
+        out.extend_from_slice(&24u16.to_le_bytes()); // bcBitCount
+        out.extend_from_slice(&pixel_array);
+        out
+    }
+
+    /// Hand-assemble a 4×4 OS/2 1.x 4-bit indexed BMP. Palette
+    /// entries are 3-byte RGBTRIPLE (not RGBQUAD).
+    fn build_os2_4bpp_bmp(w: u32, h: u32, indices_top_down: &[u8], palette: &[[u8; 3]]) -> Vec<u8> {
+        assert!(palette.len() <= 16);
+        let row_stride = (w as usize * 4).div_ceil(32) * 4;
+        let mut pixel_array = vec![0u8; row_stride * h as usize];
+        for y in 0..h as usize {
+            let src_y = h as usize - 1 - y;
+            let row = &mut pixel_array[y * row_stride..];
+            for x in 0..w as usize {
+                let idx = indices_top_down[src_y * w as usize + x] & 0x0F;
+                if x & 1 == 0 {
+                    row[x / 2] = idx << 4;
+                } else {
+                    row[x / 2] |= idx;
+                }
+            }
+        }
+        let palette_bytes = 16 * 3; // OS/2 always emits 2^bpp entries × RGBTRIPLE.
+        let pixel_offset = 14u32 + BITMAPCOREHEADER_SIZE + palette_bytes;
+        let file_size = pixel_offset + pixel_array.len() as u32;
+        let mut out = Vec::with_capacity(file_size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&pixel_offset.to_le_bytes());
+        // BITMAPCOREHEADER.
+        out.extend_from_slice(&BITMAPCOREHEADER_SIZE.to_le_bytes());
+        out.extend_from_slice(&(w as u16).to_le_bytes());
+        out.extend_from_slice(&(h as u16).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&4u16.to_le_bytes());
+        // Palette: 3 bytes/entry, on-disk order B, G, R, padded to 16
+        // entries even if the caller passes fewer.
+        for i in 0..16 {
+            if let Some(rgb) = palette.get(i) {
+                out.push(rgb[2]); // B
+                out.push(rgb[1]); // G
+                out.push(rgb[0]); // R
+            } else {
+                out.extend_from_slice(&[0, 0, 0]);
+            }
+        }
+        out.extend_from_slice(&pixel_array);
+        out
+    }
+
+    #[test]
+    fn decode_os2_bitmapcoreheader_24bpp() {
+        // 4×2 image: top row = red, bottom row = blue.
+        let w = 4u32;
+        let h = 2u32;
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        pixels.resize(w as usize, (255u8, 0, 0));
+        pixels.resize(2 * w as usize, (0u8, 0, 255));
+        let bytes = build_os2_24bpp_bmp(w, h, &pixels);
+        let img = decode_bmp(&bytes).unwrap();
+        assert_eq!(img.width, w);
+        assert_eq!(img.height, h);
+        // Output is top-down Rgba: row 0 should be red.
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+        // Row 1, x=0: blue.
+        let stride = img.planes[0].stride;
+        assert_eq!(&img.planes[0].data[stride..stride + 4], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn decode_os2_bitmapcoreheader_4bpp_indexed() {
+        // 4×2 image: top row index 0 (red), bottom row index 1 (green).
+        let w = 4u32;
+        let h = 2u32;
+        let mut indices = Vec::with_capacity((w * h) as usize);
+        indices.resize(w as usize, 0u8);
+        indices.resize(2 * w as usize, 1u8);
+        let palette: &[[u8; 3]] = &[[255, 0, 0], [0, 255, 0]];
+        let bytes = build_os2_4bpp_bmp(w, h, &indices, palette);
+        let img = decode_bmp(&bytes).unwrap();
+        assert_eq!(img.width, w);
+        assert_eq!(img.height, h);
+        // Row 0 → red, row 1 → green (output is top-down).
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+        let stride = img.planes[0].stride;
+        assert_eq!(&img.planes[0].data[stride..stride + 4], &[0, 255, 0, 255]);
+    }
 
     #[test]
     fn rgb565_header_dimensions() {

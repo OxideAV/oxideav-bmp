@@ -16,6 +16,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Decoder**: OS/2 1.x `BITMAPCOREHEADER` (12-byte) read support. The
+  alternate 12-byte header layout is recognised alongside the 40 / 108 /
+  124-byte variants; `u16` width / height fields and 3-byte `RGBTRIPLE`
+  palette entries are decoded into the same `BmpImage` shape as every
+  other path. Negative heights are not legal in this header so the
+  decoder always treats OS/2 input as bottom-up.
+- **Encoder**: Top-down DIB output via `encode_bmp_with_options` /
+  `encode_bmp_plane_with_options` and the new `BmpEncodeOptions`
+  struct. Setting `top_down: true` writes rows top-to-bottom with a
+  negative `biHeight` per the BMP spec. Indexed formats fall back to
+  uncompressed `BI_RGB` when `top_down` is requested since RLE
+  streams with a negative height are spec-illegal.
+- `BmpEncodeOptions` (currently exposes `top_down: bool`) and the
+  matching `encode_bmp_with_options` / `encode_bmp_plane_with_options`
+  entry points. The existing `encode_bmp` / `encode_bmp_plane`
+  remain unchanged — they call the new entry points with
+  `BmpEncodeOptions::default()`.
+- `BITMAPCOREHEADER_SIZE` public constant exposed from the crate
+  root.
+- Tests: `decode_os2_bitmapcoreheader_24bpp`,
+  `decode_os2_bitmapcoreheader_4bpp_indexed`,
+  `encode_top_down_rgba_negative_height_and_roundtrip`,
+  `encode_top_down_rgb24_roundtrip`,
+  `encode_top_down_indexed8_skips_rle`. ImageMagick cross-validation
+  test `magick_top_down_rgba` verifies magick honours the negative
+  `biHeight` on our output.
 - **Decoder**: `BI_RLE8` and `BI_RLE4` decode support. Both encoded-run
   and absolute-mode packets are handled; delta (`0x02`) escape codes are
   also accepted. Output is always top-down `Rgba`, same as every other

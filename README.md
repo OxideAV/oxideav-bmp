@@ -20,10 +20,12 @@ sub-images.
 | 32        | `BI_RGB`       | `Rgba` (BGRA→RGBA) |
 | 32        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
 
-`BITMAPINFOHEADER` (v3, 40 B), `BITMAPV4HEADER`, and `BITMAPV5HEADER`
-are all accepted. Bottom-up and top-down row orders are auto-detected
-from the sign of `biHeight`; output is always top-down. `BI_JPEG` and
-`BI_PNG` are rejected at the boundary.
+`BITMAPCOREHEADER` (OS/2 1.x, 12 B), `BITMAPINFOHEADER` (v3, 40 B),
+`BITMAPV4HEADER`, and `BITMAPV5HEADER` are all accepted. The OS/2 path
+honours the 3-byte `RGBTRIPLE` colour-table layout (V3+ uses 4-byte
+`RGBQUAD`). Bottom-up and top-down row orders are auto-detected from
+the sign of `biHeight`; output is always top-down `Rgba`. `BI_JPEG`
+and `BI_PNG` are rejected at the boundary.
 
 ## Encode
 
@@ -42,6 +44,16 @@ and falls back to uncompressed when RLE does not shrink the output.
 `Indexed8` and `Indexed4` require a `BmpPalette` alongside the image.
 Up to 256 (8-bit) or 16 (4-bit) entries; unused entries are
 zero-padded in the on-disk colour table.
+
+### Top-down DIB output
+
+`encode_bmp_with_options(&image, BmpEncodeOptions { top_down: true })`
+emits a top-down DIB — rows stored top-to-bottom, `biHeight` written
+as a negative integer per the BMP signed-height convention.
+Compatible with `Rgba` / `Rgb24` / `Rgb565` / `Indexed8` / `Indexed4`;
+the indexed paths force the uncompressed fall-back when `top_down`
+is set since RLE escape codes have no defined meaning under a
+negative `biHeight`.
 
 ## DIB helpers for `.ico`
 

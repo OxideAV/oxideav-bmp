@@ -8,7 +8,10 @@
 //! Skipped automatically when ImageMagick is not installed (CI typically
 //! has it; dev machines may not).
 
-use oxideav_bmp::{decode_bmp, encode_bmp, BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
+use oxideav_bmp::{
+    decode_bmp, encode_bmp, encode_bmp_with_options, BmpEncodeOptions, BmpImage, BmpPalette,
+    BmpPixelFormat, BmpPlane,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -362,4 +365,55 @@ fn magick_rle4_encode() {
 
     let back = decode_bmp(&bytes).unwrap();
     assert_eq!(&back.planes[0].data[..4], &[0u8, 0, 255, 255]);
+}
+
+// ---------------------------------------------------------------------------
+// Top-down DIB: magick must read the negative-biHeight file correctly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn magick_top_down_rgba() {
+    if !magick_available() {
+        return;
+    }
+
+    let w = 8u32;
+    let h = 6u32;
+    // Top row red, bottom row blue — easy to tell flip mistakes apart.
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for _ in 0..w {
+            if y < h / 2 {
+                data.extend_from_slice(&[255u8, 0, 0, 255]);
+            } else {
+                data.extend_from_slice(&[0u8, 0, 255, 255]);
+            }
+        }
+    }
+    let src = BmpImage {
+        width: w,
+        height: h,
+        pixel_format: BmpPixelFormat::Rgba,
+        planes: vec![BmpPlane {
+            stride: w as usize * 4,
+            data,
+        }],
+        palette: None,
+        pts: None,
+    };
+    let (bytes, _) = encode_bmp_with_options(&src, BmpEncodeOptions { top_down: true }).unwrap();
+    let path = tmp_path("test_top_down.bmp");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let info = magick_identify(&path);
+    assert!(info.contains("BMP"), "not recognised as BMP: {info}");
+
+    // magick must see the top row as red, bottom row as blue — proving
+    // it honoured the negative biHeight.
+    let top = magick_pixel_rgba(&path, 0, 0);
+    let bottom = magick_pixel_rgba(&path, 0, h - 1);
+    assert_eq!(top[0], 255, "top should be red: {top:?}");
+    assert_eq!(top[2], 0, "top blue chan should be 0: {top:?}");
+    assert_eq!(bottom[2], 255, "bottom should be blue: {bottom:?}");
+    assert_eq!(bottom[0], 0, "bottom red chan should be 0: {bottom:?}");
 }

@@ -105,7 +105,10 @@ fn image_to_video_frame(image: BmpImage) -> VideoFrame {
 /// Decode a complete BMP file (`BM` signature + file header + DIB +
 /// pixels) into an `Rgba` [`BmpImage`].
 pub fn decode_bmp(input: &[u8]) -> Result<BmpImage> {
-    if input.len() < (BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE) as usize {
+    // Smallest legal DIB is the OS/2 1.x BITMAPCOREHEADER (12 B) on top
+    // of the 14-byte BITMAPFILEHEADER. Larger DIB variants are checked
+    // again inside `parse_dib_header` after reading the size field.
+    if input.len() < (BITMAPFILEHEADER_SIZE + BITMAPCOREHEADER_SIZE) as usize {
         return Err(Error::invalid("BMP: input shorter than header"));
     }
     let magic = read_u16_le(input, 0);
@@ -132,8 +135,10 @@ pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<
     // For a "pure" DIB, pixel data starts right after the header (plus
     // any bitfields masks and color table). Compute the offset the same
     // way `decode_bmp` does via `pixel_offset` so the two paths share
-    // the pixel-decode.
-    let color_table_bytes = (header.palette_entries() * 4) as u32;
+    // the pixel-decode. OS/2 BITMAPCOREHEADER uses 3-byte palette
+    // entries (RGBTRIPLE), every other variant uses 4-byte RGBQUAD.
+    let entry_size = palette_entry_bytes(&header) as u32;
+    let color_table_bytes = header.palette_entries() as u32 * entry_size;
     let masks_bytes =
         if header.compression == BI_BITFIELDS && header.header_size == BITMAPINFOHEADER_SIZE {
             12
@@ -184,10 +189,19 @@ fn decode_dib_with_offset(dib: &[u8], whole_file: &[u8], pixel_offset: usize) ->
 }
 
 fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
-    if input.len() < BITMAPINFOHEADER_SIZE as usize {
+    if input.len() < 4 {
         return Err(Error::invalid("BMP: DIB header truncated"));
     }
     let header_size = read_u32_le(input, 0);
+
+    // OS/2 1.x BITMAPCOREHEADER is the only sub-40-byte variant we
+    // accept. The layout is fundamentally different from the V3+
+    // headers (u16 width/height, no compression field, 3-byte palette
+    // entries) so we promote it to a synthesised DibHeader here.
+    if header_size == BITMAPCOREHEADER_SIZE {
+        return parse_bitmapcoreheader(input);
+    }
+
     if header_size < BITMAPINFOHEADER_SIZE {
         return Err(Error::invalid(format!(
             "BMP: unsupported header size {header_size}"
@@ -261,6 +275,59 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
             mask_a,
         },
         header_size as usize,
+    ))
+}
+
+/// Parse a 12-byte OS/2 `BITMAPCOREHEADER` into a [`DibHeader`].
+///
+/// The OS/2 1.x header is the only legitimate sub-40-byte DIB header.
+/// Layout (all little-endian):
+/// ```text
+///   off  0  u32  bcSize       (always 12)
+///   off  4  u16  bcWidth      (unsigned — no top-down support)
+///   off  6  u16  bcHeight
+///   off  8  u16  bcPlanes     (must be 1)
+///   off 10  u16  bcBitCount   (1/4/8/24)
+/// ```
+/// There is no compression / image-size / DPI / clr_used field; we
+/// fill them with zero. Colour-table entries that follow are 3-byte
+/// `RGBTRIPLE` not 4-byte `RGBQUAD`; the palette reader honours
+/// `header_size == 12` to switch entry stride.
+fn parse_bitmapcoreheader(input: &[u8]) -> Result<(DibHeader, usize)> {
+    if input.len() < BITMAPCOREHEADER_SIZE as usize {
+        return Err(Error::invalid("BMP: BITMAPCOREHEADER truncated"));
+    }
+    let width = read_u16_le(input, 4) as i32;
+    let height = read_u16_le(input, 6) as i32;
+    let planes = read_u16_le(input, 8);
+    let bpp = read_u16_le(input, 10);
+    if width <= 0 {
+        return Err(Error::invalid("BMP: BITMAPCOREHEADER zero width"));
+    }
+    if planes != 1 {
+        return Err(Error::invalid(format!(
+            "BMP: BITMAPCOREHEADER planes={planes} (must be 1)"
+        )));
+    }
+    Ok((
+        DibHeader {
+            header_size: BITMAPCOREHEADER_SIZE,
+            width,
+            height,
+            planes,
+            bpp,
+            compression: BI_RGB,
+            image_size: 0,
+            x_pels_per_meter: 0,
+            y_pels_per_meter: 0,
+            clr_used: 0,
+            clr_important: 0,
+            mask_r: None,
+            mask_g: None,
+            mask_b: None,
+            mask_a: None,
+        },
+        BITMAPCOREHEADER_SIZE as usize,
     ))
 }
 
@@ -398,6 +465,19 @@ fn decode_dib_with_mask(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Res
     Ok(image)
 }
 
+/// Bytes-per-palette-entry for a parsed DIB header.
+///
+/// V3+ headers store 4-byte `RGBQUAD` (B, G, R, reserved). The OS/2 1.x
+/// `BITMAPCOREHEADER` stores 3-byte `RGBTRIPLE` (B, G, R). This is the
+/// only place that difference matters for the decode pipeline.
+fn palette_entry_bytes(h: &DibHeader) -> usize {
+    if h.header_size == BITMAPCOREHEADER_SIZE {
+        3
+    } else {
+        4
+    }
+}
+
 fn read_palette(h: &DibHeader, whole: &[u8], _pixel_offset: usize) -> Result<Vec<[u8; 4]>> {
     let entries = h.palette_entries();
     if entries == 0 {
@@ -407,18 +487,20 @@ fn read_palette(h: &DibHeader, whole: &[u8], _pixel_offset: usize) -> Result<Vec
     // array. For a file BMP we're scanning from the start of the file;
     // for a DIB we're scanning from the DIB start. The caller has
     // already accounted for that in `_pixel_offset`; the palette bytes
-    // are `entries * 4` before it.
+    // are `entries * entry_size` before it. Entry stride is 4 (RGBQUAD)
+    // for V3+ and 3 (RGBTRIPLE) for OS/2 BITMAPCOREHEADER.
+    let entry_size = palette_entry_bytes(h);
     let palette_end = _pixel_offset;
     let palette_start = palette_end
-        .checked_sub(entries * 4)
+        .checked_sub(entries * entry_size)
         .ok_or_else(|| Error::invalid("BMP: palette extends past pixel offset"))?;
     if whole.len() < palette_end {
         return Err(Error::invalid("BMP: palette truncated"));
     }
     let mut out = Vec::with_capacity(entries);
     for e in 0..entries {
-        let off = palette_start + e * 4;
-        // On-disk order is B, G, R, reserved.
+        let off = palette_start + e * entry_size;
+        // On-disk order is B, G, R, (reserved for RGBQUAD only).
         out.push([whole[off + 2], whole[off + 1], whole[off], 0xFF]);
     }
     Ok(out)

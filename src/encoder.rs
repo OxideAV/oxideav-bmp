@@ -31,6 +31,28 @@ use oxideav_core::Encoder;
 #[cfg(feature = "registry")]
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, PixelFormat, TimeBase};
 
+/// Options that tune the BMP encoder beyond the format-picking that
+/// [`encode_bmp`] / [`encode_bmp_plane`] derive from
+/// [`BmpPixelFormat`]. Pass via [`encode_bmp_with_options`] or
+/// [`encode_bmp_plane_with_options`].
+///
+/// Defaults match the classic BMP convention: rows bottom-up,
+/// `biHeight` positive. Setting [`top_down`](Self::top_down) inverts
+/// the layout: rows are written top-down (no in-encoder flip) and
+/// the encoded `biHeight` field is the negative of the height per
+/// the BMP spec's signed-height convention. Top-down output is
+/// compatible with `BI_RGB` only (uncompressed direct-colour /
+/// uncompressed indexed and 16-bit `BI_BITFIELDS`); RLE-compressed
+/// payloads with negative heights are explicitly disallowed by the
+/// spec, so requesting top-down on `Indexed8` / `Indexed4` forces
+/// the uncompressed fall-back.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BmpEncodeOptions {
+    /// Emit a top-down DIB (rows stored top-to-bottom, encoded
+    /// `biHeight` is negative). Default: `false` (classic bottom-up).
+    pub top_down: bool,
+}
+
 /// Opaque token returned by [`encode_bmp`] and [`encode_bmp_plane`]
 /// that carries the actual compression used. Inspect with
 /// [`EncodedBmpFormat::compression`].
@@ -164,15 +186,31 @@ impl Encoder for BmpEncoder {
 ///
 /// Returns the encoded bytes and which format was actually emitted.
 pub fn encode_bmp(image: &BmpImage) -> Result<(Vec<u8>, EncodedBmpFormat)> {
+    encode_bmp_with_options(image, BmpEncodeOptions::default())
+}
+
+/// Same as [`encode_bmp`] but takes a [`BmpEncodeOptions`] so callers
+/// can request a top-down DIB layout (negative `biHeight`).
+///
+/// Top-down output is BMP-spec-compliant for uncompressed `BI_RGB` and
+/// `BI_BITFIELDS` only. When `options.top_down == true` and the chosen
+/// format would otherwise be `BI_RLE8` / `BI_RLE4`, the encoder falls
+/// back to the uncompressed indexed form regardless of which is
+/// smaller, since RLE + negative height is illegal per the spec.
+pub fn encode_bmp_with_options(
+    image: &BmpImage,
+    options: BmpEncodeOptions,
+) -> Result<(Vec<u8>, EncodedBmpFormat)> {
     if image.planes.is_empty() {
         return Err(Error::invalid("BMP encoder: empty frame plane"));
     }
-    encode_bmp_plane(
+    encode_bmp_plane_with_options(
         &image.planes[0],
         image.pixel_format,
         image.palette.as_ref(),
         image.width,
         image.height,
+        options,
     )
 }
 
@@ -191,28 +229,47 @@ pub fn encode_bmp_plane(
     width: u32,
     height: u32,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
+    encode_bmp_plane_with_options(
+        plane,
+        format,
+        palette,
+        width,
+        height,
+        BmpEncodeOptions::default(),
+    )
+}
+
+/// Plane-level variant of [`encode_bmp_with_options`].
+pub fn encode_bmp_plane_with_options(
+    plane: &BmpPlane,
+    format: BmpPixelFormat,
+    palette: Option<&BmpPalette>,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<(Vec<u8>, EncodedBmpFormat)> {
     match format {
         BmpPixelFormat::Rgba => {
-            let bytes = encode_direct(plane, format, width, height, BI_RGB, None)?;
+            let bytes = encode_direct(plane, format, width, height, BI_RGB, None, options)?;
             Ok((bytes, EncodedBmpFormat::Rgb32))
         }
         BmpPixelFormat::Rgb24 => {
-            let bytes = encode_direct(plane, format, width, height, BI_RGB, None)?;
+            let bytes = encode_direct(plane, format, width, height, BI_RGB, None, options)?;
             Ok((bytes, EncodedBmpFormat::Rgb24))
         }
         BmpPixelFormat::Rgb565 => {
-            let bytes = encode_rgb565(plane, width, height)?;
+            let bytes = encode_rgb565(plane, width, height, options)?;
             Ok((bytes, EncodedBmpFormat::Rgb16Bitfields))
         }
         BmpPixelFormat::Indexed8 => {
             let pal = palette
                 .ok_or_else(|| Error::invalid("BMP encoder: Indexed8 requires a palette"))?;
-            encode_indexed8_auto(plane, pal, width, height)
+            encode_indexed8_auto(plane, pal, width, height, options)
         }
         BmpPixelFormat::Indexed4 => {
             let pal = palette
                 .ok_or_else(|| Error::invalid("BMP encoder: Indexed4 requires a palette"))?;
-            encode_indexed4_auto(plane, pal, width, height)
+            encode_indexed4_auto(plane, pal, width, height, options)
         }
     }
 }
@@ -332,17 +389,24 @@ pub fn encode_dib_plane(
     height: u32,
     double_height_for_ico_mask: bool,
 ) -> Result<Vec<u8>> {
+    // DIB path is always bottom-up (the AND-mask convention assumes
+    // bottom-up XOR pixels; nothing in `oxideav-ico` requests top-down).
+    let opts = BmpEncodeOptions::default();
     match format {
         BmpPixelFormat::Rgba | BmpPixelFormat::Rgb24 => {
             // Classic 32-bpp BGRA DIB path (used by oxideav-ico).
-            let (pixels, _) = pack_rgba(plane, format, width, height)?;
+            let (pixels, _) = pack_rgba(plane, format, width, height, opts)?;
             let w = width;
             let h = height;
             let mut out = Vec::new();
             write_dib_header_v3(
                 &mut out,
                 w,
-                if double_height_for_ico_mask { h * 2 } else { h },
+                if double_height_for_ico_mask {
+                    (h * 2) as i32
+                } else {
+                    h as i32
+                },
                 32,
                 BI_RGB,
                 0,
@@ -356,12 +420,12 @@ pub fn encode_dib_plane(
         BmpPixelFormat::Rgb565 => {
             // 16-bit DIB — no ICO mask support for 16-bit (alpha is
             // meaningless in 5-6-5 anyway).
-            let (pixels, _) = pack_rgb565(plane, width, height)?;
+            let (pixels, _) = pack_rgb565(plane, width, height, opts)?;
             let mut out = Vec::new();
             let stored_h = if double_height_for_ico_mask {
-                height * 2
+                (height * 2) as i32
             } else {
-                height
+                height as i32
             };
             write_dib_header_v4_bitfields(&mut out, width, stored_h);
             out.extend_from_slice(&pixels);
@@ -370,11 +434,11 @@ pub fn encode_dib_plane(
         BmpPixelFormat::Indexed8 => {
             let pal = palette
                 .ok_or_else(|| Error::invalid("BMP encoder: Indexed8 requires a palette"))?;
-            let (pixels, _) = pack_indexed(plane, 8, width, height)?;
+            let (pixels, _) = pack_indexed(plane, 8, width, height, opts)?;
             let stored_h = if double_height_for_ico_mask {
-                height * 2
+                (height * 2) as i32
             } else {
-                height
+                height as i32
             };
             let mut out = Vec::new();
             write_dib_header_v3_indexed(&mut out, width, stored_h, 8, BI_RGB, pal);
@@ -384,11 +448,11 @@ pub fn encode_dib_plane(
         BmpPixelFormat::Indexed4 => {
             let pal = palette
                 .ok_or_else(|| Error::invalid("BMP encoder: Indexed4 requires a palette"))?;
-            let (pixels, _) = pack_indexed(plane, 4, width, height)?;
+            let (pixels, _) = pack_indexed(plane, 4, width, height, opts)?;
             let stored_h = if double_height_for_ico_mask {
-                height * 2
+                (height * 2) as i32
             } else {
-                height
+                height as i32
             };
             let mut out = Vec::new();
             write_dib_header_v3_indexed(&mut out, width, stored_h, 4, BI_RGB, pal);
@@ -402,6 +466,17 @@ pub fn encode_dib_plane(
 // Per-format encode helpers
 // ---------------------------------------------------------------------------
 
+/// Stored signed `biHeight` for a given output height + layout choice.
+/// Bottom-up DIBs encode the absolute height; top-down DIBs encode its
+/// negation per the BMP spec's signed-height convention.
+fn signed_stored_height(h: u32, options: BmpEncodeOptions) -> i32 {
+    if options.top_down {
+        -(h as i32)
+    } else {
+        h as i32
+    }
+}
+
 /// Encode 32-bit BGRA or 24-bit BGR `BI_RGB` BMP (no palette).
 fn encode_direct(
     plane: &BmpPlane,
@@ -410,14 +485,15 @@ fn encode_direct(
     height: u32,
     compression: u32,
     _palette: Option<&BmpPalette>,
+    options: BmpEncodeOptions,
 ) -> Result<Vec<u8>> {
     let (pixels, bpp) = match format {
         BmpPixelFormat::Rgba => {
-            let (p, _) = pack_rgba(plane, format, width, height)?;
+            let (p, _) = pack_rgba(plane, format, width, height, options)?;
             (p, 32u16)
         }
         BmpPixelFormat::Rgb24 => {
-            let (p, _) = pack_rgb24(plane, width, height)?;
+            let (p, _) = pack_rgb24(plane, width, height, options)?;
             (p, 24u16)
         }
         _ => return Err(Error::invalid("BMP encode_direct: unsupported format")),
@@ -430,14 +506,26 @@ fn encode_direct(
         file_size,
         BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE,
     );
-    write_dib_header_v3(&mut out, width, height, bpp, compression, 0);
+    write_dib_header_v3(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        bpp,
+        compression,
+        0,
+    );
     out.extend_from_slice(&pixels);
     Ok(out)
 }
 
 /// Encode 16-bit RGB 5-6-5 BI_BITFIELDS (V4 header) BMP.
-fn encode_rgb565(plane: &BmpPlane, width: u32, height: u32) -> Result<Vec<u8>> {
-    let (pixels, _) = pack_rgb565(plane, width, height)?;
+fn encode_rgb565(
+    plane: &BmpPlane,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    let (pixels, _) = pack_rgb565(plane, width, height, options)?;
     let pixel_bytes = pixels.len() as u32;
     // V4 header = 108 bytes; no separate bitfield mask block needed
     // (masks live inside the V4 header at offsets 40-55).
@@ -445,52 +533,61 @@ fn encode_rgb565(plane: &BmpPlane, width: u32, height: u32) -> Result<Vec<u8>> {
     let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV4HEADER_SIZE;
     let mut out = Vec::with_capacity(file_size as usize);
     write_file_header(&mut out, file_size, pixel_offset);
-    write_dib_header_v4_bitfields(&mut out, width, height);
+    write_dib_header_v4_bitfields(&mut out, width, signed_stored_height(height, options));
     out.extend_from_slice(&pixels);
     Ok(out)
 }
 
 /// Encode 8-bit indexed with auto RLE (picks whichever is smaller).
+///
+/// When `options.top_down == true`, RLE is unconditionally skipped:
+/// BMP RLE streams describe a bottom-up scan with `(end-of-line,
+/// delta, end-of-bitmap)` escape codes that have no defined meaning
+/// under a negative `biHeight`. Fall back to the uncompressed indexed
+/// path so the output stays spec-compliant.
 fn encode_indexed8_auto(
     plane: &BmpPlane,
     palette: &BmpPalette,
     width: u32,
     height: u32,
+    options: BmpEncodeOptions,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
-    let (raw_pixels, _) = pack_indexed(plane, 8, width, height)?;
+    let (raw_pixels, _) = pack_indexed(plane, 8, width, height, options)?;
 
-    // Try RLE8.
-    let rle_pixels = rle8_encode(&raw_pixels, width, height);
-
-    // Pick the smaller payload.
-    if rle_pixels.len() < raw_pixels.len() {
-        let file = build_indexed_bmp(width, height, 8, BI_RLE8, palette, &rle_pixels);
-        Ok((file, EncodedBmpFormat::Rle8))
-    } else {
-        let file = build_indexed_bmp(width, height, 8, BI_RGB, palette, &raw_pixels);
-        Ok((file, EncodedBmpFormat::Indexed8))
+    if !options.top_down {
+        // Try RLE8 only when bottom-up.
+        let rle_pixels = rle8_encode(&raw_pixels, width, height);
+        if rle_pixels.len() < raw_pixels.len() {
+            let file = build_indexed_bmp(width, height, 8, BI_RLE8, palette, &rle_pixels, options);
+            return Ok((file, EncodedBmpFormat::Rle8));
+        }
     }
+    let file = build_indexed_bmp(width, height, 8, BI_RGB, palette, &raw_pixels, options);
+    Ok((file, EncodedBmpFormat::Indexed8))
 }
 
 /// Encode 4-bit indexed with auto RLE (picks whichever is smaller).
+///
+/// Top-down skips RLE for the same reason as
+/// [`encode_indexed8_auto`].
 fn encode_indexed4_auto(
     plane: &BmpPlane,
     palette: &BmpPalette,
     width: u32,
     height: u32,
+    options: BmpEncodeOptions,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
-    let (raw_pixels, _) = pack_indexed(plane, 4, width, height)?;
+    let (raw_pixels, _) = pack_indexed(plane, 4, width, height, options)?;
 
-    // Try RLE4.
-    let rle_pixels = rle4_encode(&raw_pixels, width, height);
-
-    if rle_pixels.len() < raw_pixels.len() {
-        let file = build_indexed_bmp(width, height, 4, BI_RLE4, palette, &rle_pixels);
-        Ok((file, EncodedBmpFormat::Rle4))
-    } else {
-        let file = build_indexed_bmp(width, height, 4, BI_RGB, palette, &raw_pixels);
-        Ok((file, EncodedBmpFormat::Indexed4))
+    if !options.top_down {
+        let rle_pixels = rle4_encode(&raw_pixels, width, height);
+        if rle_pixels.len() < raw_pixels.len() {
+            let file = build_indexed_bmp(width, height, 4, BI_RLE4, palette, &rle_pixels, options);
+            return Ok((file, EncodedBmpFormat::Rle4));
+        }
     }
+    let file = build_indexed_bmp(width, height, 4, BI_RGB, palette, &raw_pixels, options);
+    Ok((file, EncodedBmpFormat::Indexed4))
 }
 
 /// Assemble a complete BMP file for indexed data.
@@ -501,6 +598,7 @@ fn build_indexed_bmp(
     compression: u32,
     palette: &BmpPalette,
     pixel_data: &[u8],
+    options: BmpEncodeOptions,
 ) -> Vec<u8> {
     let palette_bytes = (palette_entry_count(bpp) * 4) as u32;
     let pixel_bytes = pixel_data.len() as u32;
@@ -508,7 +606,14 @@ fn build_indexed_bmp(
     let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE + palette_bytes;
     let mut out = Vec::with_capacity(file_size as usize);
     write_file_header(&mut out, file_size, pixel_offset);
-    write_dib_header_v3_indexed(&mut out, width, height, bpp, compression, palette);
+    write_dib_header_v3_indexed(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        bpp,
+        compression,
+        palette,
+    );
     out.extend_from_slice(pixel_data);
     out
 }
@@ -517,12 +622,28 @@ fn build_indexed_bmp(
 // Pixel-packing helpers
 // ---------------------------------------------------------------------------
 
-/// Pack RGBA or RGB24 input to 32-bit BGRA bottom-up rows.
+/// Map output row index `y` to its source row in the caller's plane.
+/// Bottom-up DIBs read source bottom-first so the destination row 0
+/// in the BMP file holds the bottom of the picture. Top-down DIBs
+/// preserve source ordering — destination row 0 IS source row 0.
+#[inline]
+fn source_row(y: usize, h: usize, options: BmpEncodeOptions) -> usize {
+    if options.top_down {
+        y
+    } else {
+        h - 1 - y
+    }
+}
+
+/// Pack RGBA or RGB24 input to 32-bit BGRA rows. The output row order
+/// matches the layout requested by `options` — bottom-up by default,
+/// top-down when `options.top_down` is set.
 fn pack_rgba(
     plane: &BmpPlane,
     format: BmpPixelFormat,
     width: u32,
     height: u32,
+    options: BmpEncodeOptions,
 ) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
@@ -538,7 +659,7 @@ fn pack_rgba(
     let out_stride = w * 4;
     let mut out = vec![0u8; out_stride * h];
     for y in 0..h {
-        let src_y = h - 1 - y; // bottom-up
+        let src_y = source_row(y, h, options);
         let src = &plane.data[src_y * in_stride..src_y * in_stride + w * in_bpp];
         let dst = &mut out[y * out_stride..y * out_stride + out_stride];
         for x in 0..w {
@@ -556,8 +677,14 @@ fn pack_rgba(
     Ok((out, out_stride))
 }
 
-/// Pack RGBA or RGB24 input to 24-bit BGR bottom-up rows (4-byte row aligned).
-fn pack_rgb24(plane: &BmpPlane, width: u32, height: u32) -> Result<(Vec<u8>, usize)> {
+/// Pack RGBA or RGB24 input to 24-bit BGR rows (4-byte row aligned).
+/// Row order honours `options.top_down`.
+fn pack_rgb24(
+    plane: &BmpPlane,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = plane.stride;
@@ -570,7 +697,7 @@ fn pack_rgb24(plane: &BmpPlane, width: u32, height: u32) -> Result<(Vec<u8>, usi
     let out_stride = row_stride(w, 24);
     let mut out = vec![0u8; out_stride * h];
     for y in 0..h {
-        let src_y = h - 1 - y;
+        let src_y = source_row(y, h, options);
         let src = &plane.data[src_y * in_stride..src_y * in_stride + w * in_bpp];
         let dst = &mut out[y * out_stride..y * out_stride + w * 3];
         for x in 0..w {
@@ -583,9 +710,15 @@ fn pack_rgb24(plane: &BmpPlane, width: u32, height: u32) -> Result<(Vec<u8>, usi
     Ok((out, out_stride))
 }
 
-/// Pack 16-bit RGB565 input (2 bytes/px, little-endian) to bottom-up
-/// rows (4-byte padded). Passes through the 16-bit pixels verbatim.
-fn pack_rgb565(plane: &BmpPlane, width: u32, height: u32) -> Result<(Vec<u8>, usize)> {
+/// Pack 16-bit RGB565 input (2 bytes/px, little-endian) to row-padded
+/// output rows. Row order honours `options.top_down`. Passes through
+/// the 16-bit pixels verbatim.
+fn pack_rgb565(
+    plane: &BmpPlane,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = plane.stride;
@@ -597,7 +730,7 @@ fn pack_rgb565(plane: &BmpPlane, width: u32, height: u32) -> Result<(Vec<u8>, us
     let out_stride = row_stride(w, 16);
     let mut out = vec![0u8; out_stride * h];
     for y in 0..h {
-        let src_y = h - 1 - y;
+        let src_y = source_row(y, h, options);
         let src = &plane.data[src_y * in_stride..src_y * in_stride + w * 2];
         let dst = &mut out[y * out_stride..y * out_stride + w * 2];
         dst.copy_from_slice(src);
@@ -605,13 +738,20 @@ fn pack_rgb565(plane: &BmpPlane, width: u32, height: u32) -> Result<(Vec<u8>, us
     Ok((out, out_stride))
 }
 
-/// Pack indexed pixel data to bottom-up rows with proper row padding.
+/// Pack indexed pixel data with proper row padding. Row order honours
+/// `options.top_down`.
 ///
 /// `bpp` must be 4 or 8.
 /// For 8-bit: input is 1 byte per pixel (index 0-255).
 /// For 4-bit: input is 1 byte per pixel (index 0-15); packing into
 ///   hi-nibble/lo-nibble is done here.
-fn pack_indexed(plane: &BmpPlane, bpp: usize, width: u32, height: u32) -> Result<(Vec<u8>, usize)> {
+fn pack_indexed(
+    plane: &BmpPlane,
+    bpp: usize,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = plane.stride;
@@ -623,7 +763,7 @@ fn pack_indexed(plane: &BmpPlane, bpp: usize, width: u32, height: u32) -> Result
     let out_stride = row_stride(w, bpp);
     let mut out = vec![0u8; out_stride * h];
     for y in 0..h {
-        let src_y = h - 1 - y;
+        let src_y = source_row(y, h, options);
         let src = &plane.data[src_y * in_stride..src_y * in_stride + w];
         let dst = &mut out[y * out_stride..];
         match bpp {
@@ -823,19 +963,20 @@ fn write_file_header(out: &mut Vec<u8>, file_size: u32, pixel_offset: u32) {
 /// Write a 40-byte BITMAPINFOHEADER (V3) for direct-colour or indexed
 /// (non-bitfields) BMPs. Palette entries follow immediately for indexed.
 ///
-/// `image_size` 0 is valid for uncompressed BI_RGB; pass the actual
-/// compressed byte count for RLE.
+/// `stored_height` is the signed BMP `biHeight` — positive for bottom-up
+/// layouts, negative for top-down. `image_size` 0 is valid for
+/// uncompressed `BI_RGB`; pass the actual compressed byte count for RLE.
 fn write_dib_header_v3(
     out: &mut Vec<u8>,
     w: u32,
-    stored_height: u32,
+    stored_height: i32,
     bpp: u16,
     compression: u32,
     image_size: u32,
 ) {
     out.extend_from_slice(&BITMAPINFOHEADER_SIZE.to_le_bytes());
     out.extend_from_slice(&(w as i32).to_le_bytes());
-    out.extend_from_slice(&(stored_height as i32).to_le_bytes());
+    out.extend_from_slice(&stored_height.to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes()); // planes
     out.extend_from_slice(&bpp.to_le_bytes());
     out.extend_from_slice(&compression.to_le_bytes());
@@ -852,11 +993,11 @@ fn write_dib_header_v3(
 /// beyond `palette.entries.len()`) and leaves `clr_used = 0` in the
 /// header — the "full table" sentinel. This lets the decoder use
 /// `DibHeader::palette_entries()` directly without worrying about a
-/// partial `clr_used`.
+/// partial `clr_used`. `stored_height` is the signed BMP `biHeight`.
 fn write_dib_header_v3_indexed(
     out: &mut Vec<u8>,
     w: u32,
-    stored_height: u32,
+    stored_height: i32,
     bpp: u16,
     compression: u32,
     palette: &BmpPalette,
@@ -864,7 +1005,7 @@ fn write_dib_header_v3_indexed(
     let image_size: u32 = 0; // valid for BI_RGB; RLE size is embedded in the pixel data
     out.extend_from_slice(&BITMAPINFOHEADER_SIZE.to_le_bytes());
     out.extend_from_slice(&(w as i32).to_le_bytes());
-    out.extend_from_slice(&(stored_height as i32).to_le_bytes());
+    out.extend_from_slice(&stored_height.to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes()); // planes
     out.extend_from_slice(&bpp.to_le_bytes());
     out.extend_from_slice(&compression.to_le_bytes());
@@ -891,12 +1032,13 @@ fn write_dib_header_v3_indexed(
 ///
 /// Canonical masks: R=0xF800, G=0x07E0, B=0x001F, A=0x0000.
 /// CS type set to LCS_sRGB (0x73524742) with all endpoints + gamma zero.
-fn write_dib_header_v4_bitfields(out: &mut Vec<u8>, w: u32, stored_height: u32) {
-    let pixel_bytes = row_stride(w as usize, 16) as u32 * stored_height;
+/// `stored_height` is signed: negative for a top-down DIB.
+fn write_dib_header_v4_bitfields(out: &mut Vec<u8>, w: u32, stored_height: i32) {
+    let pixel_bytes = row_stride(w as usize, 16) as u32 * stored_height.unsigned_abs();
     // Header size
     out.extend_from_slice(&BITMAPV4HEADER_SIZE.to_le_bytes());
     out.extend_from_slice(&(w as i32).to_le_bytes());
-    out.extend_from_slice(&(stored_height as i32).to_le_bytes());
+    out.extend_from_slice(&stored_height.to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes()); // planes
     out.extend_from_slice(&16u16.to_le_bytes()); // bpp
     out.extend_from_slice(&BI_BITFIELDS.to_le_bytes()); // compression

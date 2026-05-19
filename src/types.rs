@@ -30,6 +30,10 @@ pub const BITMAPFILEHEADER_SIZE: u32 = 14;
 pub const BITMAPINFOHEADER_SIZE: u32 = 40;
 pub const BITMAPV4HEADER_SIZE: u32 = 108;
 pub const BITMAPV5HEADER_SIZE: u32 = 124;
+/// Size of the OS/2 1.x `BITMAPCOREHEADER` (a.k.a. OS21XBITMAPHEADER).
+/// Decoder-only: 12-byte header with `u16` width/height, no compression
+/// field, and 3-byte (RGBTRIPLE) colour-table entries.
+pub const BITMAPCOREHEADER_SIZE: u32 = 12;
 
 /// `biCompression` constants we recognise.
 pub const BI_RGB: u32 = 0;
