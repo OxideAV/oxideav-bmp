@@ -45,6 +45,25 @@ and falls back to uncompressed when RLE does not shrink the output.
 Up to 256 (8-bit) or 16 (4-bit) entries; unused entries are
 zero-padded in the on-disk colour table.
 
+### Minimal colour table (`biClrUsed`)
+
+```rust
+encode_bmp_with_options(&image, BmpEncodeOptions {
+    minimal_palette: true,
+    ..Default::default()
+})
+```
+
+By default the indexed paths write a full `2^bpp` colour table and
+leave `biClrUsed = 0` (the "all colours used" sentinel). Setting
+`minimal_palette: true` instead writes exactly as many `RGBQUAD`
+entries as the supplied `BmpPalette` carries and records that count
+in `biClrUsed` — a 2-colour 8-bit image sheds 254 unused entries
+(1016 bytes). The count is clamped to `[1, 2^bpp]`; a palette that
+already fills the space keeps the `biClrUsed = 0` sentinel. Composable
+with `top_down`. The decoder's `biClrUsed`-aware palette reader (and
+ImageMagick) consume the trimmed table transparently.
+
 ### Top-down DIB output
 
 `encode_bmp_with_options(&image, BmpEncodeOptions { top_down: true })`

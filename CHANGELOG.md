@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Encoder**: minimal colour-table (`biClrUsed`-limited palette) write
+  path via the new `BmpEncodeOptions::minimal_palette` flag. When set,
+  the indexed paths (`Indexed8` / `Indexed4`) write only as many
+  `RGBQUAD` colour-table entries as the supplied `BmpPalette` actually
+  carries and record that count in the header's `biClrUsed` field,
+  instead of zero-padding the table out to the full `2^bpp` entries
+  with `biClrUsed = 0`. A 2-colour 8-bit image drops 254 unused
+  entries (1016 bytes); a 4-colour 4-bit image drops 12 (48 bytes).
+  A palette that already fills the `2^bpp` space keeps the classic
+  `biClrUsed = 0` "full table" sentinel, and the entry count is
+  clamped to `[1, 2^bpp]` so it can never overflow the index space.
+  The decoder's existing `biClrUsed`-aware palette reader consumes the
+  shorter table transparently; default output (`minimal_palette =
+  false`) is byte-for-byte unchanged. Composes with `top_down`.
+- Tests: `minimal_palette_8bit_shrinks_table_and_roundtrips`,
+  `minimal_palette_4bit_shrinks_table_and_roundtrips`,
+  `minimal_palette_full_table_keeps_clr_used_zero`,
+  `minimal_palette_top_down_roundtrips`, plus ImageMagick
+  cross-validation `magick_minimal_palette_8bpp` confirming `magick`
+  resolves pixels against the trimmed `biClrUsed=2` table.
+
 ## [0.1.4](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.3...v0.1.4) - 2026-05-05
 
 ### Other

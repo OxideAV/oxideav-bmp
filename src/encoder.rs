@@ -51,6 +51,22 @@ pub struct BmpEncodeOptions {
     /// Emit a top-down DIB (rows stored top-to-bottom, encoded
     /// `biHeight` is negative). Default: `false` (classic bottom-up).
     pub top_down: bool,
+    /// Write only as many colour-table entries as the supplied palette
+    /// actually carries, recording the count in the header's
+    /// `biClrUsed` field, instead of zero-padding the table out to the
+    /// full `2^bpp` entries with `biClrUsed = 0`.
+    ///
+    /// Only affects the indexed paths (`Indexed8` / `Indexed4`); the
+    /// direct-colour and 16-bit bitfields paths carry no colour table.
+    /// A palette with `n` entries shrinks the on-disk table from
+    /// `2^bpp × 4` bytes to `n × 4` bytes — meaningful for the common
+    /// 2-/4-colour images that would otherwise carry a full 256-entry
+    /// (1 KiB) or 16-entry table. The decoder's `biClrUsed`-aware
+    /// palette reader consumes the shorter table transparently.
+    ///
+    /// Default: `false` (full `2^bpp` table, `biClrUsed = 0`) for
+    /// byte-for-byte compatibility with prior output.
+    pub minimal_palette: bool,
 }
 
 /// Opaque token returned by [`encode_bmp`] and [`encode_bmp_plane`]
@@ -441,7 +457,8 @@ pub fn encode_dib_plane(
                 height as i32
             };
             let mut out = Vec::new();
-            write_dib_header_v3_indexed(&mut out, width, stored_h, 8, BI_RGB, pal);
+            let entries = written_palette_entries(8, pal, opts);
+            write_dib_header_v3_indexed(&mut out, width, stored_h, 8, BI_RGB, pal, entries);
             out.extend_from_slice(&pixels);
             Ok(out)
         }
@@ -455,7 +472,8 @@ pub fn encode_dib_plane(
                 height as i32
             };
             let mut out = Vec::new();
-            write_dib_header_v3_indexed(&mut out, width, stored_h, 4, BI_RGB, pal);
+            let entries = written_palette_entries(4, pal, opts);
+            write_dib_header_v3_indexed(&mut out, width, stored_h, 4, BI_RGB, pal, entries);
             out.extend_from_slice(&pixels);
             Ok(out)
         }
@@ -590,6 +608,23 @@ fn encode_indexed4_auto(
     Ok((file, EncodedBmpFormat::Indexed4))
 }
 
+/// Number of colour-table entries actually written on disk for the
+/// given bit depth, palette, and options.
+///
+/// With `minimal_palette` set the table is exactly `palette.entries`
+/// long (clamped to the `2^bpp` ceiling so a caller can't overflow the
+/// index space); otherwise the classic full `2^bpp` table is emitted.
+/// A `minimal_palette` table is never shrunk below 1 entry — a
+/// zero-entry colour table is meaningless for an indexed bitmap.
+fn written_palette_entries(bpp: u16, palette: &BmpPalette, options: BmpEncodeOptions) -> usize {
+    let full = palette_entry_count(bpp);
+    if options.minimal_palette {
+        palette.entries.len().clamp(1, full)
+    } else {
+        full
+    }
+}
+
 /// Assemble a complete BMP file for indexed data.
 fn build_indexed_bmp(
     width: u32,
@@ -600,7 +635,8 @@ fn build_indexed_bmp(
     pixel_data: &[u8],
     options: BmpEncodeOptions,
 ) -> Vec<u8> {
-    let palette_bytes = (palette_entry_count(bpp) * 4) as u32;
+    let entries = written_palette_entries(bpp, palette, options);
+    let palette_bytes = (entries * 4) as u32;
     let pixel_bytes = pixel_data.len() as u32;
     let file_size = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE + palette_bytes + pixel_bytes;
     let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE + palette_bytes;
@@ -613,6 +649,7 @@ fn build_indexed_bmp(
         bpp,
         compression,
         palette,
+        entries,
     );
     out.extend_from_slice(pixel_data);
     out
@@ -989,11 +1026,15 @@ fn write_dib_header_v3(
 
 /// Write a 40-byte V3 header followed immediately by the colour table.
 ///
-/// Always writes a full-sized palette table (`2^bpp` entries, zero-padded
-/// beyond `palette.entries.len()`) and leaves `clr_used = 0` in the
-/// header — the "full table" sentinel. This lets the decoder use
-/// `DibHeader::palette_entries()` directly without worrying about a
-/// partial `clr_used`. `stored_height` is the signed BMP `biHeight`.
+/// `entries` is the number of `RGBQUAD` colour-table entries to write
+/// (computed by [`written_palette_entries`]). When it equals the full
+/// `2^bpp` count the header leaves `biClrUsed = 0` — the classic
+/// "full table" sentinel that prior output used. When it is smaller
+/// (minimal-palette mode) the exact count is recorded in `biClrUsed`
+/// so the decoder's `palette_entries()` reads back only that many
+/// entries. Either way the colour table written matches the count the
+/// header advertises, so the pixel offset stays correct.
+/// `stored_height` is the signed BMP `biHeight`.
 fn write_dib_header_v3_indexed(
     out: &mut Vec<u8>,
     w: u32,
@@ -1001,8 +1042,13 @@ fn write_dib_header_v3_indexed(
     bpp: u16,
     compression: u32,
     palette: &BmpPalette,
+    entries: usize,
 ) {
     let image_size: u32 = 0; // valid for BI_RGB; RLE size is embedded in the pixel data
+    let full = palette_entry_count(bpp);
+    // A full table advertises clr_used = 0 (the spec's "all 2^bpp"
+    // sentinel); a shorter table advertises its exact length.
+    let clr_used = if entries >= full { 0 } else { entries as u32 };
     out.extend_from_slice(&BITMAPINFOHEADER_SIZE.to_le_bytes());
     out.extend_from_slice(&(w as i32).to_le_bytes());
     out.extend_from_slice(&stored_height.to_le_bytes());
@@ -1012,11 +1058,10 @@ fn write_dib_header_v3_indexed(
     out.extend_from_slice(&image_size.to_le_bytes());
     out.extend_from_slice(&2835i32.to_le_bytes());
     out.extend_from_slice(&2835i32.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes()); // clr_used = 0 → full 2^bpp table
+    out.extend_from_slice(&clr_used.to_le_bytes()); // 0 → full 2^bpp; else exact count
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
                                                 // Colour table: on-disk order is B, G, R, 0x00.
-    let max_entries = palette_entry_count(bpp);
-    for i in 0..max_entries {
+    for i in 0..entries {
         if let Some(rgb) = palette.entries.get(i) {
             out.push(rgb[2]); // B
             out.push(rgb[1]); // G

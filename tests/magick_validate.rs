@@ -10,7 +10,7 @@
 
 use oxideav_bmp::{
     decode_bmp, encode_bmp, encode_bmp_with_options, BmpEncodeOptions, BmpImage, BmpPalette,
-    BmpPixelFormat, BmpPlane,
+    BmpPixelFormat, BmpPlane, EncodedBmpFormat,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -368,6 +368,70 @@ fn magick_rle4_encode() {
 }
 
 // ---------------------------------------------------------------------------
+// Minimal palette: biClrUsed-trimmed colour table must read correctly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn magick_minimal_palette_8bpp() {
+    if !magick_available() {
+        return;
+    }
+
+    let w = 8u32;
+    let h = 8u32;
+    let palette = BmpPalette {
+        entries: vec![[255, 0, 0], [0, 0, 255]], // 2-entry table; red=0, blue=1
+    };
+    // Force the uncompressed indexed path (alternate rows ⇒ poor RLE) so
+    // we exercise an explicit biClrUsed=2 colour table, not an RLE stream.
+    let mut data = Vec::with_capacity(w as usize * h as usize);
+    for _ in 0..h {
+        for x in 0..w {
+            data.push((x & 1) as u8);
+        }
+    }
+    let src = BmpImage {
+        width: w,
+        height: h,
+        pixel_format: BmpPixelFormat::Indexed8,
+        planes: vec![BmpPlane {
+            stride: w as usize,
+            data,
+        }],
+        palette: Some(palette),
+        pts: None,
+    };
+    let (bytes, fmt) = encode_bmp_with_options(
+        &src,
+        BmpEncodeOptions {
+            minimal_palette: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(fmt, EncodedBmpFormat::Indexed8);
+
+    // biClrUsed (file offset 46) records the 2-entry table.
+    let clr_used = u32::from_le_bytes([bytes[46], bytes[47], bytes[48], bytes[49]]);
+    assert_eq!(clr_used, 2);
+
+    let path = tmp_path("test_min_palette_8bpp.bmp");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let info = magick_identify(&path);
+    assert!(info.contains("BMP"), "not BMP: {info}");
+
+    // (0,0) index 0 → red; (1,0) index 1 → blue. magick must resolve both
+    // against the trimmed table.
+    let px0 = magick_pixel_rgba(&path, 0, 0);
+    assert_eq!(px0[0], 255, "px0 R (red): {px0:?}");
+    assert_eq!(px0[2], 0, "px0 B: {px0:?}");
+    let px1 = magick_pixel_rgba(&path, 1, 0);
+    assert_eq!(px1[2], 255, "px1 B (blue): {px1:?}");
+    assert_eq!(px1[0], 0, "px1 R: {px1:?}");
+}
+
+// ---------------------------------------------------------------------------
 // Top-down DIB: magick must read the negative-biHeight file correctly.
 // ---------------------------------------------------------------------------
 
@@ -401,7 +465,14 @@ fn magick_top_down_rgba() {
         palette: None,
         pts: None,
     };
-    let (bytes, _) = encode_bmp_with_options(&src, BmpEncodeOptions { top_down: true }).unwrap();
+    let (bytes, _) = encode_bmp_with_options(
+        &src,
+        BmpEncodeOptions {
+            top_down: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let path = tmp_path("test_top_down.bmp");
     std::fs::write(&path, &bytes).unwrap();
 

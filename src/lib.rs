@@ -471,8 +471,14 @@ mod tests {
     #[test]
     fn encode_top_down_rgba_negative_height_and_roundtrip() {
         let (src, w, h) = rgba_checker(8, 6);
-        let (bytes, fmt) =
-            encode_bmp_with_options(&src, BmpEncodeOptions { top_down: true }).unwrap();
+        let (bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(fmt, EncodedBmpFormat::Rgb32);
         assert_eq!(&bytes[..2], b"BM");
         // V3 header at file offset 14; biHeight is i32 at offset 22.
@@ -489,8 +495,14 @@ mod tests {
     #[test]
     fn encode_top_down_rgb24_roundtrip() {
         let src = rgb24_checker(8, 6);
-        let (bytes, fmt) =
-            encode_bmp_with_options(&src, BmpEncodeOptions { top_down: true }).unwrap();
+        let (bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(fmt, EncodedBmpFormat::Rgb24);
         let stored_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
         assert_eq!(stored_h, -6);
@@ -526,8 +538,14 @@ mod tests {
             palette: Some(palette),
             pts: None,
         };
-        let (bytes, fmt) =
-            encode_bmp_with_options(&src, BmpEncodeOptions { top_down: true }).unwrap();
+        let (bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(
             fmt,
             EncodedBmpFormat::Indexed8,
@@ -666,6 +684,179 @@ mod tests {
         assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
         let stride = img.planes[0].stride;
         assert_eq!(&img.planes[0].data[stride..stride + 4], &[0, 255, 0, 255]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Minimal palette (biClrUsed-limited colour table)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn minimal_palette_8bit_shrinks_table_and_roundtrips() {
+        let w = 8u32;
+        let h = 8u32;
+        // Only 4 distinct indices in use; a 4-entry palette.
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane {
+                stride,
+                data: data.clone(),
+            }],
+            palette: Some(palette.clone()),
+            pts: None,
+        };
+
+        // Full-palette (default) output.
+        let (full_bytes, _) = encode_bmp(&src).unwrap();
+        // Minimal-palette output: same pixels, smaller colour table.
+        let (min_bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                minimal_palette: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            fmt == EncodedBmpFormat::Indexed8 || fmt == EncodedBmpFormat::Rle8,
+            "unexpected format {fmt:?}"
+        );
+
+        // The minimal table writes 4 entries vs the full 256 — the file
+        // should be (256-4)*4 = 1008 bytes smaller in the uncompressed
+        // case, and at least smaller in every case.
+        assert!(
+            min_bytes.len() < full_bytes.len(),
+            "minimal palette ({}) should be smaller than full ({})",
+            min_bytes.len(),
+            full_bytes.len()
+        );
+
+        // biClrUsed (offset 14+32 = 46) must record the 4-entry count.
+        let clr_used =
+            u32::from_le_bytes([min_bytes[46], min_bytes[47], min_bytes[48], min_bytes[49]]);
+        assert_eq!(clr_used, 4, "biClrUsed must record the partial-table size");
+
+        // The decoder honours biClrUsed and produces identical pixels.
+        let back_full = decode_bmp(&full_bytes).unwrap();
+        let back_min = decode_bmp(&min_bytes).unwrap();
+        assert_eq!(back_full.planes[0].data, back_min.planes[0].data);
+        // Pixel (0,0) = index 0 → red.
+        assert_eq!(&back_min.planes[0].data[..4], &[255u8, 0, 0, 255]);
+    }
+
+    #[test]
+    fn minimal_palette_4bit_shrinks_table_and_roundtrips() {
+        let w = 8u32;
+        let h = 8u32;
+        let palette = four_color_palette(); // 4 entries
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed4,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+
+        let (full_bytes, _) = encode_bmp(&src).unwrap();
+        let (min_bytes, _) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                minimal_palette: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // 4-bit full table is 16 entries; minimal is 4 → (16-4)*4 = 48 B
+        // smaller in the uncompressed case.
+        assert!(
+            min_bytes.len() < full_bytes.len(),
+            "minimal 4-bit palette ({}) should be smaller than full ({})",
+            min_bytes.len(),
+            full_bytes.len()
+        );
+        let clr_used =
+            u32::from_le_bytes([min_bytes[46], min_bytes[47], min_bytes[48], min_bytes[49]]);
+        assert_eq!(clr_used, 4);
+
+        let back = decode_bmp(&min_bytes).unwrap();
+        assert_eq!(back.width, w);
+        assert_eq!(back.height, h);
+        assert_eq!(&back.planes[0].data[..4], &[255u8, 0, 0, 255]);
+    }
+
+    #[test]
+    fn minimal_palette_full_table_keeps_clr_used_zero() {
+        // A palette that already fills the whole 2^bpp space must keep the
+        // classic clr_used = 0 sentinel even with minimal_palette set.
+        let w = 4u32;
+        let h = 4u32;
+        let entries: Vec<[u8; 3]> = (0..16).map(|i| [i as u8 * 16, 0, 0]).collect();
+        let palette = BmpPalette { entries };
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed4,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let (bytes, _) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                minimal_palette: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let clr_used = u32::from_le_bytes([bytes[46], bytes[47], bytes[48], bytes[49]]);
+        assert_eq!(
+            clr_used, 0,
+            "a full 16-entry table keeps the clr_used=0 sentinel"
+        );
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.width, w);
+        assert_eq!(back.height, h);
+    }
+
+    #[test]
+    fn minimal_palette_top_down_roundtrips() {
+        // minimal_palette + top_down together: RLE is skipped (top-down),
+        // the colour table is trimmed, and decode still matches.
+        let w = 8u32;
+        let h = 6u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let (bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                top_down: true,
+                minimal_palette: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Indexed8);
+        let stored_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(stored_h, -(h as i32));
+        let clr_used = u32::from_le_bytes([bytes[46], bytes[47], bytes[48], bytes[49]]);
+        assert_eq!(clr_used, 4);
+        let back = decode_bmp(&bytes).unwrap();
+        // top-down: row 0 of output = source row 0 → index 0 → red.
+        assert_eq!(&back.planes[0].data[..4], &[255u8, 0, 0, 255]);
     }
 
     #[test]
