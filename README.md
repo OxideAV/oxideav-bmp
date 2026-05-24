@@ -87,6 +87,25 @@ let frame = oxideav_bmp::decode_dib(&dib, /* doubled */ false)?;
 let ico_sub = oxideav_bmp::encode_dib(&frame, /* doubled */ true)?;
 ```
 
+## Fuzzing
+
+A `cargo-fuzz` harness lives in `fuzz/`. The `decode` target feeds
+arbitrary bytes to `decode_bmp` and to `decode_dib` (both the plain and
+the doubled-height XOR+AND-mask modes) and asserts the decoder always
+returns a `Result` rather than panicking, indexing out of bounds, or
+OOM-aborting. It builds against the framework-free standalone path
+(`default-features = false`).
+
+```sh
+cargo +nightly fuzz run decode
+```
+
+The seed corpus carries one valid BMP per header / depth / compression
+variant (32/24/16/8/4-bpp, RLE4/RLE8, top-down, minimal-palette) plus a
+couple of degenerate framings. The harness shook out and fixed several
+header-driven denial-of-service paths (RLE / `bpp = 0` / `biClrUsed`
+over-allocation); see `CHANGELOG.md`.
+
 ## Registration
 
 ```rust

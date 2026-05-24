@@ -137,15 +137,24 @@ pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<
     // way `decode_bmp` does via `pixel_offset` so the two paths share
     // the pixel-decode. OS/2 BITMAPCOREHEADER uses 3-byte palette
     // entries (RGBTRIPLE), every other variant uses 4-byte RGBQUAD.
-    let entry_size = palette_entry_bytes(&header) as u32;
-    let color_table_bytes = header.palette_entries() as u32 * entry_size;
+    //
+    // `palette_entries()` is bounded only by the attacker-supplied
+    // `clr_used` (up to `u32::MAX`), so this product must be done in
+    // `usize` — the old `as u32` multiply overflowed (`clr_used =
+    // 0xFFFF_FFFF` * 4 wraps) and aborted the process. `read_palette`
+    // re-validates the entry count against the actual byte count, so a
+    // wildly-large `pixel_start` simply fails the bounds checks there.
+    let entry_size = palette_entry_bytes(&header);
+    let color_table_bytes = header.palette_entries().saturating_mul(entry_size);
     let masks_bytes =
         if header.compression == BI_BITFIELDS && header.header_size == BITMAPINFOHEADER_SIZE {
-            12
+            12usize
         } else {
-            0
+            0usize
         };
-    let pixel_start = (header.header_size + masks_bytes + color_table_bytes) as usize;
+    let pixel_start = (header.header_size as usize)
+        .saturating_add(masks_bytes)
+        .saturating_add(color_table_bytes);
     if dib_height_is_doubled_for_mask {
         decode_dib_with_mask(&header, input, pixel_start)
     } else {
@@ -346,6 +355,23 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
         return Err(Error::invalid("BMP: zero dimension"));
     }
 
+    // Validate bpp before any per-row allocation. The per-bpp decode
+    // arms below already reject unknown depths, but only *after*
+    // `decode_pixels` has sized its row vector with
+    // `Vec::with_capacity(height)`. A header with `bpp = 0` (legal only
+    // for BI_JPEG / BI_PNG, both rejected above) yields a zero row
+    // stride, so the "pixel array truncated" length check passes for any
+    // height — then `with_capacity(height)` tries to reserve an
+    // attacker-chosen 134-million-element vector and OOM-aborts. Reject
+    // unsupported depths here so a non-zero stride always bounds the
+    // height against the available bytes.
+    if !matches!(h.bpp, 1 | 4 | 8 | 16 | 24 | 32) {
+        return Err(Error::invalid(format!(
+            "BMP: unsupported bit depth {}",
+            h.bpp
+        )));
+    }
+
     let palette = read_palette(h, whole, pixel_offset)?;
 
     // RLE-compressed bitmaps have a special decode path.
@@ -353,7 +379,7 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
         if h.bpp != 8 {
             return Err(Error::invalid("BMP: BI_RLE8 requires bpp=8"));
         }
-        let rle_data = &whole[pixel_offset..];
+        let rle_data = rle_input(whole, pixel_offset, width as u64, height as u64)?;
         // decode_rle8 returns rows in bottom-up order (row 0 = bottom of
         // image). Reverse to produce the top-down output the caller expects.
         let rows = decode_rle8(rle_data, width as usize, height as usize, &palette)?;
@@ -377,7 +403,7 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
         if h.bpp != 4 {
             return Err(Error::invalid("BMP: BI_RLE4 requires bpp=4"));
         }
-        let rle_data = &whole[pixel_offset..];
+        let rle_data = rle_input(whole, pixel_offset, width as u64, height as u64)?;
         // Same: bottom-up → reverse to top-down.
         let rows = decode_rle4(rle_data, width as usize, height as usize, &palette)?;
         let mut flat = Vec::with_capacity(width as usize * height as usize * 4);
@@ -431,13 +457,18 @@ fn decode_dib_with_mask(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Res
     let mut image = decode_dib_payload(&xor_header, whole, pixel_offset)?;
 
     // The AND mask is 1bpp, bottom-up, width-padded to 4 bytes, placed
-    // immediately after the XOR pixel array.
+    // immediately after the XOR pixel array. The XOR decode above already
+    // proved the pixel array fits in `whole`, but the mask offsets are
+    // still derived from attacker-supplied dimensions, so saturate the
+    // additions: any overflow lands past `whole.len()` and falls through
+    // to the "no AND mask" early-return below rather than wrapping into a
+    // small in-bounds index.
     let xor_stride = row_stride(xor_header.absolute_width() as usize, h.bpp as usize);
-    let xor_bytes = xor_stride * xor_header.absolute_height() as usize;
-    let and_start = pixel_offset + xor_bytes;
+    let xor_bytes = xor_stride.saturating_mul(xor_header.absolute_height() as usize);
+    let and_start = pixel_offset.saturating_add(xor_bytes);
     let and_stride = row_stride(xor_header.absolute_width() as usize, 1);
-    let and_bytes = and_stride * xor_header.absolute_height() as usize;
-    if whole.len() < and_start + and_bytes {
+    let and_bytes = and_stride.saturating_mul(xor_header.absolute_height() as usize);
+    if whole.len() < and_start.saturating_add(and_bytes) {
         // Some icons lie about the AND mask size. Warn-by-ignore: if
         // there's no AND mask we just keep the XOR alpha as-is.
         return Ok(image);
@@ -515,10 +546,17 @@ fn decode_pixels(
     let width = h.absolute_width() as usize;
     let height = h.absolute_height() as usize;
     let stride = h.row_stride();
-    if whole.len() < pixel_offset + stride * height {
+    // `stride`, `height` and `pixel_offset` are all bounded only by the
+    // attacker-supplied header, so size the pixel array with saturating
+    // arithmetic. An overflowing `stride * height` would otherwise wrap
+    // to a small value, pass the bounds check, then panic on the slice;
+    // saturating to `usize::MAX` keeps the truncation check sound.
+    let pixel_bytes = stride.saturating_mul(height);
+    let pixel_end = pixel_offset.saturating_add(pixel_bytes);
+    if whole.len() < pixel_end {
         return Err(Error::invalid("BMP: pixel array truncated"));
     }
-    let pixels = &whole[pixel_offset..pixel_offset + stride * height];
+    let pixels = &whole[pixel_offset..pixel_end];
     let mut rows: Vec<Vec<u8>> = Vec::with_capacity(height);
 
     match h.bpp {
@@ -680,6 +718,42 @@ fn decode_pixels(
 // ---------------------------------------------------------------------------
 // RLE decoders
 // ---------------------------------------------------------------------------
+
+/// Slice the RLE stream out of `whole` at `pixel_offset`, after proving
+/// the header's `width × height` grid can actually be backed by the
+/// available bytes.
+///
+/// Two attacker-controlled hazards motivate this guard:
+///
+/// 1. `pixel_offset` comes straight from the file header — a value past
+///    the end of the buffer would panic the bare `&whole[pixel_offset..]`
+///    slice. We reject it instead.
+/// 2. Unlike the uncompressed path (which sizes the pixel array as
+///    `stride × height` and bounds-checks it before reading), the RLE
+///    decoders pre-allocate the *whole* `width × height` grid up front.
+///    A 40-byte header claiming `0x7FFF_FFFF × 0x7FFF_FFFF` would ask the
+///    allocator for exabytes and abort the process. The on-disk RLE
+///    opcodes can each emit at most 255 pixels, and the smallest opcode
+///    that emits any pixel is two bytes (an encoded run / a one-byte
+///    absolute run is still framed in pairs), so an `n`-byte stream can
+///    decode to no more than `n × 255` pixels. If the claimed grid is
+///    larger than that ceiling it can never be filled, so the stream is
+///    inconsistent — reject it rather than allocate on the attacker's
+///    word. This caps the allocation at the input's own size.
+fn rle_input(whole: &[u8], pixel_offset: usize, width: u64, height: u64) -> Result<&[u8]> {
+    if pixel_offset > whole.len() {
+        return Err(Error::invalid("BMP RLE: pixel offset past end of input"));
+    }
+    let rle_data = &whole[pixel_offset..];
+    let pixels = width.saturating_mul(height);
+    let ceiling = (rle_data.len() as u64).saturating_mul(255);
+    if pixels > ceiling {
+        return Err(Error::invalid(
+            "BMP RLE: declared dimensions exceed what the RLE stream can encode",
+        ));
+    }
+    Ok(rle_data)
+}
 
 /// Decode a BI_RLE8 stream into bottom-up RGBA rows.
 ///

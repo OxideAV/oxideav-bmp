@@ -1,0 +1,44 @@
+[package]
+name = "oxideav-bmp-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# BMP's decoder is the rich fuzz surface: a 14-byte BITMAPFILEHEADER plus
+# one of several DIB header variants (OS/2 BITMAPCOREHEADER, v3
+# BITMAPINFOHEADER, v4/v5 with embedded bitfield masks), then an optional
+# colour table and a pixel array that may be raw, bit-packed, bitfield-
+# masked, or RLE4/RLE8-compressed — top-down or bottom-up. Every one of
+# those header fields (width / height / bpp / compression / clr_used /
+# bfOffBits / channel masks) is attacker-controlled and feeds offset and
+# allocation maths. There is no external system library worth pulling in
+# as a cross-decode oracle (and the clean-room wall bars the C references
+# anyway), so this fuzz crate is **decode-only**: feed arbitrary bytes to
+# the two public decode entry points and assert they always return a
+# `Result` rather than panicking / aborting / OOMing.
+#
+# Built with `default-features = false` so the harness exercises the
+# framework-free standalone decode path (crate-local `BmpError`), with no
+# `oxideav-core` in the dependency tree.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-bmp]
+path = ".."
+default-features = false
+
+# Prevent this from interfering with the umbrella workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false

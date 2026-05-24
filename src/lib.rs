@@ -65,6 +65,7 @@ pub use registry::{register, register_codecs, register_containers};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{BI_RLE4, BI_RLE8};
 
     fn rgba_checker(w: u32, h: u32) -> (BmpImage, u32, u32) {
         // 2×2 red/green/blue/white grid, tiled to w×h. Dumb but
@@ -879,5 +880,110 @@ mod tests {
         let enc_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
         assert_eq!(enc_w, w as i32);
         assert_eq!(enc_h, h as i32);
+    }
+
+    // --- Fuzz-derived regression tests (round 124) ---------------------
+    //
+    // Each of these crafts a malformed header that previously aborted the
+    // process (integer-overflow panic or an exabyte allocation). They must
+    // now return `Err` instead. Inputs are hand-built byte streams,
+    // authored from the published BMP / Windows GDI header layout.
+
+    /// 14-byte BITMAPFILEHEADER + 40-byte BITMAPINFOHEADER builder.
+    fn raw_bmp(
+        width: i32,
+        height: i32,
+        bpp: u16,
+        compression: u32,
+        pixel_offset: u32,
+        clr_used: u32,
+        tail: &[u8],
+    ) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"BM");
+        v.extend_from_slice(&0u32.to_le_bytes()); // file size
+        v.extend_from_slice(&0u16.to_le_bytes()); // reserved1
+        v.extend_from_slice(&0u16.to_le_bytes()); // reserved2
+        v.extend_from_slice(&pixel_offset.to_le_bytes());
+        v.extend_from_slice(&40u32.to_le_bytes()); // header size
+        v.extend_from_slice(&width.to_le_bytes());
+        v.extend_from_slice(&height.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes()); // planes
+        v.extend_from_slice(&bpp.to_le_bytes());
+        v.extend_from_slice(&compression.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // image size
+        v.extend_from_slice(&0i32.to_le_bytes()); // x ppm
+        v.extend_from_slice(&0i32.to_le_bytes()); // y ppm
+        v.extend_from_slice(&clr_used.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // clr important
+        v.extend_from_slice(tail);
+        v
+    }
+
+    #[test]
+    fn decode_dib_huge_clr_used_does_not_overflow() {
+        // `clr_used = u32::MAX` with bpp=8: the old `palette_entries() as
+        // u32 * entry_size` wrapped and panicked. Now it's a clean Err.
+        let mut dib = Vec::new();
+        dib.extend_from_slice(&40u32.to_le_bytes());
+        dib.extend_from_slice(&2i32.to_le_bytes()); // width
+        dib.extend_from_slice(&2i32.to_le_bytes()); // height
+        dib.extend_from_slice(&1u16.to_le_bytes()); // planes
+        dib.extend_from_slice(&8u16.to_le_bytes()); // bpp
+        dib.extend_from_slice(&0u32.to_le_bytes()); // compression
+        dib.extend_from_slice(&0u32.to_le_bytes()); // image size
+        dib.extend_from_slice(&0i32.to_le_bytes());
+        dib.extend_from_slice(&0i32.to_le_bytes());
+        dib.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // clr_used
+        dib.extend_from_slice(&0u32.to_le_bytes());
+        assert!(decode_dib(&dib, false).is_err());
+    }
+
+    #[test]
+    fn rle8_giant_dimensions_rejected_not_oom() {
+        // i32::MAX × i32::MAX RLE8 grid would have asked the allocator for
+        // exabytes. The byte-ceiling check rejects it as inconsistent.
+        let input = raw_bmp(i32::MAX, i32::MAX, 8, BI_RLE8, 1078, 256, &[0u8; 8]);
+        assert!(decode_bmp(&input).is_err());
+    }
+
+    #[test]
+    fn rle4_giant_dimensions_rejected_not_oom() {
+        let input = raw_bmp(i32::MAX, i32::MAX, 4, BI_RLE4, 1078, 16, &[0u8; 8]);
+        assert!(decode_bmp(&input).is_err());
+    }
+
+    #[test]
+    fn rle8_pixel_offset_past_eof_rejected() {
+        // pixel_offset beyond the buffer: the bare slice used to panic.
+        let mut input = raw_bmp(2, 2, 8, BI_RLE8, 1078, 256, &[0u8; 64]);
+        let off = (input.len() as u32) + 4096;
+        input[10..14].copy_from_slice(&off.to_le_bytes());
+        assert!(decode_bmp(&input).is_err());
+    }
+
+    #[test]
+    fn zero_bpp_huge_height_rejected_not_oom() {
+        // bpp=0 (BI_RGB) gives a zero row stride, so the truncation check
+        // passed for any height and `decode_pixels` reserved a 134M-row
+        // vector → OOM-abort. bpp is now validated up front.
+        let input = raw_bmp(4, 134_283_268, 0, BI_RGB, 66, 3, &[0u8; 64]);
+        assert!(decode_bmp(&input).is_err());
+    }
+
+    #[test]
+    fn rle8_small_consistent_dims_still_decode() {
+        // Sanity floor: a legitimately-tiny RLE8 grid must NOT be caught
+        // by the ceiling guard. 1×1, palette of 1 black entry, one
+        // encoded run of a single index + end-of-bitmap.
+        let mut input = raw_bmp(1, 1, 8, BI_RLE8, 0, 1, &[]);
+        // pixel_offset = 14 + 40 + 1*4 (one palette entry) = 58.
+        let off = 14 + 40 + 4;
+        input[10..14].copy_from_slice(&(off as u32).to_le_bytes());
+        // one palette entry (BGRA) then RLE: [1,0] run of idx0, [0,1] end.
+        input.extend_from_slice(&[0x10, 0x20, 0x30, 0x00]);
+        input.extend_from_slice(&[1, 0, 0, 1]);
+        let img = decode_bmp(&input).expect("tiny RLE8 must decode");
+        assert_eq!((img.width, img.height), (1, 1));
     }
 }

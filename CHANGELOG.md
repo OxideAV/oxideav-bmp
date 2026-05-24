@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fuzzing**: `cargo-fuzz` harness at `fuzz/fuzz_targets/decode.rs`
+  driving the standalone decode entry points (`decode_bmp`, plus
+  `decode_dib` in both the plain and doubled-height XOR+AND-mask modes)
+  over arbitrary bytes — the contract is that every malformed input
+  returns `Err` rather than panicking, indexing out of bounds, or
+  OOM-aborting. Built `default-features = false` (framework-free path,
+  no `oxideav-core`). Seed corpus of 11 valid BMPs (32/24/16/8/4-bpp,
+  RLE4/RLE8, top-down, minimal-palette) plus degenerate edge inputs.
+  7.6M executions / 0 crashes after the fixes below.
+
+### Fixed
+
+- **Decoder DoS / panic hardening** (found by the new fuzz harness):
+  - `decode_dib`: computing the colour-table size as
+    `palette_entries() as u32 * entry_size` overflowed `u32` for a
+    huge `biClrUsed` and aborted; the offset maths now runs in `usize`
+    with saturating arithmetic.
+  - RLE4 / RLE8: the decoders pre-allocated the full `width × height`
+    grid from the header alone, so a `0x7FFF_FFFF × 0x7FFF_FFFF` claim
+    asked the allocator for exabytes (OOM-abort). A byte-ceiling guard
+    (`width × height ≤ rle_bytes × 255`, the maximum a stream of that
+    length can decode to) now rejects inconsistent dimensions, and an
+    out-of-range `bfOffBits` is rejected before the RLE slice instead
+    of panicking.
+  - `bpp = 0` (only legal for the rejected BI_JPEG / BI_PNG) yielded a
+    zero row stride, so the "pixel array truncated" check passed for
+    any height and `decode_pixels` reserved a 134-million-row vector
+    (OOM). Bit depth is now validated up front; a non-zero stride keeps
+    the height bounded by the available bytes.
+  - Pixel-array and ICO AND-mask offset maths switched to saturating
+    arithmetic so attacker-supplied dimensions can't wrap a length
+    check into an in-bounds slice.
+  - Regression tests: `decode_dib_huge_clr_used_does_not_overflow`,
+    `rle8_giant_dimensions_rejected_not_oom`,
+    `rle4_giant_dimensions_rejected_not_oom`,
+    `rle8_pixel_offset_past_eof_rejected`,
+    `zero_bpp_huge_height_rejected_not_oom`,
+    `rle8_small_consistent_dims_still_decode`.
+
 - **Encoder**: minimal colour-table (`biClrUsed`-limited palette) write
   path via the new `BmpEncodeOptions::minimal_palette` flag. When set,
   the indexed paths (`Indexed8` / `Indexed4`) write only as many
