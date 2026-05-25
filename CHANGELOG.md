@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Benchmarks**: Criterion harnesses at `benches/{decode,encode,roundtrip}.rs`
+  mirroring the cinepak / tta / flac shape. Decode bench covers RGBA /
+  RGB24 / RGB565 / Indexed8 / Indexed4 / RLE8 / RLE4 / DIB / ICO-DIB
+  variants (9 scenarios). Encode bench covers the same set plus the
+  `minimal_palette` and `top_down` option paths and the
+  "random data → RLE auto-picker falls back to BI_RGB" vs "row-constant
+  data → RLE chosen" picker cases (10 scenarios). Roundtrip bench
+  pairs each bit depth's encoder and decoder so a regression that
+  silently mis-encodes panics on the decode side (6 scenarios). All
+  fixtures synthesised on the fly from `xorshift32` / gradient
+  generators — no committed binary fixtures. Run with
+  `cargo bench -p oxideav-bmp --bench <decode|encode|roundtrip>`.
+  Baseline measurements (Apple M-series, `--quick`): decode ≈
+  1.2..5.0 GiB/s depending on path, encode ≈ 1.27..12 GiB/s, full
+  roundtrip ≈ 0.4..4.0 GiB/s.
+
 - **Fuzzing**: `cargo-fuzz` harness at `fuzz/fuzz_targets/decode.rs`
   driving the standalone decode entry points (`decode_bmp`, plus
   `decode_dib` in both the plain and doubled-height XOR+AND-mask modes)

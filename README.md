@@ -106,6 +106,33 @@ couple of degenerate framings. The harness shook out and fixed several
 header-driven denial-of-service paths (RLE / `bpp = 0` / `biClrUsed`
 over-allocation); see `CHANGELOG.md`.
 
+## Benchmarks
+
+Criterion benches at `benches/` cover the decoder, encoder, and full
+roundtrip across every bit depth + compression combination. They build
+fresh fixtures via the public encoder API so nothing is committed
+to disk.
+
+```sh
+cargo bench -p oxideav-bmp --bench decode
+cargo bench -p oxideav-bmp --bench encode
+cargo bench -p oxideav-bmp --bench roundtrip
+```
+
+Round 129 headline numbers (Apple M-series, `--quick`):
+
+| Bench                                         | Throughput     |
+| --------------------------------------------- | -------------- |
+| `decode_rgba_320x240`                         | ~5.0 GiB/s     |
+| `decode_rgb24_640x480`                        | ~3.4 GiB/s     |
+| `decode_indexed8_320x240`                     | ~1.2 GiB/s     |
+| `decode_rle8_320x240` (row-constant fixture)  | ~1.2 GiB/s     |
+| `encode_rgba_320x240`                         | ~10 GiB/s      |
+| `encode_indexed8_random_320x240` (RLE try+fb) | ~1.27 GiB/s    |
+| `encode_indexed8_rle_friendly_320x240`        | ~2.0 GiB/s     |
+| `roundtrip_rgba_320x240`                      | ~3.95 GiB/s    |
+| `roundtrip_dib_ico_rgba_64x64`                | ~1.7 GiB/s     |
+
 ## Registration
 
 ```rust
