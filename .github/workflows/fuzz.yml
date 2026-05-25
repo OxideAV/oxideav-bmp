@@ -1,0 +1,23 @@
+name: Fuzz
+
+# Daily fuzz run for the cargo-fuzz harness under fuzz/. BMP's decoder is
+# the rich attack surface: a 14-byte BITMAPFILEHEADER plus one of several
+# DIB header variants (OS/2 BITMAPCOREHEADER, v3 BITMAPINFOHEADER, v4/v5
+# with embedded bitfield masks), an optional colour table, and a pixel
+# array that may be raw, bit-packed, bitfield-masked, or RLE4/RLE8-
+# compressed, top-down or bottom-up. There is no external system library
+# worth pulling in as a cross-decode oracle (and the clean-room wall bars
+# the C references anyway), so this is a decode-only panic-free harness:
+# one target gets the whole 30-minute budget.
+
+on:
+  schedule:
+    - cron: "47 6 * * *"   # daily 06:47 UTC, jittered off the hour
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    uses: OxideAV/.github/.github/workflows/crate-fuzz.yml@master
+    with:
+      time_budget_seconds: 1800
+    secrets: inherit

@@ -101,10 +101,11 @@ cargo +nightly fuzz run decode
 ```
 
 The seed corpus carries one valid BMP per header / depth / compression
-variant (32/24/16/8/4-bpp, RLE4/RLE8, top-down, minimal-palette) plus a
-couple of degenerate framings. The harness shook out and fixed several
-header-driven denial-of-service paths (RLE / `bpp = 0` / `biClrUsed`
-over-allocation); see `CHANGELOG.md`.
+variant (32/24/16/8/4/1-bpp, RLE4/RLE8, top-down, minimal-palette, V4
+bitfields header) plus a couple of degenerate framings. The harness
+shook out and fixed several header-driven denial-of-service paths (RLE /
+`bpp = 0` / `biClrUsed` over-allocation); see `CHANGELOG.md`. A daily
+`.github/workflows/fuzz.yml` job runs the target on a 30-minute budget.
 
 ## Benchmarks
 

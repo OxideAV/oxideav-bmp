@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fuzz CI**: daily `.github/workflows/fuzz.yml` runs the `decode`
+  cargo-fuzz target on the org reusable fuzz workflow (30-minute budget,
+  decode-only panic-free harness). Added a 1-bpp indexed seed
+  (`indexed1_8x2.bmp`) to the corpus so the 1-bit palette-lookup path is
+  seeded directly. Local 60s baseline: 6.5M executions, zero crashes.
+
 - **Benchmarks**: Criterion harnesses at `benches/{decode,encode,roundtrip}.rs`
   mirroring the cinepak / tta / flac shape. Decode bench covers RGBA /
   RGB24 / RGB565 / Indexed8 / Indexed4 / RLE8 / RLE4 / DIB / ICO-DIB
