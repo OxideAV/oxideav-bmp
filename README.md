@@ -87,7 +87,21 @@ let frame = oxideav_bmp::decode_dib(&dib, /* doubled */ false)?;
 let ico_sub = oxideav_bmp::encode_dib(&frame, /* doubled */ true)?;
 ```
 
-## Fuzzing
+## Robustness — property tests + fuzzing
+
+`tests/malformed_inputs.rs` runs 31 deterministic structural-mutation
+tests on top of the public encoder API: every-byte truncation sweep,
+single-bit-flip across each header byte, header-size lies (V4/V5 claim
+on a V3 body), negative / zero / `i32::MIN` dimensions, `bfOffBits`
+past EOF, `biClrUsed` over-claim up to `u32::MAX`, illegal bit depths /
+plane counts / compression IDs, RLE-stream truncation, BI_BITFIELDS
+mask truncation, ICO doubled-height edge cases, OS/2
+`BITMAPCOREHEADER` truncations, plus a deterministic random-mutation
+burst (1280 corruptions across 5 base fixtures). The contract is the
+same as the fuzz harness: every malformed input must return `Err`
+(or, for the ICO doubled-height path's documented missing-AND-mask
+tolerance, return safely with the XOR alpha preserved) — never panic,
+index out of bounds, or OOM-abort.
 
 A `cargo-fuzz` harness lives in `fuzz/`. The `decode` target feeds
 arbitrary bytes to `decode_bmp` and to `decode_dib` (both the plain and

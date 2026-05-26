@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Property tests for malformed inputs** (round 155, `tests/malformed_inputs.rs`):
+  31 deterministic structural-mutation tests that complement the
+  `cargo-fuzz` `decode` target. Each test starts from a valid
+  encoder output (RGBA / RGB24 / RGB565 / Indexed8 / Indexed4 / DIB /
+  ICO-DIB) and applies one targeted transform — every-byte
+  truncation sweep, single-bit-flip across each header byte,
+  header-size lie (V4/V5 claim with V3 body, sub-12-byte sizes,
+  4-GiB sizes), negative / zero / `i32::MIN` width-height,
+  `bfOffBits` past EOF or inside the file header, `biClrUsed`
+  over-claim up to `u32::MAX`, illegal bit-depths (0/2/3/5/6/7/9/…
+  /0xFFFF), illegal planes (anything ≠ 1), unknown compression
+  IDs, BI_RLE8 / BI_RLE4 with the wrong bpp, RLE-stream truncation
+  inside the pixel region, palette truncation, BI_BITFIELDS mask
+  truncation, all-zero BI_BITFIELDS masks, ICO doubled-height with
+  odd / `i32::MAX` height, OS/2 `BITMAPCOREHEADER` zero-width /
+  unsupported-bpp / truncated-palette — plus a deterministic
+  random-mutation burst (5 base fixtures × 256 rounds × 1-4 byte
+  flips). 67 tests total in the crate (27 lib + 9 magick + 31 new).
+  No new dependencies; pure std + the existing public API. The
+  ICO doubled-height variant intentionally tolerates a missing AND
+  mask (some real-world icons lie about the trailing 1-bpp size)
+  so the truncation sweep relaxes to "no panic, Ok-or-Err allowed"
+  past the XOR-pixel region for that path — confirmed against the
+  documented behaviour in `decode_dib_with_mask`.
+
 - **Fuzz CI**: daily `.github/workflows/fuzz.yml` runs the `decode`
   cargo-fuzz target on the org reusable fuzz workflow (30-minute budget,
   decode-only panic-free harness). Added a 1-bpp indexed seed
