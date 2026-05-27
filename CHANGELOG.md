@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **RLE-focused fuzz target** (round 162, `fuzz/fuzz_targets/rle_stream.rs`):
+  a second `cargo-fuzz` target that narrows the input so libfuzzer's
+  iteration budget lands on the `BI_RLE8` / `BI_RLE4` state machines
+  themselves rather than re-discovering valid 14-byte
+  BITMAPFILEHEADERs. The first three fuzz bytes pick the RLE flavour
+  (8 vs 4-bpp), width (1..=255) and height (1..=255); the remaining
+  bytes become the on-disk RLE pixel payload of a synthetic BMP with
+  a maximal colour table (256 × `RGBQUAD` for RLE8, 16 for RLE4) so a
+  palette lookup never short-circuits the walk. Seed corpus is two
+  pixel streams extracted from the existing `decode` seeds. Same
+  panic-free contract; local 20-second smoke run lands ~1.5 M inputs
+  at ~72 k execs/sec with zero crashes. CI picks up the new target
+  automatically via the org reusable workflow's `[[bin]]` discovery.
+
 - **Property tests for malformed inputs** (round 155, `tests/malformed_inputs.rs`):
   31 deterministic structural-mutation tests that complement the
   `cargo-fuzz` `decode` target. Each test starts from a valid

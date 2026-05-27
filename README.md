@@ -103,23 +103,38 @@ same as the fuzz harness: every malformed input must return `Err`
 tolerance, return safely with the XOR alpha preserved) — never panic,
 index out of bounds, or OOM-abort.
 
-A `cargo-fuzz` harness lives in `fuzz/`. The `decode` target feeds
-arbitrary bytes to `decode_bmp` and to `decode_dib` (both the plain and
-the doubled-height XOR+AND-mask modes) and asserts the decoder always
-returns a `Result` rather than panicking, indexing out of bounds, or
-OOM-aborting. It builds against the framework-free standalone path
+Two `cargo-fuzz` targets live in `fuzz/`:
+
+* `decode` — feeds arbitrary bytes to `decode_bmp` and to `decode_dib`
+  (both the plain and the doubled-height XOR+AND-mask modes). The
+  seed corpus carries one valid BMP per header / depth / compression
+  variant (32/24/16/8/4/1-bpp, RLE4/RLE8, top-down, minimal-palette,
+  V4 bitfields header) plus a couple of degenerate framings.
+* `rle_stream` (round 162) — narrows the input so libfuzzer spends its
+  iteration budget on the BI_RLE8 / BI_RLE4 state machines instead of
+  re-discovering valid 14-byte BITMAPFILEHEADERs. The first three
+  fuzz bytes pick the RLE flavour (8 vs 4-bpp), width (1..=255) and
+  height (1..=255); the harness wraps the remainder as the pixel
+  payload of a synthetic BMP carrying a maximal colour table. Seed
+  corpus is two real RLE pixel streams lifted from the `decode` seeds.
+
+Both targets share the same contract — every input returns a `Result`
+rather than panicking, indexing out of bounds, or OOM-aborting — and
+build against the framework-free standalone path
 (`default-features = false`).
 
 ```sh
 cargo +nightly fuzz run decode
+cargo +nightly fuzz run rle_stream
 ```
 
-The seed corpus carries one valid BMP per header / depth / compression
-variant (32/24/16/8/4/1-bpp, RLE4/RLE8, top-down, minimal-palette, V4
-bitfields header) plus a couple of degenerate framings. The harness
-shook out and fixed several header-driven denial-of-service paths (RLE /
-`bpp = 0` / `biClrUsed` over-allocation); see `CHANGELOG.md`. A daily
-`.github/workflows/fuzz.yml` job runs the target on a 30-minute budget.
+The `decode` harness shook out and fixed several header-driven
+denial-of-service paths (RLE / `bpp = 0` / `biClrUsed` over-allocation);
+see `CHANGELOG.md`. A local 20-second `rle_stream` run lands ~1.5 M
+inputs (~72 k execs/sec) with zero crashes. A daily
+`.github/workflows/fuzz.yml` job runs both targets on a shared
+30-minute budget via the org reusable workflow's `[[bin]]`
+auto-discovery.
 
 ## Benchmarks
 
