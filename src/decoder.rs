@@ -146,12 +146,19 @@ pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<
     // wildly-large `pixel_start` simply fails the bounds checks there.
     let entry_size = palette_entry_bytes(&header);
     let color_table_bytes = header.palette_entries().saturating_mul(entry_size);
-    let masks_bytes =
-        if header.compression == BI_BITFIELDS && header.header_size == BITMAPINFOHEADER_SIZE {
-            12usize
-        } else {
-            0usize
-        };
+    // V3 (40-byte) BI_BITFIELDS appends 12 bytes (R/G/B) of masks after
+    // the header; V3 BI_ALPHABITFIELDS appends 16 bytes (R/G/B/A). V4/V5
+    // headers carry the masks inside the header body so contribute no
+    // extra appended bytes.
+    let masks_bytes = if header.header_size == BITMAPINFOHEADER_SIZE {
+        match header.compression {
+            BI_BITFIELDS => 12usize,
+            BI_ALPHABITFIELDS => 16usize,
+            _ => 0usize,
+        }
+    } else {
+        0usize
+    };
     let pixel_start = (header.header_size as usize)
         .saturating_add(masks_bytes)
         .saturating_add(color_table_bytes);
@@ -237,33 +244,53 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
         return Err(Error::invalid(format!("BMP: planes={planes} (must be 1)")));
     }
 
-    let (mask_r, mask_g, mask_b, mask_a) = if compression == BI_BITFIELDS {
-        if header_size >= BITMAPV4HEADER_SIZE {
-            // v4/v5 store the masks in the header body.
-            (
-                Some(read_u32_le(input, 40)),
-                Some(read_u32_le(input, 44)),
-                Some(read_u32_le(input, 48)),
-                Some(read_u32_le(input, 52)),
-            )
-        } else {
-            // v3 places them in the 12 bytes immediately following
-            // the 40-byte header.
-            if input.len() < (BITMAPINFOHEADER_SIZE + 12) as usize {
-                return Err(Error::invalid(
-                    "BMP: BI_BITFIELDS needs 12 bytes of masks after header",
-                ));
+    let (mask_r, mask_g, mask_b, mask_a) =
+        if compression == BI_BITFIELDS || compression == BI_ALPHABITFIELDS {
+            if header_size >= BITMAPV4HEADER_SIZE {
+                // v4/v5 store the masks in the header body. `BI_ALPHABITFIELDS`
+                // on a v4+ header is equivalent to `BI_BITFIELDS` since the
+                // alpha mask is already part of the fixed header layout.
+                (
+                    Some(read_u32_le(input, 40)),
+                    Some(read_u32_le(input, 44)),
+                    Some(read_u32_le(input, 48)),
+                    Some(read_u32_le(input, 52)),
+                )
+            } else {
+                // V3 (40-byte) header: masks live in the bytes immediately
+                // following the header — 12 bytes (R/G/B) for `BI_BITFIELDS`
+                // and 16 bytes (R/G/B/A) for `BI_ALPHABITFIELDS`. Read the
+                // alpha mask only for the four-mask variant; for the three-
+                // mask variant leave `mask_a = None` so the per-bpp decode
+                // arms fall back to "opaque".
+                let masks_bytes = if compression == BI_ALPHABITFIELDS {
+                    16
+                } else {
+                    12
+                };
+                if input.len() < (BITMAPINFOHEADER_SIZE as usize) + masks_bytes {
+                    let label = if compression == BI_ALPHABITFIELDS {
+                        "BI_ALPHABITFIELDS needs 16 bytes of masks after header"
+                    } else {
+                        "BI_BITFIELDS needs 12 bytes of masks after header"
+                    };
+                    return Err(Error::invalid(format!("BMP: {label}")));
+                }
+                let ma = if compression == BI_ALPHABITFIELDS {
+                    Some(read_u32_le(input, 52))
+                } else {
+                    None
+                };
+                (
+                    Some(read_u32_le(input, 40)),
+                    Some(read_u32_le(input, 44)),
+                    Some(read_u32_le(input, 48)),
+                    ma,
+                )
             }
-            (
-                Some(read_u32_le(input, 40)),
-                Some(read_u32_le(input, 44)),
-                Some(read_u32_le(input, 48)),
-                None,
-            )
-        }
-    } else {
-        (None, None, None, None)
-    };
+        } else {
+            (None, None, None, None)
+        };
 
     Ok((
         DibHeader {
@@ -343,7 +370,7 @@ fn parse_bitmapcoreheader(input: &[u8]) -> Result<(DibHeader, usize)> {
 fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Result<BmpImage> {
     // Reject compressions we don't handle before we go any further.
     match h.compression {
-        BI_RGB | BI_BITFIELDS | BI_RLE4 | BI_RLE8 => {}
+        BI_RGB | BI_BITFIELDS | BI_ALPHABITFIELDS | BI_RLE4 | BI_RLE8 => {}
         BI_JPEG => return Err(Error::invalid("BMP: embedded JPEG not supported")),
         BI_PNG => return Err(Error::invalid("BMP: embedded PNG not supported")),
         c => return Err(Error::invalid(format!("BMP: unknown compression {c}"))),
@@ -608,18 +635,21 @@ fn decode_pixels(
         }
         16 => {
             // Default BI_RGB mapping is 5-5-5 with the high bit
-            // reserved. BI_BITFIELDS lets the file declare its own
-            // layout (e.g. 5-6-5). We honour either.
-            let (mr, mg, mb, ma) = if h.compression == BI_BITFIELDS {
-                (
-                    h.mask_r.unwrap_or(0x7C00),
-                    h.mask_g.unwrap_or(0x03E0),
-                    h.mask_b.unwrap_or(0x001F),
-                    h.mask_a.unwrap_or(0),
-                )
-            } else {
-                (0x7C00, 0x03E0, 0x001F, 0)
-            };
+            // reserved. BI_BITFIELDS / BI_ALPHABITFIELDS let the file
+            // declare its own layout (e.g. 5-6-5; the alpha-bitfields
+            // flavour additionally carries an alpha mask in the V3
+            // header tail). We honour any of those.
+            let (mr, mg, mb, ma) =
+                if h.compression == BI_BITFIELDS || h.compression == BI_ALPHABITFIELDS {
+                    (
+                        h.mask_r.unwrap_or(0x7C00),
+                        h.mask_g.unwrap_or(0x03E0),
+                        h.mask_b.unwrap_or(0x001F),
+                        h.mask_a.unwrap_or(0),
+                    )
+                } else {
+                    (0x7C00, 0x03E0, 0x001F, 0)
+                };
             let (rs, rn) = shift_len(mr);
             let (gs, gn) = shift_len(mg);
             let (bs, bn) = shift_len(mb);
@@ -656,9 +686,9 @@ fn decode_pixels(
             }
         }
         32 => {
-            // Default BI_RGB for 32bpp is BGRA. BI_BITFIELDS may declare
-            // otherwise; handle both.
-            if h.compression == BI_BITFIELDS
+            // Default BI_RGB for 32bpp is BGRA. BI_BITFIELDS or
+            // BI_ALPHABITFIELDS may declare otherwise; handle both.
+            if (h.compression == BI_BITFIELDS || h.compression == BI_ALPHABITFIELDS)
                 && (h.mask_r.is_some() || h.mask_g.is_some() || h.mask_b.is_some())
             {
                 let mr = h.mask_r.unwrap_or(0x00FF_0000);

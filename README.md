@@ -16,9 +16,11 @@ sub-images.
 | 8         | `BI_RLE8`      | `Rgba` (delta + absolute mode) |
 | 16        | `BI_RGB`       | `Rgba` (5-5-5) |
 | 16        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
+| 16        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
 | 24        | `BI_RGB`       | `Rgba` (BGR→RGB, α=0xFF) |
 | 32        | `BI_RGB`       | `Rgba` (BGRA→RGBA) |
 | 32        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
+| 32        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
 
 `BITMAPCOREHEADER` (OS/2 1.x, 12 B), `BITMAPINFOHEADER` (v3, 40 B),
 `BITMAPV4HEADER`, and `BITMAPV5HEADER` are all accepted. The OS/2 path
@@ -26,6 +28,16 @@ honours the 3-byte `RGBTRIPLE` colour-table layout (V3+ uses 4-byte
 `RGBQUAD`). Bottom-up and top-down row orders are auto-detected from
 the sign of `biHeight`; output is always top-down `Rgba`. `BI_JPEG`
 and `BI_PNG` are rejected at the boundary.
+
+`BI_ALPHABITFIELDS` (compression value 6) is the four-mask variant of
+`BI_BITFIELDS` documented for Windows CE 5.0+ and accepted by recent
+Windows builds: on a V3 (40-byte) `BITMAPINFOHEADER` it appends 16
+bytes of R/G/B/A masks instead of `BI_BITFIELDS`' 12 bytes (R/G/B).
+On V4/V5 headers the masks already live in the header body, so
+`BI_ALPHABITFIELDS` and `BI_BITFIELDS` decode identically. Truncated
+mask tails are rejected at the parser boundary; an explicit
+`alpha mask = 0` falls back to opaque output to match the
+`BI_BITFIELDS` convention.
 
 ## Encode
 

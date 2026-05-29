@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`BI_ALPHABITFIELDS` (compression value 6) decode** (round 182): the
+  four-mask variant of `BI_BITFIELDS` documented for Windows CE 5.0+
+  and accepted by recent Windows builds. On a V3 (40-byte)
+  `BITMAPINFOHEADER` the variant appends 16 bytes of R/G/B/A masks
+  immediately after the header (vs `BI_BITFIELDS`' 12 bytes of R/G/B);
+  the parser reads the alpha mask too and feeds it into the existing
+  16-bpp and 32-bpp mask-driven decode paths. V4/V5 headers already
+  carry all four masks in the header body, so `BI_ALPHABITFIELDS` on
+  those header sizes is treated identically to `BI_BITFIELDS`.
+  Truncated mask tails on V3 are rejected with a dedicated error
+  message; an explicit zero alpha mask falls back to opaque output to
+  match the `BI_BITFIELDS` convention. The `pixel_start` computation
+  in `decode_dib` was updated to count the four-mask tail toward the
+  palette / pixel-array offset. Lib tests:
+  `alpha_bitfields_v3_32bpp_decodes`,
+  `alpha_bitfields_v3_32bpp_alpha_zero_means_transparent`,
+  `alpha_bitfields_v3_truncated_masks_rejected`,
+  `alpha_bitfields_v3_zero_alpha_mask_yields_opaque`,
+  `alpha_bitfields_v3_16bpp_5551`. The
+  `unknown_compression_is_rejected` property test was updated to drop
+  compression value 6 from the rejected-values list (the value is now
+  legitimately recognised). New constant: `BI_ALPHABITFIELDS = 6`
+  re-exported from the crate root. No new dependencies; works in both
+  `registry` and standalone builds.
+
 - **1-bit indexed (monochrome) encode** (round 176): new
   `BmpPixelFormat::Indexed1` variant + the `EncodedBmpFormat::Indexed1`
   return token, closing the asymmetry between decode (which has always

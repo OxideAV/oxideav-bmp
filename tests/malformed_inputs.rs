@@ -422,10 +422,12 @@ fn planes_other_than_1_are_rejected() {
 #[test]
 fn unknown_compression_is_rejected() {
     let mut bytes = encode_bmp(&rgba_image(4, 4)).unwrap().0;
-    // compression at offset 14+16 = 30 (u32). BI_RGB=0, BI_RLE8=1,
-    // BI_RLE4=2, BI_BITFIELDS=3, BI_JPEG=4, BI_PNG=5. Unknown values
-    // and explicit-reject BI_JPEG/BI_PNG.
-    for c in [4u32, 5, 6, 7, 8, 0xFF, 0xFFFF, u32::MAX] {
+    // compression at offset 14+16 = 30 (u32). Recognised compressions:
+    //   BI_RGB=0, BI_RLE8=1, BI_RLE4=2, BI_BITFIELDS=3, BI_JPEG=4,
+    //   BI_PNG=5, BI_ALPHABITFIELDS=6.
+    // BI_JPEG / BI_PNG are explicitly rejected; everything outside that
+    // table must also be rejected.
+    for c in [4u32, 5, 7, 8, 0xFF, 0xFFFF, u32::MAX] {
         bytes[30..34].copy_from_slice(&c.to_le_bytes());
         let r = decode_bmp(&bytes);
         assert!(r.is_err(), "compression={c} must be rejected");

@@ -57,7 +57,7 @@ pub use error::{BmpError, Result};
 pub use image::{BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
 pub use types::{
     row_stride, DibHeader, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE,
-    BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_BITFIELDS, BI_RGB, BMP_MAGIC,
+    BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB, BMP_MAGIC,
 };
 
 #[cfg(feature = "registry")]
@@ -1187,5 +1187,115 @@ mod tests {
         input.extend_from_slice(&[1, 0, 0, 1]);
         let img = decode_bmp(&input).expect("tiny RLE8 must decode");
         assert_eq!((img.width, img.height), (1, 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // BI_ALPHABITFIELDS (compression value 6) — V3 header with R/G/B/A masks
+    // -----------------------------------------------------------------------
+    //
+    // V3 `BITMAPINFOHEADER` (40 B) with `biCompression = BI_ALPHABITFIELDS`
+    // (= 6) carries 16 bytes of masks (R, G, B, A) immediately after the
+    // header, where `BI_BITFIELDS` (3) would have carried only 12 bytes
+    // (R, G, B). The Windows CE / NT 5.0+ variant exists because some
+    // producers want to declare a per-mask alpha channel without bumping
+    // the header to V4 (BITMAPV4HEADER, 108 B). On V4/V5 headers the
+    // distinction collapses since the alpha mask is already part of the
+    // fixed header layout — we treat both compression values identically
+    // for header_size >= 108.
+
+    /// Build a V3 BMP with `BI_ALPHABITFIELDS`, 32-bpp, the four R/G/B/A
+    /// masks supplied verbatim, and a single 0xAABBCCDD payload word.
+    fn raw_alpha_bitfields_32bpp(masks: [u32; 4], pixel: u32) -> Vec<u8> {
+        // pixel_offset = 14 (file header) + 40 (info header) + 16 (masks) = 70
+        let mut input = raw_bmp(1, 1, 32, BI_ALPHABITFIELDS, 70, 0, &[]);
+        for m in masks {
+            input.extend_from_slice(&m.to_le_bytes());
+        }
+        input.extend_from_slice(&pixel.to_le_bytes());
+        input
+    }
+
+    #[test]
+    fn alpha_bitfields_v3_32bpp_decodes() {
+        // Canonical BGRA-style mask layout: R=0x00FF0000, G=0x0000FF00,
+        // B=0x000000FF, A=0xFF000000. Payload 0xAABBCCDD decomposes
+        // (little-endian on disk) to a u32 word = 0xAABBCCDD.
+        //   R = (0xAABBCCDD & 0x00FF0000) >> 16 = 0xBB
+        //   G = (0xAABBCCDD & 0x0000FF00) >>  8 = 0xCC
+        //   B = (0xAABBCCDD & 0x000000FF)       = 0xDD
+        //   A = (0xAABBCCDD & 0xFF000000) >> 24 = 0xAA
+        let bytes = raw_alpha_bitfields_32bpp(
+            [0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000],
+            0xAABB_CCDD,
+        );
+        let img = decode_bmp(&bytes).expect("BI_ALPHABITFIELDS 32bpp must decode");
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(&img.planes[0].data[..4], &[0xBB, 0xCC, 0xDD, 0xAA]);
+    }
+
+    #[test]
+    fn alpha_bitfields_v3_32bpp_alpha_zero_means_transparent() {
+        // Same masks but payload alpha nibble is zero → output alpha is 0.
+        // The compression code path is exercised end-to-end (header parse,
+        // 16-byte mask tail, mask-driven 32-bpp expansion).
+        let bytes = raw_alpha_bitfields_32bpp(
+            [0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000],
+            0x00FF_FFFF,
+        );
+        let img = decode_bmp(&bytes).expect("must decode");
+        assert_eq!(img.planes[0].data[3], 0x00);
+    }
+
+    #[test]
+    fn alpha_bitfields_v3_truncated_masks_rejected() {
+        // Compression = BI_ALPHABITFIELDS but the 4 mask words don't all
+        // fit after the 40-byte header. The parser must reject rather than
+        // index past the buffer.
+        let mut input = raw_bmp(1, 1, 32, BI_ALPHABITFIELDS, 70, 0, &[]);
+        // Only 12 of the 16 mask bytes — enough for BI_BITFIELDS but
+        // short for BI_ALPHABITFIELDS.
+        input.extend_from_slice(&0x00FF_0000u32.to_le_bytes());
+        input.extend_from_slice(&0x0000_FF00u32.to_le_bytes());
+        input.extend_from_slice(&0x0000_00FFu32.to_le_bytes());
+        // No alpha mask, no pixel.
+        assert!(decode_bmp(&input).is_err());
+    }
+
+    #[test]
+    fn alpha_bitfields_v3_zero_alpha_mask_yields_opaque() {
+        // Alpha mask = 0 means "no alpha" even with BI_ALPHABITFIELDS:
+        // the 16-byte mask tail is read in full but the alpha slot is
+        // zeroed, so output alpha falls back to the canonical 0xFF.
+        let bytes = raw_alpha_bitfields_32bpp(
+            [0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0x0000_0000],
+            0x0011_2233,
+        );
+        let img = decode_bmp(&bytes).expect("must decode");
+        assert_eq!(&img.planes[0].data[..4], &[0x11, 0x22, 0x33, 0xFF]);
+    }
+
+    #[test]
+    fn alpha_bitfields_v3_16bpp_5551() {
+        // 5-5-5-1 packing as a 16-bpp BI_ALPHABITFIELDS variant. Payload
+        // bit layout (LE u16):
+        //   bit 15      = alpha
+        //   bits 14..10 = R
+        //   bits  9..5  = G
+        //   bits  4..0  = B
+        // Masks: A=0x8000, R=0x7C00, G=0x03E0, B=0x001F.
+        // Payload 0xFC1F (= 0b1111_1100_0001_1111) → A=1, R=31, G=0, B=31.
+        let mut input = raw_bmp(1, 1, 16, BI_ALPHABITFIELDS, 70, 0, &[]);
+        input.extend_from_slice(&0x7C00u32.to_le_bytes()); // R
+        input.extend_from_slice(&0x03E0u32.to_le_bytes()); // G
+        input.extend_from_slice(&0x001Fu32.to_le_bytes()); // B
+        input.extend_from_slice(&0x8000u32.to_le_bytes()); // A
+                                                           // 16-bpp row stride is `ceil(1*16/32)*4 = 4`, so pad the 2-byte
+                                                           // pixel word to 4 bytes.
+        input.extend_from_slice(&[0x1F, 0xFC, 0x00, 0x00]);
+        let img = decode_bmp(&input).expect("16-bpp BI_ALPHABITFIELDS decode");
+        assert_eq!((img.width, img.height), (1, 1));
+        // 5-bit → 8-bit expansion: 31 -> 0xFF, 0 -> 0x00. Alpha 1-bit:
+        // 1 expanded to 0xFF.
+        assert_eq!(&img.planes[0].data[..4], &[0xFF, 0x00, 0xFF, 0xFF]);
     }
 }

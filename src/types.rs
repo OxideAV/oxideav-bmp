@@ -42,6 +42,13 @@ pub const BI_RLE4: u32 = 2;
 pub const BI_BITFIELDS: u32 = 3;
 pub const BI_JPEG: u32 = 4;
 pub const BI_PNG: u32 = 5;
+/// `BI_ALPHABITFIELDS` — like `BI_BITFIELDS` but four masks (R/G/B/A)
+/// follow a V3 `BITMAPINFOHEADER` (16 bytes total) instead of three
+/// (12 bytes). Documented for Windows CE 5.0+ and accepted by recent
+/// Windows builds. V4/V5 headers already carry all four masks in the
+/// header body, so for those header sizes this is treated identically
+/// to `BI_BITFIELDS`.
+pub const BI_ALPHABITFIELDS: u32 = 6;
 
 /// Parsed `BITMAPINFOHEADER` (plus the extra masks read from a v4/v5
 /// header when present). All integer fields kept in their native BMP
