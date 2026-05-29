@@ -16,9 +16,10 @@
 //! formats. `BI_JPEG` and `BI_PNG` embedded payloads are rejected.
 //!
 //! Encode side supports 32-bit BGRA, 24-bit BGR, 16-bit RGB 5-6-5
-//! (`BI_BITFIELDS`), 8-bit indexed (with optional `BI_RLE8`), and 4-bit
-//! indexed (with optional `BI_RLE4`). RLE is chosen automatically when it
-//! produces a smaller file than uncompressed indexed.
+//! (`BI_BITFIELDS`), 8-bit indexed (with optional `BI_RLE8`), 4-bit
+//! indexed (with optional `BI_RLE4`), and 1-bit indexed (monochrome,
+//! always uncompressed). RLE is chosen automatically when it produces
+//! a smaller file than uncompressed indexed.
 //!
 //! ## Standalone vs registry-integrated
 //!
@@ -969,6 +970,207 @@ mod tests {
         // vector → OOM-abort. bpp is now validated up front.
         let input = raw_bmp(4, 134_283_268, 0, BI_RGB, 66, 3, &[0u8; 64]);
         assert!(decode_bmp(&input).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // 1-bit indexed encode (monochrome)
+    // -----------------------------------------------------------------------
+
+    /// Two-entry palette: black + white.
+    fn mono_palette() -> BmpPalette {
+        BmpPalette {
+            entries: vec![[0, 0, 0], [255, 255, 255]],
+        }
+    }
+
+    /// Build a 1-bit indexed plane with a column-striped pattern:
+    /// `x & 1 == 0` → index 0, else index 1. One byte per pixel.
+    fn mono_stripes(w: u32, h: u32) -> Vec<u8> {
+        let mut data = Vec::with_capacity((w * h) as usize);
+        for _ in 0..h {
+            for x in 0..w {
+                data.push((x & 1) as u8);
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn roundtrip_1bit_indexed() {
+        let w = 16u32;
+        let h = 8u32;
+        let palette = mono_palette();
+        let data = mono_stripes(w, h);
+        let stride = w as usize;
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed1,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette.clone()),
+            pts: None,
+        };
+        let (bytes, fmt) = encode_bmp(&src).unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Indexed1);
+        assert_eq!(&bytes[..2], b"BM");
+
+        // V3 header: bpp field at offset 14 + 14 = 28.
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert_eq!(bpp, 1);
+
+        // Compression at offset 30 = BI_RGB (0).
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_RGB);
+
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.width, w);
+        assert_eq!(back.height, h);
+        // (0,0) → idx 0 → black, (1,0) → idx 1 → white, both opaque.
+        assert_eq!(&back.planes[0].data[..4], &[0u8, 0, 0, 255]);
+        assert_eq!(&back.planes[0].data[4..8], &[255u8, 255, 255, 255]);
+        // (2,0) → idx 0 → black again.
+        assert_eq!(&back.planes[0].data[8..12], &[0u8, 0, 0, 255]);
+    }
+
+    #[test]
+    fn indexed1_without_palette_errors() {
+        let w = 8u32;
+        let h = 1u32;
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed1,
+            planes: vec![BmpPlane {
+                stride: w as usize,
+                data: vec![0u8; w as usize],
+            }],
+            palette: None,
+            pts: None,
+        };
+        assert!(encode_bmp(&src).is_err());
+    }
+
+    #[test]
+    fn indexed1_packs_msb_first() {
+        // Width-padded 1-bpp rows: 12-pixel width packs into 2 bytes + 2
+        // pad bytes (32-bit alignment). Pattern 1,0,1,0,1,0,1,0,1,0,1,0
+        // → bytes 0b10101010 + 0b10100000 + 00 + 00 in row 0.
+        // With minimal_palette set, the colour table shrinks to 2
+        // entries (8 bytes) so we can locate the pixel array deterministically.
+        let w = 12u32;
+        let h = 1u32;
+        let palette = mono_palette();
+        let mut data = Vec::with_capacity(w as usize);
+        for x in 0..w {
+            data.push(((x + 1) & 1) as u8); // 1,0,1,0,...
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed1,
+            planes: vec![BmpPlane {
+                stride: w as usize,
+                data,
+            }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let (bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                minimal_palette: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Indexed1);
+        // pixel_offset = 14 (file hdr) + 40 (V3) + 2 entries × 4 = 62.
+        let pixel_offset = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(pixel_offset, 62);
+        // Row 0 = 4 bytes (4-byte-aligned, even for 12 px / 1 bpp).
+        assert_eq!(bytes[pixel_offset as usize], 0b1010_1010);
+        // Last 4 bits (pixels 8-11) live in the high nibble of byte 1.
+        assert_eq!(bytes[pixel_offset as usize + 1] & 0xF0, 0b1010_0000);
+        // Padding bytes are zero.
+        assert_eq!(bytes[pixel_offset as usize + 2], 0);
+        assert_eq!(bytes[pixel_offset as usize + 3], 0);
+    }
+
+    #[test]
+    fn indexed1_top_down_roundtrips() {
+        let w = 16u32;
+        let h = 4u32;
+        let palette = mono_palette();
+        let data = mono_stripes(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed1,
+            planes: vec![BmpPlane {
+                stride: w as usize,
+                data,
+            }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let (bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Indexed1);
+        // biHeight at offset 22 should be -(h as i32).
+        let bi_height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(bi_height, -(h as i32));
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.width, w);
+        assert_eq!(back.height, h);
+        // Stripes preserved: (0,0) black, (1,0) white.
+        assert_eq!(&back.planes[0].data[..4], &[0u8, 0, 0, 255]);
+        assert_eq!(&back.planes[0].data[4..8], &[255u8, 255, 255, 255]);
+    }
+
+    #[test]
+    fn indexed1_minimal_palette_one_entry_clamped() {
+        // A 1-bpp palette with a single entry must still produce a
+        // valid file — `written_palette_entries` clamps to `[1, 2]`,
+        // so we write exactly 1 colour table entry and record
+        // `biClrUsed = 1`.
+        let w = 8u32;
+        let h = 1u32;
+        let palette = BmpPalette {
+            entries: vec![[42, 99, 200]],
+        };
+        // All-zero pixel data → every pixel resolves to entry 0.
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed1,
+            planes: vec![BmpPlane {
+                stride: w as usize,
+                data: vec![0u8; w as usize],
+            }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let (bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                minimal_palette: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Indexed1);
+        // biClrUsed at offset 14 + 32 = 46.
+        let clr_used = u32::from_le_bytes([bytes[46], bytes[47], bytes[48], bytes[49]]);
+        assert_eq!(clr_used, 1);
+        let back = decode_bmp(&bytes).unwrap();
+        // First pixel resolves to the single palette entry (R=42, G=99, B=200).
+        assert_eq!(&back.planes[0].data[..4], &[42u8, 99, 200, 255]);
     }
 
     #[test]

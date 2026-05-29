@@ -36,14 +36,20 @@ and `BI_PNG` are rejected at the boundary.
 | `Rgb565` (2 B/px)   | 16-bit `BI_BITFIELDS` 5-6-5   | V4     |
 | `Indexed8` (1 B/px) | 8-bit indexed `BI_RGB` or `BI_RLE8` (auto) | V3 |
 | `Indexed4` (1 B/px) | 4-bit indexed `BI_RGB` or `BI_RLE4` (auto) | V3 |
+| `Indexed1` (1 B/px) | 1-bit indexed `BI_RGB` (monochrome) | V3 |
 
 For `Rgb565` the V4 header carries canonical masks R=0xF800, G=0x07E0,
-B=0x001F. For indexed formats the encoder tries RLE compression first
-and falls back to uncompressed when RLE does not shrink the output.
+B=0x001F. For 8/4-bit indexed formats the encoder tries RLE compression
+first and falls back to uncompressed when RLE does not shrink the
+output. BMP has no RLE flavour at 1 bpp so `Indexed1` is always
+emitted as uncompressed `BI_RGB`.
 
-`Indexed8` and `Indexed4` require a `BmpPalette` alongside the image.
-Up to 256 (8-bit) or 16 (4-bit) entries; unused entries are
-zero-padded in the on-disk colour table.
+`Indexed8`, `Indexed4`, and `Indexed1` all require a `BmpPalette`
+alongside the image: up to 256 (8-bit), 16 (4-bit), or 2 (1-bit)
+entries. Pixel-byte inputs carry `idx & 0xFF` / `idx & 0x0F` /
+`idx & 1` respectively; the encoder packs them MSB-first per the BMP
+spec. Unused entries are zero-padded in the on-disk colour table; set
+`minimal_palette = true` to record only the entries actually supplied.
 
 ### Minimal colour table (`biClrUsed`)
 
@@ -59,20 +65,22 @@ leave `biClrUsed = 0` (the "all colours used" sentinel). Setting
 `minimal_palette: true` instead writes exactly as many `RGBQUAD`
 entries as the supplied `BmpPalette` carries and records that count
 in `biClrUsed` — a 2-colour 8-bit image sheds 254 unused entries
-(1016 bytes). The count is clamped to `[1, 2^bpp]`; a palette that
-already fills the space keeps the `biClrUsed = 0` sentinel. Composable
-with `top_down`. The decoder's `biClrUsed`-aware palette reader (and
-ImageMagick) consume the trimmed table transparently.
+(1016 bytes); a 1-entry `Indexed1` table sheds 4 bytes. The count is
+clamped to `[1, 2^bpp]`; a palette that already fills the space keeps
+the `biClrUsed = 0` sentinel. Composable with `top_down`. The
+decoder's `biClrUsed`-aware palette reader (and ImageMagick) consume
+the trimmed table transparently.
 
 ### Top-down DIB output
 
 `encode_bmp_with_options(&image, BmpEncodeOptions { top_down: true })`
 emits a top-down DIB — rows stored top-to-bottom, `biHeight` written
 as a negative integer per the BMP signed-height convention.
-Compatible with `Rgba` / `Rgb24` / `Rgb565` / `Indexed8` / `Indexed4`;
-the indexed paths force the uncompressed fall-back when `top_down`
-is set since RLE escape codes have no defined meaning under a
-negative `biHeight`.
+Compatible with `Rgba` / `Rgb24` / `Rgb565` / `Indexed8` / `Indexed4` /
+`Indexed1`; the 8/4-bit indexed paths force the uncompressed fall-back
+when `top_down` is set since RLE escape codes have no defined meaning
+under a negative `biHeight`. `Indexed1` is always uncompressed and so
+unaffected.
 
 ## DIB helpers for `.ico`
 

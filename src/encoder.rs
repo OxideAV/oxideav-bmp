@@ -9,18 +9,22 @@
 //! | 16-bit RGB 5-6-5      | `BI_BITFIELDS` | V4   |
 //! | 8-bit indexed         | `BI_RGB`     | V3     |
 //! | 4-bit indexed         | `BI_RGB`     | V3     |
+//! | 1-bit indexed         | `BI_RGB`     | V3     |
 //! | 8-bit indexed RLE     | `BI_RLE8`    | V3     |
 //! | 4-bit indexed RLE     | `BI_RLE4`    | V3     |
 //!
 //! For RLE variants the encoder first tries the compressed form and falls
 //! back to uncompressed indexed when the compressed output is not smaller.
+//! BMP has no RLE flavour at 1 bpp, so the [`BmpPixelFormat::Indexed1`]
+//! path is always emitted as uncompressed `BI_RGB`.
 //!
 //! Input [`BmpPixelFormat::Rgba`] is accepted directly;
 //! [`BmpPixelFormat::Rgb24`] is written as 24-bit BGR.
 //! [`BmpPixelFormat::Rgb565`] is written as 16-bit BI_BITFIELDS (V4 header).
-//! [`BmpPixelFormat::Indexed8`] / [`BmpPixelFormat::Indexed4`] require a
-//! [`BmpPalette`] in the accompanying [`BmpImage`]; optional RLE is chosen
-//! automatically when it compresses.
+//! [`BmpPixelFormat::Indexed8`] / [`BmpPixelFormat::Indexed4`] /
+//! [`BmpPixelFormat::Indexed1`] require a [`BmpPalette`] in the
+//! accompanying [`BmpImage`]; optional RLE is chosen automatically when
+//! it compresses (8/4-bit only).
 
 use crate::error::{BmpError as Error, Result};
 use crate::image::{BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
@@ -88,6 +92,8 @@ pub enum EncodedBmpFormat {
     Rle8,
     /// 4-bit RLE-compressed indexed `BI_RLE4`.
     Rle4,
+    /// 1-bit uncompressed indexed `BI_RGB` (monochrome).
+    Indexed1,
 }
 
 #[cfg(feature = "registry")]
@@ -287,6 +293,13 @@ pub fn encode_bmp_plane_with_options(
                 .ok_or_else(|| Error::invalid("BMP encoder: Indexed4 requires a palette"))?;
             encode_indexed4_auto(plane, pal, width, height, options)
         }
+        BmpPixelFormat::Indexed1 => {
+            let pal = palette
+                .ok_or_else(|| Error::invalid("BMP encoder: Indexed1 requires a palette"))?;
+            let (raw_pixels, _) = pack_indexed(plane, 1, width, height, options)?;
+            let file = build_indexed_bmp(width, height, 1, BI_RGB, pal, &raw_pixels, options);
+            Ok((file, EncodedBmpFormat::Indexed1))
+        }
     }
 }
 
@@ -474,6 +487,21 @@ pub fn encode_dib_plane(
             let mut out = Vec::new();
             let entries = written_palette_entries(4, pal, opts);
             write_dib_header_v3_indexed(&mut out, width, stored_h, 4, BI_RGB, pal, entries);
+            out.extend_from_slice(&pixels);
+            Ok(out)
+        }
+        BmpPixelFormat::Indexed1 => {
+            let pal = palette
+                .ok_or_else(|| Error::invalid("BMP encoder: Indexed1 requires a palette"))?;
+            let (pixels, _) = pack_indexed(plane, 1, width, height, opts)?;
+            let stored_h = if double_height_for_ico_mask {
+                (height * 2) as i32
+            } else {
+                height as i32
+            };
+            let mut out = Vec::new();
+            let entries = written_palette_entries(1, pal, opts);
+            write_dib_header_v3_indexed(&mut out, width, stored_h, 1, BI_RGB, pal, entries);
             out.extend_from_slice(&pixels);
             Ok(out)
         }
@@ -778,10 +806,12 @@ fn pack_rgb565(
 /// Pack indexed pixel data with proper row padding. Row order honours
 /// `options.top_down`.
 ///
-/// `bpp` must be 4 or 8.
+/// `bpp` must be 1, 4, or 8.
 /// For 8-bit: input is 1 byte per pixel (index 0-255).
 /// For 4-bit: input is 1 byte per pixel (index 0-15); packing into
 ///   hi-nibble/lo-nibble is done here.
+/// For 1-bit: input is 1 byte per pixel (index 0 or 1, treated as
+///   `byte & 1`); packing into MSB-first bytes is done here.
 fn pack_indexed(
     plane: &BmpPlane,
     bpp: usize,
@@ -817,7 +847,15 @@ fn pack_indexed(
                     }
                 }
             }
-            _ => return Err(Error::invalid("pack_indexed: bpp must be 4 or 8")),
+            1 => {
+                for x in 0..w {
+                    let bit = src[x] & 1;
+                    if bit != 0 {
+                        dst[x / 8] |= 1 << (7 - (x % 8));
+                    }
+                }
+            }
+            _ => return Err(Error::invalid("pack_indexed: bpp must be 1, 4, or 8")),
         }
     }
     Ok((out, out_stride))
@@ -1131,7 +1169,7 @@ fn build_and_mask_from_alpha(
             // No alpha → fully opaque → all-zero AND mask. Short-circuit.
             return Ok(mask);
         }
-        BmpPixelFormat::Indexed8 | BmpPixelFormat::Indexed4 => {
+        BmpPixelFormat::Indexed8 | BmpPixelFormat::Indexed4 | BmpPixelFormat::Indexed1 => {
             return Ok(mask);
         }
     };

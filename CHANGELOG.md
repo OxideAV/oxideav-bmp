@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1-bit indexed (monochrome) encode** (round 176): new
+  `BmpPixelFormat::Indexed1` variant + the `EncodedBmpFormat::Indexed1`
+  return token, closing the asymmetry between decode (which has always
+  supported 1-bpp bitmaps via the palette path) and encode (which
+  previously only emitted 4 / 8 / 16 / 24 / 32-bpp). Input is one
+  byte per pixel carrying `idx & 1` (0 → black, 1 → white in the
+  classic palette); the encoder MSB-first-packs the byte stream
+  into the on-disk 1-bpp layout with the standard 4-byte row padding.
+  Caller supplies a `BmpPalette` of up to 2 entries; the
+  `minimal_palette` flag clamps written entries to `[1, 2]` and the
+  one-entry case is exercised by the test suite. BMP has no RLE
+  flavour at 1 bpp so this path is always emitted uncompressed
+  (`BI_RGB`). The DIB helper (`encode_dib`) accepts `Indexed1` for
+  callers wanting a headerless monochrome DIB; `top_down` is
+  honoured (BI_RGB + signed `biHeight` is spec-legal at 1 bpp).
+  Lib tests: `roundtrip_1bit_indexed`, `indexed1_packs_msb_first`,
+  `indexed1_top_down_roundtrips`, `indexed1_without_palette_errors`,
+  `indexed1_minimal_palette_one_entry_clamped`. No new dependencies
+  and the standalone (`default-features = false`) build picks up the
+  new variant automatically.
+
 - **RLE-focused fuzz target** (round 162, `fuzz/fuzz_targets/rle_stream.rs`):
   a second `cargo-fuzz` target that narrows the input so libfuzzer's
   iteration budget lands on the `BI_RLE8` / `BI_RLE4` state machines
