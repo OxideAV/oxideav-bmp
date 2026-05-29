@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.4...v0.1.5) - 2026-05-29
+
+### Other
+
+- add BI_ALPHABITFIELDS (compression value 6) support (r182)
+- add 1-bit indexed (monochrome) BMP write path (r176)
+- add rle_stream target for BI_RLE8 / BI_RLE4 state machines (r162)
+- property tests for malformed inputs (r155 depth-mode)
+- add daily fuzz.yml CI + 1-bpp corpus seed
+- add criterion decode/encode/roundtrip harnesses (r129)
+- add cargo-fuzz decode target + fix header-driven DoS paths
+- minimal biClrUsed colour table for indexed BMP output
+- OS/2 BITMAPCOREHEADER read + top-down DIB write
+
 ### Added
 
 - **`BI_ALPHABITFIELDS` (compression value 6) decode** (round 182): the
