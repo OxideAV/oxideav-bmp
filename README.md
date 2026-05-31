@@ -123,7 +123,7 @@ same as the fuzz harness: every malformed input must return `Err`
 tolerance, return safely with the XOR alpha preserved) — never panic,
 index out of bounds, or OOM-abort.
 
-Two `cargo-fuzz` targets live in `fuzz/`:
+Three `cargo-fuzz` targets live in `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `decode_bmp` and to `decode_dib`
   (both the plain and the doubled-height XOR+AND-mask modes). The
@@ -137,22 +137,41 @@ Two `cargo-fuzz` targets live in `fuzz/`:
   height (1..=255); the harness wraps the remainder as the pixel
   payload of a synthetic BMP carrying a maximal colour table. Seed
   corpus is two real RLE pixel streams lifted from the `decode` seeds.
+* `encode_roundtrip` (round 198) — closes the symmetry by exercising
+  the **encoder** with fuzzer-controlled pixels / palette / encode
+  options, then decoding the output back. The first four input bytes
+  pick the pixel format (`Rgba` / `Rgb24` / `Rgb565` / `Indexed8` /
+  `Indexed4` / `Indexed1`), the `top_down` + `minimal_palette` option
+  flags, and the geometry (clamped to 1..=64 px per axis to keep each
+  iteration under ~16 KiB of plane data). The remainder fills the
+  pixel plane and, for indexed formats, the palette tail (three bytes
+  per `[R, G, B]` entry, padded with zeros so every index resolves).
+  For the two direct-colour formats the harness additionally asserts
+  that every decoded pixel byte matches what the encoder was given
+  (R / G / B / alpha); indexed and `Rgb565` paths are panic-checked
+  only since the decoder materialises `Rgba` and a 1 B/px → 4 B/px
+  comparison would be apples-to-oranges. Six seed inputs (one per
+  format) live in `fuzz/corpus/encode_roundtrip/`.
 
-Both targets share the same contract — every input returns a `Result`
-rather than panicking, indexing out of bounds, or OOM-aborting — and
-build against the framework-free standalone path
+All three targets share the same panic-free contract — every input
+returns a `Result` rather than panicking, indexing out of bounds, or
+OOM-aborting — and build against the framework-free standalone path
 (`default-features = false`).
 
 ```sh
 cargo +nightly fuzz run decode
 cargo +nightly fuzz run rle_stream
+cargo +nightly fuzz run encode_roundtrip
 ```
 
 The `decode` harness shook out and fixed several header-driven
 denial-of-service paths (RLE / `bpp = 0` / `biClrUsed` over-allocation);
 see `CHANGELOG.md`. A local 20-second `rle_stream` run lands ~1.5 M
-inputs (~72 k execs/sec) with zero crashes. A daily
-`.github/workflows/fuzz.yml` job runs both targets on a shared
+inputs (~72 k execs/sec) with zero crashes. A 60-second
+`encode_roundtrip` run lands ~1.33 M inputs (~21.8 k execs/sec, peak
+RSS ~480 MB) with zero crashes — every direct-colour input survived
+the encode→decode pair byte-for-byte. A daily
+`.github/workflows/fuzz.yml` job runs all three targets on a shared
 30-minute budget via the org reusable workflow's `[[bin]]`
 auto-discovery.
 

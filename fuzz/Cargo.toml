@@ -16,12 +16,17 @@ cargo-fuzz = true
 # bfOffBits / channel masks) is attacker-controlled and feeds offset and
 # allocation maths. There is no external system library worth pulling in
 # as a cross-decode oracle (and the clean-room wall bars the C references
-# anyway), so this fuzz crate is **decode-only**: feed arbitrary bytes to
-# the two public decode entry points and assert they always return a
+# anyway), so the decoder-side harnesses are panic-only: feed arbitrary
+# bytes to the public decode entry points and assert they always return a
 # `Result` rather than panicking / aborting / OOMing.
 #
-# Built with `default-features = false` so the harness exercises the
-# framework-free standalone decode path (crate-local `BmpError`), with no
+# The encoder side is exercised by `encode_roundtrip`, which drives the
+# encoder with fuzzer-controlled pixels / palette / options and then
+# decodes the output back to assert no-panic plus, for the direct-colour
+# formats, byte-level roundtrip equality.
+#
+# Built with `default-features = false` so the harnesses exercise the
+# framework-free standalone code paths (crate-local `BmpError`), with no
 # `oxideav-core` in the dependency tree.
 [dependencies]
 libfuzzer-sys = "0.4"
@@ -51,5 +56,21 @@ doc = false
 [[bin]]
 name = "rle_stream"
 path = "fuzz_targets/rle_stream.rs"
+test = false
+doc = false
+
+# Encoder-roundtrip target — drives the encoder with fuzzer-controlled
+# pixels / palette / options, then decodes the output. Closes the
+# symmetry with the two decoder-side targets: exercises the encoder's
+# allocation / padding / RLE-fallback / minimal-palette / top-down
+# code paths. Direct-colour inputs (Rgba / Rgb24) additionally assert
+# the decoded pixels match the encoded ones byte for byte; indexed and
+# Rgb565 paths are panic-checked only (lossy by construction).
+# Geometry is capped at 64×64 px per iteration so the harness stays
+# well under the libfuzzer rss-limit budget even for the worst-case
+# 4 B/px Rgba layout.
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
 test = false
 doc = false

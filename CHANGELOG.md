@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`encode_roundtrip` cargo-fuzz target** (round 198): closes the
+  symmetry of the two existing decoder-side harnesses by exercising
+  the encoder with fuzzer-controlled pixels / palette / encode
+  options, then decoding the encoder's output back. Format selector
+  + `top_down` / `minimal_palette` flags + geometry (clamped to
+  1..=64 px per axis) come from the first four input bytes; the
+  remainder fills the pixel plane and, for indexed formats, the
+  palette tail (three bytes per `[R, G, B]` entry, padded with zeros).
+  For `Rgba` and `Rgb24` the harness asserts byte-for-byte roundtrip
+  equality across the encode→decode pair; `Rgb565` / `Indexed8` /
+  `Indexed4` / `Indexed1` are panic-checked only (the decoder expands
+  everything to 4 B/px `Rgba` so a 1 B/px index ↔ 4 B/px expanded
+  comparison would be apples-to-oranges). A 60 s local run landed
+  ~1.33 M iterations (~21.8 k execs/sec, peak RSS ~480 MB) with
+  zero panics, OOMs, or roundtrip mismatches. Six seed inputs (one
+  per pixel format) live in `fuzz/corpus/encode_roundtrip/`; the
+  daily `.github/workflows/fuzz.yml` job picks the new bin up
+  automatically via the org reusable workflow's `[[bin]]`
+  auto-discovery.
+
 ## [0.1.5](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.4...v0.1.5) - 2026-05-29
 
 ### Other
