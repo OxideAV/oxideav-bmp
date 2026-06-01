@@ -50,6 +50,51 @@ pub const BI_PNG: u32 = 5;
 /// to `BI_BITFIELDS`.
 pub const BI_ALPHABITFIELDS: u32 = 6;
 
+// ---------------------------------------------------------------------------
+// V4 / V5 colour-space (`bV4CSType` / `bV5CSType`) constants
+// ---------------------------------------------------------------------------
+//
+// The V4 header introduced the `CSType` field at byte offset 56 of the DIB
+// header body (offset 70 from the start of the file when paired with a 14
+// byte file header). The V5 header inherits the same slot and adds the
+// `Intent` / `ProfileData` / `ProfileSize` tail for ICC-managed colour.
+//
+// On disk the values are little-endian u32 words. Some constants are the
+// FOURCC packing of an ASCII tag (`b' B'b'G'b'R'b's'` for sRGB); the
+// numeric value below matches the byte ordering Windows GDI documents.
+
+/// `LCS_CALIBRATED_RGB`: the V4 endpoint + gamma fields define the
+/// colour space directly (the classic non-ICC variant). Encoded as the
+/// integer 0.
+pub const LCS_CALIBRATED_RGB: u32 = 0x0000_0000;
+/// `LCS_sRGB`: the bitmap is in the sRGB colour space. On-disk bytes
+/// are `b'B' b'G' b'R' b's'`, which on a little-endian machine reads
+/// back as the u32 value `0x7352_4742`.
+pub const LCS_S_RGB: u32 = 0x7352_4742;
+/// `LCS_WINDOWS_COLOR_SPACE`: bitmap is in the current Windows default
+/// colour space. On-disk bytes are `b' ' b'n' b'i' b'W'`, decoding
+/// little-endian to `0x5769_6E20`.
+pub const LCS_WINDOWS_COLOR_SPACE: u32 = 0x5769_6E20;
+/// `PROFILE_LINKED` (V5 only): the V5 header points at a file path to
+/// an external ICC profile via `bV5ProfileData`. On-disk bytes are
+/// `b'K' b'N' b'I' b'L'`, little-endian = `0x4C49_4E4B`.
+pub const PROFILE_LINKED: u32 = 0x4C49_4E4B;
+/// `PROFILE_EMBEDDED` (V5 only): an ICC profile blob follows the
+/// pixel array at `BITMAPFILEHEADER_SIZE + bV5ProfileData`, with the
+/// length given by `bV5ProfileSize`. On-disk bytes are
+/// `b'D' b'E' b'B' b'M'`, little-endian = `0x4D42_4544`.
+pub const PROFILE_EMBEDDED: u32 = 0x4D42_4544;
+
+/// V5 rendering intent: saturation (graphics / business charts).
+/// Maps to ICC perceptual-intent slot "saturation".
+pub const LCS_GM_BUSINESS: u32 = 1;
+/// V5 rendering intent: relative colorimetric (proofing).
+pub const LCS_GM_GRAPHICS: u32 = 2;
+/// V5 rendering intent: perceptual (photographs).
+pub const LCS_GM_IMAGES: u32 = 4;
+/// V5 rendering intent: absolute colorimetric (match exact colour).
+pub const LCS_GM_ABS_COLORIMETRIC: u32 = 8;
+
 /// Parsed `BITMAPINFOHEADER` (plus the extra masks read from a v4/v5
 /// header when present). All integer fields kept in their native BMP
 /// types so callers can roundtrip byte-for-byte.
@@ -85,6 +130,32 @@ pub struct DibHeader {
     pub mask_g: Option<u32>,
     pub mask_b: Option<u32>,
     pub mask_a: Option<u32>,
+    /// V4+ `bV4CSType` / `bV5CSType`. `None` for V3 / OS/2 headers
+    /// where the field doesn't exist. See [`LCS_CALIBRATED_RGB`],
+    /// [`LCS_S_RGB`], [`LCS_WINDOWS_COLOR_SPACE`], [`PROFILE_LINKED`],
+    /// [`PROFILE_EMBEDDED`].
+    pub cs_type: Option<u32>,
+    /// V4+ `CIEXYZTRIPLE` of red / green / blue endpoints, packed as
+    /// 9 × i32 fixed-point (Q2.30 in the documented layout). Always
+    /// `None` for V3 / OS/2; populated for V4 / V5 (even if the
+    /// `cs_type` says the endpoints aren't authoritative).
+    pub endpoints: Option<[i32; 9]>,
+    /// V4+ gamma triple (R/G/B), each a u32 fixed-point Q16.16.
+    pub gamma_rgb: Option<[u32; 3]>,
+    /// V5 `bV5Intent` (rendering intent). `None` for V3 / V4 / OS/2.
+    /// Values: 0 = unspecified, [`LCS_GM_BUSINESS`] (saturation),
+    /// [`LCS_GM_GRAPHICS`] (relative colorimetric),
+    /// [`LCS_GM_IMAGES`] (perceptual),
+    /// [`LCS_GM_ABS_COLORIMETRIC`] (absolute).
+    pub intent: Option<u32>,
+    /// V5 `bV5ProfileData` — offset (from the start of the DIB header)
+    /// of an external file path (`PROFILE_LINKED`) or an embedded ICC
+    /// profile blob (`PROFILE_EMBEDDED`). `None` for V3 / V4 / OS/2.
+    pub profile_data_offset: Option<u32>,
+    /// V5 `bV5ProfileSize` — byte length of the profile blob / path
+    /// pointed at by [`profile_data_offset`](Self::profile_data_offset).
+    /// `None` for V3 / V4 / OS/2.
+    pub profile_size: Option<u32>,
 }
 
 impl DibHeader {

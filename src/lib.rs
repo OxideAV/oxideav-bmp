@@ -37,6 +37,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod error;
 pub mod image;
+pub mod metadata;
 #[cfg(feature = "registry")]
 pub mod registry;
 pub mod types;
@@ -44,20 +45,24 @@ pub mod types;
 /// Codec id for BMP image frames.
 pub const CODEC_ID_STR: &str = "bmp";
 
-pub use decoder::{decode_bmp, decode_dib};
+pub use decoder::{decode_bmp, decode_bmp_with_metadata, decode_dib, decode_dib_with_metadata};
 #[cfg(feature = "registry")]
 pub use decoder::{decode_bmp_videoframe, decode_dib_videoframe};
 pub use encoder::{
-    encode_bmp, encode_bmp_plane, encode_bmp_plane_with_options, encode_bmp_with_options,
-    encode_dib, encode_dib_plane, BmpEncodeOptions, EncodedBmpFormat,
+    encode_bmp, encode_bmp_plane, encode_bmp_plane_with_options, encode_bmp_with_icc_profile,
+    encode_bmp_with_options, BmpEncodeOptions, EncodedBmpFormat,
 };
 #[cfg(feature = "registry")]
 pub use encoder::{encode_bmp_videoframe, encode_dib_videoframe};
+pub use encoder::{encode_dib, encode_dib_plane};
 pub use error::{BmpError, Result};
 pub use image::{BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
+pub use metadata::{BmpColorSpace, BmpMetadata, BmpRenderingIntent};
 pub use types::{
     row_stride, DibHeader, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE,
     BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB, BMP_MAGIC,
+    LCS_CALIBRATED_RGB, LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS, LCS_GM_GRAPHICS, LCS_GM_IMAGES,
+    LCS_S_RGB, LCS_WINDOWS_COLOR_SPACE, PROFILE_EMBEDDED, PROFILE_LINKED,
 };
 
 #[cfg(feature = "registry")]
@@ -1272,6 +1277,248 @@ mod tests {
         );
         let img = decode_bmp(&bytes).expect("must decode");
         assert_eq!(&img.planes[0].data[..4], &[0x11, 0x22, 0x33, 0xFF]);
+    }
+
+    // -----------------------------------------------------------------------
+    // V4 / V5 colour-space metadata (`bV4CSType`, `bV5Intent`,
+    // `bV5ProfileData`, `bV5ProfileSize`) + embedded ICC profile roundtrip
+    // -----------------------------------------------------------------------
+    //
+    // The V4 header (108 bytes) introduces the `bV4CSType` field plus the
+    // `CIEXYZTRIPLE` endpoints + RGB gamma triple. The V5 header (124 bytes)
+    // extends V4 with `bV5Intent`, `bV5ProfileData`, `bV5ProfileSize`, and a
+    // reserved u32. A V5 BMP with `bV5CSType = PROFILE_EMBEDDED` carries an
+    // ICC profile blob after the pixel array at offset
+    // `BITMAPFILEHEADER_SIZE + bV5ProfileData`. These tests build such
+    // headers by hand against the published BMP / Windows GDI byte layout.
+
+    /// Hand-assemble a 1×1 BMP with a V5 header declaring sRGB. Useful as
+    /// a minimal smoke-test that the V5 parser reads the right offsets.
+    fn build_v5_srgb_32bpp(pixel: u32, intent: u32) -> Vec<u8> {
+        // pixel_offset = 14 (file hdr) + 124 (V5) = 138; one 4-byte BGRA word.
+        let pixel_bytes = 4u32;
+        let file_size = BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE + pixel_bytes;
+        let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE;
+        let mut out = Vec::with_capacity(file_size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&pixel_offset.to_le_bytes());
+        // BITMAPV5HEADER body:
+        out.extend_from_slice(&BITMAPV5HEADER_SIZE.to_le_bytes());
+        out.extend_from_slice(&1i32.to_le_bytes()); // width
+        out.extend_from_slice(&1i32.to_le_bytes()); // height (positive: bottom-up)
+        out.extend_from_slice(&1u16.to_le_bytes()); // planes
+        out.extend_from_slice(&32u16.to_le_bytes()); // bpp
+        out.extend_from_slice(&BI_RGB.to_le_bytes()); // compression
+        out.extend_from_slice(&pixel_bytes.to_le_bytes()); // image size
+        out.extend_from_slice(&0i32.to_le_bytes()); // x_pels/m
+        out.extend_from_slice(&0i32.to_le_bytes()); // y_pels/m
+        out.extend_from_slice(&0u32.to_le_bytes()); // clr_used
+        out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
+                                                    // R / G / B / A masks (zeroed for BI_RGB).
+        out.extend_from_slice(&[0u8; 16]);
+        // bV5CSType = LCS_sRGB.
+        out.extend_from_slice(&LCS_S_RGB.to_le_bytes());
+        // CIEXYZTRIPLE endpoints (zero) + RGB gamma (zero).
+        out.extend_from_slice(&[0u8; 36]);
+        out.extend_from_slice(&[0u8; 12]);
+        // V5 tail: intent + profile data + profile size + reserved.
+        out.extend_from_slice(&intent.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        // The 1×1 pixel.
+        out.extend_from_slice(&pixel.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn v5_srgb_header_parses_and_decodes() {
+        let bytes = build_v5_srgb_32bpp(0x80FF0011, 0);
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("V5 sRGB must decode");
+        assert_eq!((img.width, img.height), (1, 1));
+        // 0x80FF0011 LE on disk = [0x11, 0x00, 0xFF, 0x80] = BGRA →
+        // B=0x11, G=0x00, R=0xFF, A=0x80, surfaced as RGBA.
+        assert_eq!(&img.planes[0].data[..4], &[0xFF, 0x00, 0x11, 0x80]);
+        assert_eq!(md.header_size, BITMAPV5HEADER_SIZE);
+        assert_eq!(md.color_space, Some(BmpColorSpace::SRgb));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Unspecified));
+        assert!(md.endpoints.is_some());
+        assert!(md.gamma_rgb.is_some());
+        assert_eq!(md.profile_data_offset, Some(0));
+        assert_eq!(md.profile_size, Some(0));
+        assert!(md.icc_profile.is_none());
+    }
+
+    #[test]
+    fn v5_intent_perceptual_round_trips() {
+        // Same fixture, different intent — verify enum mapping is correct.
+        let bytes = build_v5_srgb_32bpp(0x00FF00FF, LCS_GM_IMAGES);
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("V5 must decode");
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Perceptual));
+    }
+
+    #[test]
+    fn v3_decode_with_metadata_has_no_v4_v5_fields() {
+        // Sanity floor: a plain V3 (40-byte) bitmap must report `None` for
+        // every V4 / V5 field. The `decode_bmp` and
+        // `decode_bmp_with_metadata` entry points share the same pixel
+        // pipeline so the image must match the V3 reference too.
+        let (src, _, _) = rgba_checker(4, 4);
+        let (bytes, _) = encode_bmp(&src).unwrap();
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("V3 must decode");
+        assert_eq!(img.planes[0].data, src.planes[0].data);
+        assert_eq!(md.header_size, BITMAPINFOHEADER_SIZE);
+        assert!(md.color_space.is_none());
+        assert!(md.rendering_intent.is_none());
+        assert!(md.endpoints.is_none());
+        assert!(md.gamma_rgb.is_none());
+        assert!(md.profile_data_offset.is_none());
+        assert!(md.profile_size.is_none());
+        assert!(md.icc_profile.is_none());
+    }
+
+    #[test]
+    fn v4_rgb565_metadata_surfaces_srgb() {
+        // The standard 16-bit RGB565 encode path emits a V4 header with
+        // CSType = LCS_sRGB; verify the metadata path reads that back.
+        // Smallest-possible 1×1 fixture so the test doesn't depend on
+        // bit-pattern details.
+        let src = BmpImage {
+            width: 1,
+            height: 1,
+            pixel_format: BmpPixelFormat::Rgb565,
+            planes: vec![BmpPlane {
+                stride: 2,
+                data: vec![0xE0, 0x07], // green
+            }],
+            palette: None,
+            pts: None,
+        };
+        let (bytes, _) = encode_bmp(&src).unwrap();
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("V4 must decode");
+        assert_eq!(md.header_size, BITMAPV4HEADER_SIZE);
+        assert_eq!(md.color_space, Some(BmpColorSpace::SRgb));
+        // V4 doesn't carry an intent — surfaced as `None` (not as
+        // `Some(Unspecified)`) so callers can tell apart "V4 header" from
+        // "V5 header that set intent = 0".
+        assert!(md.rendering_intent.is_none());
+        assert!(md.icc_profile.is_none());
+    }
+
+    #[test]
+    fn v5_with_embedded_icc_profile_roundtrips() {
+        // Encoder side: V5 + ICC profile blob.
+        // Decoder side: pulls the ICC blob back out of the metadata.
+        let (src, w, h) = rgba_checker(4, 4);
+        let icc = b"fakeICCprofileblob_v4.3\0\0\0".to_vec();
+        let bytes =
+            encode_bmp_with_icc_profile(&src, &icc, LCS_GM_IMAGES, BmpEncodeOptions::default())
+                .expect("V5 + ICC encode must succeed");
+        // Verify on-disk header is V5.
+        let header_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(header_size, BITMAPV5HEADER_SIZE);
+        let cs_type = u32::from_le_bytes([
+            bytes[14 + 56],
+            bytes[14 + 57],
+            bytes[14 + 58],
+            bytes[14 + 59],
+        ]);
+        assert_eq!(cs_type, PROFILE_EMBEDDED);
+
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("V5 + ICC must decode");
+        assert_eq!(img.width, w);
+        assert_eq!(img.height, h);
+        assert_eq!(img.planes[0].data, src.planes[0].data);
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileEmbedded));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Perceptual));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        assert_eq!(md.profile_size, Some(icc.len() as u32));
+    }
+
+    #[test]
+    fn v5_embedded_icc_top_down_preserves_profile() {
+        // Same encode path but with top_down — biHeight goes negative
+        // and the ICC blob still rounds-trips bit-for-bit.
+        let (src, _, h) = rgba_checker(2, 2);
+        let icc = vec![0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56];
+        let bytes = encode_bmp_with_icc_profile(
+            &src,
+            &icc,
+            0,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .expect("V5 top-down must succeed");
+        // biHeight at offset 22 should be negative.
+        let bi_height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(bi_height, -(h as i32));
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("decode V5 top-down");
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Unspecified));
+    }
+
+    #[test]
+    fn v5_embedded_icc_rgb24_path() {
+        // The V5 + ICC path also supports 24-bit BGR. Smaller payload
+        // exercises a different `pack_*` helper end-to-end.
+        let src = rgb24_checker(4, 2);
+        let icc = b"icc:rgb24-test".to_vec();
+        let bytes =
+            encode_bmp_with_icc_profile(&src, &icc, LCS_GM_BUSINESS, BmpEncodeOptions::default())
+                .expect("V5 + RGB24 ICC encode");
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode");
+        assert_eq!((img.width, img.height), (4, 2));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Saturation));
+        // Pixel (0,0) is red per `rgb24_checker`.
+        assert_eq!(&img.planes[0].data[..4], &[255u8, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v5_embedded_icc_rejects_unsupported_format() {
+        // The V5 + ICC path currently only supports the two direct-colour
+        // formats. Indexed input must return `Unsupported` rather than
+        // panicking or silently emitting a wrong-shaped header.
+        let w = 4u32;
+        let h = 4u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let err = encode_bmp_with_icc_profile(&src, b"any", 0, BmpEncodeOptions::default())
+            .expect_err("Indexed8 must be rejected");
+        assert!(matches!(err, BmpError::Unsupported(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn v5_truncated_icc_does_not_panic() {
+        // Construct a V5 header that lies: bV5ProfileSize claims 4096
+        // bytes but the file is only 200 bytes long. The decoder must
+        // surface declared `profile_size` / `profile_data_offset` while
+        // leaving `icc_profile = None` (the slice falls past EOF).
+        // Start from a valid V5 + ICC blob, then hack the size up.
+        let (src, _, _) = rgba_checker(2, 2);
+        let icc = vec![0u8; 8];
+        let mut bytes =
+            encode_bmp_with_icc_profile(&src, &icc, 0, BmpEncodeOptions::default()).unwrap();
+        // bV5ProfileSize lives at file offset 14 + 116 = 130.
+        let bogus = 4096u32;
+        bytes[130..134].copy_from_slice(&bogus.to_le_bytes());
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("decode must not panic");
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileEmbedded));
+        assert_eq!(md.profile_size, Some(bogus));
+        assert!(md.icc_profile.is_none(), "out-of-range ICC must be None");
     }
 
     #[test]

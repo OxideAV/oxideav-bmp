@@ -1,12 +1,13 @@
-//! Integration tests that cross-validate BMP encoder output with ImageMagick.
+//! Integration tests that cross-validate BMP encoder output with the
+//! `magick` CLI validator as an opaque black-box process.
 //!
 //! Each test encodes a BMP variant, writes it to a temp dir, and then
 //! invokes `magick identify` to check it is a well-formed BMP, plus
 //! `magick convert` to convert it to PNG and back-decode the PNG to
 //! verify pixel values survive the trip.
 //!
-//! Skipped automatically when ImageMagick is not installed (CI typically
-//! has it; dev machines may not).
+//! Skipped automatically when the `magick` binary is not on `PATH` (CI
+//! typically ships it; dev machines may not).
 
 use oxideav_bmp::{
     decode_bmp, encode_bmp, encode_bmp_with_options, BmpEncodeOptions, BmpImage, BmpPalette,

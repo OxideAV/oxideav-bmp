@@ -29,6 +29,7 @@
 
 use crate::error::{BmpError as Error, Result};
 use crate::image::{BmpImage, BmpPixelFormat, BmpPlane};
+use crate::metadata::{BmpColorSpace, BmpMetadata};
 use crate::types::*;
 
 #[cfg(feature = "registry")]
@@ -169,6 +170,124 @@ pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<
     }
 }
 
+/// Decode a complete BMP file like [`decode_bmp`] but also return the
+/// parsed V4 / V5 colour-space metadata (`bV4CSType` / `bV5CSType`,
+/// endpoints, gamma, rendering intent, embedded ICC profile bytes).
+///
+/// For BMPs that carry a V3 (40-byte) `BITMAPINFOHEADER` or OS/2
+/// `BITMAPCOREHEADER` the returned [`BmpMetadata`] has every optional
+/// field set to `None` and the embedded-profile slot is empty — those
+/// header variants pre-date the colour-management fields, so there is
+/// no metadata to surface. V4 (108 bytes) fills `color_space`,
+/// `endpoints`, and `gamma_rgb`. V5 (124 bytes) additionally fills
+/// `rendering_intent`; when the V5 `cs_type` is
+/// [`BmpColorSpace::ProfileEmbedded`], the ICC profile blob carried at
+/// `whole[BITMAPFILEHEADER_SIZE + bV5ProfileData..][..bV5ProfileSize]`
+/// is decoded into [`BmpMetadata::icc_profile`].
+///
+/// A V5 header that declares `PROFILE_EMBEDDED` but whose offset / size
+/// fall past the end of the buffer surfaces in `color_space` /
+/// `profile_data_offset` / `profile_size` as declared, with
+/// `icc_profile = None` — the metadata is informational and never
+/// makes the decode fail on its own. The pixel decode path is the same
+/// as [`decode_bmp`]; this entry point is purely additive.
+pub fn decode_bmp_with_metadata(input: &[u8]) -> Result<(BmpImage, BmpMetadata)> {
+    if input.len() < (BITMAPFILEHEADER_SIZE + BITMAPCOREHEADER_SIZE) as usize {
+        return Err(Error::invalid("BMP: input shorter than header"));
+    }
+    let magic = read_u16_le(input, 0);
+    if magic != BMP_MAGIC {
+        return Err(Error::invalid("BMP: missing 'BM' signature"));
+    }
+    let pixel_offset = read_u32_le(input, 10) as usize;
+    let dib = &input[BITMAPFILEHEADER_SIZE as usize..];
+    let (header, _) = parse_dib_header(dib)?;
+    let image = decode_dib_payload(&header, input, pixel_offset)?;
+    let mut metadata = BmpMetadata::from_header(&header);
+    // Embedded ICC blobs sit after the pixel array. The offset is given
+    // relative to the start of the DIB header (i.e. file_offset =
+    // BITMAPFILEHEADER_SIZE + bV5ProfileData). A linked profile carries
+    // a file-path bytestring at the same slot; we surface the offset +
+    // size but never load it.
+    if metadata.color_space == Some(BmpColorSpace::ProfileEmbedded) {
+        metadata.icc_profile = read_embedded_icc(
+            input,
+            BITMAPFILEHEADER_SIZE as usize,
+            header.profile_data_offset.unwrap_or(0) as usize,
+            header.profile_size.unwrap_or(0) as usize,
+        );
+    }
+    Ok((image, metadata))
+}
+
+/// Decode a headerless DIB like [`decode_dib`] but also return parsed
+/// V4 / V5 colour-space metadata. The ICC offset for embedded profiles
+/// is interpreted relative to the DIB start (i.e. `input[0..]`), matching
+/// the BMP spec's stored offset convention.
+pub fn decode_dib_with_metadata(
+    input: &[u8],
+    dib_height_is_doubled_for_mask: bool,
+) -> Result<(BmpImage, BmpMetadata)> {
+    let (header, _header_bytes) = parse_dib_header(input)?;
+    let entry_size = palette_entry_bytes(&header);
+    let color_table_bytes = header.palette_entries().saturating_mul(entry_size);
+    let masks_bytes = if header.header_size == BITMAPINFOHEADER_SIZE {
+        match header.compression {
+            BI_BITFIELDS => 12usize,
+            BI_ALPHABITFIELDS => 16usize,
+            _ => 0usize,
+        }
+    } else {
+        0usize
+    };
+    let pixel_start = (header.header_size as usize)
+        .saturating_add(masks_bytes)
+        .saturating_add(color_table_bytes);
+    let image = if dib_height_is_doubled_for_mask {
+        decode_dib_with_mask(&header, input, pixel_start)?
+    } else {
+        decode_dib_payload(&header, input, pixel_start)?
+    };
+    let mut metadata = BmpMetadata::from_header(&header);
+    if metadata.color_space == Some(BmpColorSpace::ProfileEmbedded) {
+        // DIB-relative offset: ICC bytes sit at `input[bV5ProfileData..]`
+        // with no file-header offset to add.
+        metadata.icc_profile = read_embedded_icc(
+            input,
+            0,
+            header.profile_data_offset.unwrap_or(0) as usize,
+            header.profile_size.unwrap_or(0) as usize,
+        );
+    }
+    Ok((image, metadata))
+}
+
+/// Slice the embedded ICC profile out of the input buffer.
+///
+/// `base` is the offset of the DIB header start within `input`
+/// (14 bytes for a BMP file, 0 for a headerless DIB). `data_offset` is
+/// the `bV5ProfileData` field (DIB-relative) and `size` is
+/// `bV5ProfileSize`. Returns `None` if the resulting slice would fall
+/// past the end of `input` so a malformed V5 header can't poison the
+/// metadata path — declared offsets and sizes are still surfaced on
+/// the returned [`BmpMetadata`] so callers can investigate.
+fn read_embedded_icc(
+    input: &[u8],
+    base: usize,
+    data_offset: usize,
+    size: usize,
+) -> Option<Vec<u8>> {
+    if size == 0 {
+        return None;
+    }
+    let start = base.checked_add(data_offset)?;
+    let end = start.checked_add(size)?;
+    if end > input.len() {
+        return None;
+    }
+    Some(input[start..end].to_vec())
+}
+
 /// Compatibility wrapper around [`decode_bmp`] returning an
 /// `oxideav_core::VideoFrame`. Only available with the default
 /// `registry` feature; intended for `oxideav-core`-using consumers
@@ -292,6 +411,39 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
             (None, None, None, None)
         };
 
+    // ---- V4 / V5 colour-space tail ------------------------------------
+    //
+    // V4 (header_size >= 108) adds — after the four R/G/B/A masks at
+    // offsets 40..56 — a `bV4CSType` u32 at offset 56, a CIEXYZTRIPLE of
+    // 9 × i32 endpoints at offsets 60..96, and a 3-u32 gamma triple at
+    // 96..108. V5 (header_size >= 124) extends that with `bV5Intent` at
+    // 108, `bV5ProfileData` at 112, `bV5ProfileSize` at 116, and a
+    // reserved u32 at 120.
+    let (cs_type, endpoints, gamma_rgb) = if header_size >= BITMAPV4HEADER_SIZE {
+        let cs = read_u32_le(input, 56);
+        let mut ep = [0i32; 9];
+        for (i, slot) in ep.iter_mut().enumerate() {
+            *slot = read_i32_le(input, 60 + i * 4);
+        }
+        let gr = [
+            read_u32_le(input, 96),
+            read_u32_le(input, 100),
+            read_u32_le(input, 104),
+        ];
+        (Some(cs), Some(ep), Some(gr))
+    } else {
+        (None, None, None)
+    };
+    let (intent, profile_data_offset, profile_size) = if header_size >= BITMAPV5HEADER_SIZE {
+        (
+            Some(read_u32_le(input, 108)),
+            Some(read_u32_le(input, 112)),
+            Some(read_u32_le(input, 116)),
+        )
+    } else {
+        (None, None, None)
+    };
+
     Ok((
         DibHeader {
             header_size,
@@ -309,6 +461,12 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
             mask_g,
             mask_b,
             mask_a,
+            cs_type,
+            endpoints,
+            gamma_rgb,
+            intent,
+            profile_data_offset,
+            profile_size,
         },
         header_size as usize,
     ))
@@ -362,6 +520,12 @@ fn parse_bitmapcoreheader(input: &[u8]) -> Result<(DibHeader, usize)> {
             mask_g: None,
             mask_b: None,
             mask_a: None,
+            cs_type: None,
+            endpoints: None,
+            gamma_rgb: None,
+            intent: None,
+            profile_data_offset: None,
+            profile_size: None,
         },
         BITMAPCOREHEADER_SIZE as usize,
     ))

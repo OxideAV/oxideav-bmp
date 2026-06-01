@@ -303,6 +303,94 @@ pub fn encode_bmp_plane_with_options(
     }
 }
 
+/// Encode a `BmpImage` into a complete BMP file with a V5 header that
+/// declares an embedded ICC profile (`PROFILE_EMBEDDED`).
+///
+/// The V5 header (124 bytes) replaces the V3/V4 header the standard
+/// [`encode_bmp`] path would emit; `bV5CSType` is set to
+/// [`PROFILE_EMBEDDED`], `bV5ProfileData` points at the byte offset of
+/// the ICC blob from the start of the DIB (i.e. immediately after the
+/// pixel array), and `bV5ProfileSize` records the blob's length. The
+/// ICC bytes are written verbatim — no parsing or validation happens on
+/// the encoder side; the caller is responsible for supplying a real ICC
+/// 1.x / 2.x / 4.x profile.
+///
+/// Supported pixel formats: [`BmpPixelFormat::Rgba`] (32-bit BGRA) and
+/// [`BmpPixelFormat::Rgb24`] (24-bit BGR). The 16-bit / indexed formats
+/// already use a V4 header (or a V3 + colour table) whose precise layout
+/// would need a wider rewrite to make room for a V5 colour-space tail;
+/// for now those return [`BmpError::Unsupported`].
+///
+/// `rendering_intent` is the V5 `bV5Intent` field. Use 0 for
+/// "unspecified" or one of the [`LCS_GM_*`](crate::LCS_GM_BUSINESS)
+/// constants. The encoder honours [`BmpEncodeOptions::top_down`]
+/// (negative `biHeight`) but ignores `minimal_palette` for the direct-
+/// colour paths since they carry no colour table.
+///
+/// Roundtrips: [`decode_bmp_with_metadata`](crate::decode_bmp_with_metadata)
+/// reads the ICC blob back into [`BmpMetadata::icc_profile`](crate::BmpMetadata::icc_profile).
+pub fn encode_bmp_with_icc_profile(
+    image: &BmpImage,
+    icc_profile: &[u8],
+    rendering_intent: u32,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    if image.planes.is_empty() {
+        return Err(Error::invalid("BMP encoder: empty frame plane"));
+    }
+    let plane = &image.planes[0];
+    let width = image.width;
+    let height = image.height;
+    let (pixels, bpp) = match image.pixel_format {
+        BmpPixelFormat::Rgba => {
+            let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
+            (p, 32u16)
+        }
+        BmpPixelFormat::Rgb24 => {
+            let (p, _) = pack_rgb24(plane, width, height, options)?;
+            (p, 24u16)
+        }
+        other => {
+            return Err(Error::unsupported(format!(
+                "BMP encoder: V5 + ICC profile not yet supported for {other:?}",
+            )))
+        }
+    };
+    // Layout:
+    //   [BITMAPFILEHEADER 14 B]
+    //   [BITMAPV5HEADER 124 B]   ← `cs_type = PROFILE_EMBEDDED`
+    //   [pixel array]
+    //   [ICC blob, `icc_profile.len()` bytes]
+    //
+    // `bV5ProfileData` is DIB-relative (i.e. 124 + pixel_bytes), and
+    // `bV5ProfileSize` is the ICC blob length. The on-disk pixel
+    // offset that `BITMAPFILEHEADER::bfOffBits` carries skips the V5
+    // header but never the profile blob, since the blob lives after
+    // the pixel array.
+    let pixel_bytes = pixels.len() as u32;
+    let icc_bytes = icc_profile.len() as u32;
+    let dib_size = BITMAPV5HEADER_SIZE + pixel_bytes + icc_bytes;
+    let file_size = BITMAPFILEHEADER_SIZE + dib_size;
+    let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE;
+    let profile_data_offset = BITMAPV5HEADER_SIZE + pixel_bytes;
+
+    let mut out = Vec::with_capacity(file_size as usize);
+    write_file_header(&mut out, file_size, pixel_offset);
+    write_dib_header_v5_embedded_profile(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        bpp,
+        pixel_bytes,
+        rendering_intent,
+        profile_data_offset,
+        icc_bytes,
+    );
+    out.extend_from_slice(&pixels);
+    out.extend_from_slice(icc_profile);
+    Ok(out)
+}
+
 /// Encode a [`BmpImage`] into a headerless DIB suitable for `.ico`
 /// sub-images. `double_height_for_ico_mask` tells the encoder to:
 ///
@@ -1142,6 +1230,61 @@ fn write_dib_header_v4_bitfields(out: &mut Vec<u8>, w: u32, stored_height: i32) 
     // GammaRed, GammaGreen, GammaBlue (3 × u32 = 12 bytes) — zero
     out.extend_from_slice(&[0u8; 12]);
     // Total so far: 40 + 4*4 + 4 + 36 + 12 = 40+16+4+36+12 = 108 ✓
+}
+
+/// Write a 124-byte `BITMAPV5HEADER` with `bV5CSType = PROFILE_EMBEDDED`.
+///
+/// Layout (offsets given relative to the start of the DIB header):
+/// * 0..40   classic `BITMAPINFOHEADER` fields
+/// * 40..56  R / G / B / A masks (zeroed — direct-colour `BI_RGB`)
+/// * 56..60  `bV5CSType` = [`PROFILE_EMBEDDED`]
+/// * 60..96  CIEXYZTRIPLE endpoints (zeroed)
+/// * 96..108 R / G / B gamma (zeroed)
+/// * 108..112 `bV5Intent`
+/// * 112..116 `bV5ProfileData` (DIB-relative byte offset to ICC blob)
+/// * 116..120 `bV5ProfileSize`
+/// * 120..124 reserved (zero)
+///
+/// `image_size` is the byte length of the pixel array — written to
+/// the classic `biSizeImage` slot at offset 20.
+#[allow(clippy::too_many_arguments)]
+fn write_dib_header_v5_embedded_profile(
+    out: &mut Vec<u8>,
+    w: u32,
+    stored_height: i32,
+    bpp: u16,
+    image_size: u32,
+    rendering_intent: u32,
+    profile_data_offset: u32,
+    profile_size: u32,
+) {
+    // Classic V3 prefix (40 B).
+    out.extend_from_slice(&BITMAPV5HEADER_SIZE.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&stored_height.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&bpp.to_le_bytes());
+    out.extend_from_slice(&BI_RGB.to_le_bytes()); // compression — direct colour
+    out.extend_from_slice(&image_size.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes()); // x_pels/m ≈ 72 DPI
+    out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
+    out.extend_from_slice(&0u32.to_le_bytes()); // clr_used
+    out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
+                                                // V4 tail: R/G/B/A masks (zeroed for BI_RGB).
+    out.extend_from_slice(&[0u8; 16]);
+    // bV5CSType
+    out.extend_from_slice(&PROFILE_EMBEDDED.to_le_bytes());
+    // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes) — zero; the embedded
+    // ICC profile is the authoritative description.
+    out.extend_from_slice(&[0u8; 36]);
+    // Gamma R / G / B (3 × u32 = 12 bytes) — zero.
+    out.extend_from_slice(&[0u8; 12]);
+    // V5 tail.
+    out.extend_from_slice(&rendering_intent.to_le_bytes());
+    out.extend_from_slice(&profile_data_offset.to_le_bytes());
+    out.extend_from_slice(&profile_size.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // bV5Reserved
+                                                // Total: 40 + 16 + 4 + 36 + 12 + 4 + 4 + 4 + 4 = 124 ✓
 }
 
 // ---------------------------------------------------------------------------

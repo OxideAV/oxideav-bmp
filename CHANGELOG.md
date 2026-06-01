@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **V4 / V5 colour-space metadata + embedded ICC profile** (round 205):
+  new `decode_bmp_with_metadata` / `decode_dib_with_metadata` entry
+  points return a `(BmpImage, BmpMetadata)` pair so callers can read
+  back the `bV4CSType` / `bV5CSType` colour-space tag, the
+  `CIEXYZTRIPLE` endpoints, the `R/G/B` gamma triple, the V5
+  rendering intent, and (for `PROFILE_EMBEDDED`) the embedded ICC
+  profile blob itself. V3 (40-byte) and OS/2 12-byte headers report
+  every metadata field as `None` — those header variants pre-date
+  colour management. V4 (108-byte) fills `color_space` /
+  `endpoints` / `gamma_rgb`; V5 (124-byte) additionally fills
+  `rendering_intent`. A V5 header that declares `PROFILE_EMBEDDED`
+  decodes the ICC bytes at
+  `whole[BITMAPFILEHEADER_SIZE + bV5ProfileData..][..bV5ProfileSize]`
+  into `BmpMetadata::icc_profile`. A V5 header that lies about its
+  offset / size (slice falls past EOF) leaves `icc_profile = None`
+  with the declared `profile_data_offset` / `profile_size` still
+  surfaced so metadata never makes decode fail on its own. The
+  existing `decode_bmp` / `decode_dib` entry points remain
+  byte-for-byte compatible — the metadata path is purely additive.
+  New encode side: `encode_bmp_with_icc_profile(image, icc_bytes,
+  intent, options)` writes a 124-byte `BITMAPV5HEADER` with
+  `bV5CSType = PROFILE_EMBEDDED` for `Rgba` / `Rgb24` input plus
+  honoured `top_down`; indexed / 16-bit input is rejected with
+  `BmpError::Unsupported` for now (those use V3 / V4 headers whose
+  layout would need a wider rewrite to make room for a V5 tail).
+  New public surface: `BmpColorSpace` (`Calibrated` / `SRgb` /
+  `Windows` / `ProfileLinked` / `ProfileEmbedded` / `Unknown(u32)`),
+  `BmpRenderingIntent` (`Unspecified` / `Saturation` /
+  `RelativeColorimetric` / `Perceptual` / `AbsoluteColorimetric` /
+  `Unknown(u32)`), `BmpMetadata`, plus constants `LCS_CALIBRATED_RGB`,
+  `LCS_S_RGB`, `LCS_WINDOWS_COLOR_SPACE`, `PROFILE_LINKED`,
+  `PROFILE_EMBEDDED`, `LCS_GM_BUSINESS` / `LCS_GM_GRAPHICS` /
+  `LCS_GM_IMAGES` / `LCS_GM_ABS_COLORIMETRIC`. Lib tests:
+  `v5_srgb_header_parses_and_decodes`,
+  `v5_intent_perceptual_round_trips`,
+  `v3_decode_with_metadata_has_no_v4_v5_fields`,
+  `v4_rgb565_metadata_surfaces_srgb`,
+  `v5_with_embedded_icc_profile_roundtrips`,
+  `v5_embedded_icc_top_down_preserves_profile`,
+  `v5_embedded_icc_rgb24_path`,
+  `v5_embedded_icc_rejects_unsupported_format`,
+  `v5_truncated_icc_does_not_panic`. No new dependencies; works in
+  both `registry` and standalone (`default-features = false`)
+  builds.
+
 - **`encode_roundtrip` cargo-fuzz target** (round 198): closes the
   symmetry of the two existing decoder-side harnesses by exercising
   the encoder with fuzzer-controlled pixels / palette / encode
@@ -208,9 +253,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tests: `minimal_palette_8bit_shrinks_table_and_roundtrips`,
   `minimal_palette_4bit_shrinks_table_and_roundtrips`,
   `minimal_palette_full_table_keeps_clr_used_zero`,
-  `minimal_palette_top_down_roundtrips`, plus ImageMagick
-  cross-validation `magick_minimal_palette_8bpp` confirming `magick`
-  resolves pixels against the trimmed `biClrUsed=2` table.
+  `minimal_palette_top_down_roundtrips`, plus `magick`-CLI black-box
+  cross-validation `magick_minimal_palette_8bpp` confirming the
+  external validator resolves pixels against the trimmed `biClrUsed=2`
+  table.
 
 ## [0.1.4](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.3...v0.1.4) - 2026-05-05
 
@@ -244,9 +290,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `decode_os2_bitmapcoreheader_4bpp_indexed`,
   `encode_top_down_rgba_negative_height_and_roundtrip`,
   `encode_top_down_rgb24_roundtrip`,
-  `encode_top_down_indexed8_skips_rle`. ImageMagick cross-validation
-  test `magick_top_down_rgba` verifies magick honours the negative
-  `biHeight` on our output.
+  `encode_top_down_indexed8_skips_rle`. `magick`-CLI black-box
+  cross-validation test `magick_top_down_rgba` verifies the external
+  validator honours the negative `biHeight` on our output.
 - **Decoder**: `BI_RLE8` and `BI_RLE4` decode support. Both encoded-run
   and absolute-mode packets are handled; delta (`0x02`) escape codes are
   also accepted. Output is always top-down `Rgba`, same as every other
@@ -278,9 +324,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the decode path, which always produces `Rgba`).
 - `EncodedBmpFormat` enum returned by `encode_bmp` / `encode_bmp_plane`
   so callers can tell which compression was actually used.
-- `tests/magick_validate.rs` integration tests: 7 ImageMagick
-  cross-validation cases (32-bit, 24-bit, 16-bit, 8-bit indexed, 4-bit
-  indexed, RLE8, RLE4).
+- `tests/magick_validate.rs` integration tests: 7 `magick`-CLI
+  black-box cross-validation cases (32-bit, 24-bit, 16-bit, 8-bit
+  indexed, 4-bit indexed, RLE8, RLE4).
 
 ### Changed
 

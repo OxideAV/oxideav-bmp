@@ -29,6 +29,50 @@ honours the 3-byte `RGBTRIPLE` colour-table layout (V3+ uses 4-byte
 the sign of `biHeight`; output is always top-down `Rgba`. `BI_JPEG`
 and `BI_PNG` are rejected at the boundary.
 
+### V4 / V5 colour-space metadata + embedded ICC profile
+
+`decode_bmp_with_metadata` / `decode_dib_with_metadata` return a
+`(BmpImage, BmpMetadata)` pair so callers that need the V4/V5
+colour-management tail can inspect `bV4CSType`, the `CIEXYZTRIPLE`
+endpoints, the `R/G/B` gamma triple, the V5 rendering intent, and the
+on-disk `bV5ProfileData` / `bV5ProfileSize` fields. A V5 header that
+declares `PROFILE_EMBEDDED` additionally surfaces the embedded ICC blob
+as `BmpMetadata::icc_profile: Option<Vec<u8>>`; `PROFILE_LINKED`
+surfaces the offset + size so callers can resolve the path themselves.
+
+```rust
+let (image, md) = oxideav_bmp::decode_bmp_with_metadata(bytes)?;
+match md.color_space {
+    Some(oxideav_bmp::BmpColorSpace::SRgb) => /* sRGB */ {}
+    Some(oxideav_bmp::BmpColorSpace::ProfileEmbedded) => {
+        let icc = md.icc_profile.as_deref().unwrap_or(&[]);
+        // hand off `icc` to your colour-management pipeline
+    }
+    _ => {}
+}
+```
+
+V3 / OS/2 headers report every metadata field as `None` (they pre-date
+colour management). V4 fills `color_space` / `endpoints` / `gamma_rgb`;
+V5 additionally fills `rendering_intent`. The decode-path itself is
+unchanged — pixels still come out as top-down `Rgba` regardless of the
+declared colour space — and the original `decode_bmp` / `decode_dib`
+entry points stay byte-for-byte compatible. A V5 header that lies about
+its ICC offset / size (slice falls past EOF) leaves
+`icc_profile = None` with the declared fields still populated so the
+metadata path can never make decode fail on its own.
+
+`encode_bmp_with_icc_profile` is the matching encode side: pass an
+`Rgba` or `Rgb24` `BmpImage` plus an ICC blob plus an intent constant
+(0 for unspecified, or one of `LCS_GM_BUSINESS` /
+`LCS_GM_GRAPHICS` / `LCS_GM_IMAGES` / `LCS_GM_ABS_COLORIMETRIC`) and
+the encoder emits a 124-byte `BITMAPV5HEADER` with
+`bV5CSType = PROFILE_EMBEDDED` followed by the pixel array and the ICC
+blob. `top_down` is honoured; indexed / 16-bit input is rejected with
+`BmpError::Unsupported` for now (those use V3 / V4 headers whose
+layout would need a wider rewrite to make room for a V5 colour-space
+tail).
+
 `BI_ALPHABITFIELDS` (compression value 6) is the four-mask variant of
 `BI_BITFIELDS` documented for Windows CE 5.0+ and accepted by recent
 Windows builds: on a V3 (40-byte) `BITMAPINFOHEADER` it appends 16
@@ -80,8 +124,8 @@ in `biClrUsed` — a 2-colour 8-bit image sheds 254 unused entries
 (1016 bytes); a 1-entry `Indexed1` table sheds 4 bytes. The count is
 clamped to `[1, 2^bpp]`; a palette that already fills the space keeps
 the `biClrUsed = 0` sentinel. Composable with `top_down`. The
-decoder's `biClrUsed`-aware palette reader (and ImageMagick) consume
-the trimmed table transparently.
+decoder's `biClrUsed`-aware palette reader (and the `magick` black-box
+validator) consume the trimmed table transparently.
 
 ### Top-down DIB output
 
