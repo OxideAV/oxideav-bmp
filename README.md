@@ -73,6 +73,18 @@ blob. `top_down` is honoured; indexed / 16-bit input is rejected with
 layout would need a wider rewrite to make room for a V5 colour-space
 tail).
 
+`encode_bmp_with_linked_icc_profile` writes the same 124-byte
+`BITMAPV5HEADER` shape but with `bV5CSType = PROFILE_LINKED` and a
+caller-supplied **path-string blob** in the trailing slot rather than
+the ICC bytes themselves. The path encoding is system-dependent per
+spec (typically null-terminated ANSI on Windows); the encoder surfaces
+the buffer verbatim so callers that need UTF-16 / URL transport can
+pass whatever blob they choose. Decoder side: `decode_bmp_with_metadata`
+sets `BmpColorSpace::ProfileLinked` and exposes `profile_data_offset` /
+`profile_size` so callers can resolve the path themselves — the
+decoder never auto-loads the linked file. Supported pixel formats
+(`Rgba` / `Rgb24`) and `top_down` handling match the embedded path.
+
 `BI_ALPHABITFIELDS` (compression value 6) is the four-mask variant of
 `BI_BITFIELDS` documented for Windows CE 5.0+ and accepted by recent
 Windows builds: on a V3 (40-byte) `BITMAPINFOHEADER` it appends 16

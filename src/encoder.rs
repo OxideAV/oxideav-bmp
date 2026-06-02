@@ -376,18 +376,101 @@ pub fn encode_bmp_with_icc_profile(
 
     let mut out = Vec::with_capacity(file_size as usize);
     write_file_header(&mut out, file_size, pixel_offset);
-    write_dib_header_v5_embedded_profile(
+    write_dib_header_v5_with_profile(
         &mut out,
         width,
         signed_stored_height(height, options),
         bpp,
         pixel_bytes,
+        PROFILE_EMBEDDED,
         rendering_intent,
         profile_data_offset,
         icc_bytes,
     );
     out.extend_from_slice(&pixels);
     out.extend_from_slice(icc_profile);
+    Ok(out)
+}
+
+/// Encode a `BmpImage` into a complete BMP file with a V5 header that
+/// declares a *linked* ICC profile (`PROFILE_LINKED`) — the V5 header
+/// records the offset + length of a caller-supplied path-string blob
+/// rather than embedding the ICC bytes themselves.
+///
+/// The V5 layout matches [`encode_bmp_with_icc_profile`] byte-for-byte
+/// except that `bV5CSType` is set to [`PROFILE_LINKED`] (the four-byte
+/// `'LINK'` tag) and the blob that lives at
+/// `bV5ProfileData / bV5ProfileSize` carries the path of an external
+/// ICC profile file rather than the profile bytes themselves. The path
+/// encoding is system-dependent per the BMP spec — typically null-
+/// terminated ANSI on Windows; we surface the buffer the caller supplies
+/// verbatim so callers that need a different transport (UTF-16, URL)
+/// can pass whatever blob they choose. The decoder side already
+/// distinguishes `PROFILE_LINKED` from `PROFILE_EMBEDDED` in
+/// [`BmpMetadata::color_space`](crate::BmpMetadata::color_space) and
+/// surfaces the `profile_data_offset` / `profile_size` fields so the
+/// caller can resolve the path itself; the decoder never auto-loads
+/// the linked file.
+///
+/// Supported pixel formats: [`BmpPixelFormat::Rgba`] and
+/// [`BmpPixelFormat::Rgb24`] (same constraint as
+/// [`encode_bmp_with_icc_profile`]). `rendering_intent` and the
+/// [`BmpEncodeOptions::top_down`] flag have the same meaning. The
+/// linked-path blob is written verbatim; the caller is responsible for
+/// the path-string encoding and any null terminator the consumer
+/// expects.
+pub fn encode_bmp_with_linked_icc_profile(
+    image: &BmpImage,
+    linked_path: &[u8],
+    rendering_intent: u32,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    if image.planes.is_empty() {
+        return Err(Error::invalid("BMP encoder: empty frame plane"));
+    }
+    let plane = &image.planes[0];
+    let width = image.width;
+    let height = image.height;
+    let (pixels, bpp) = match image.pixel_format {
+        BmpPixelFormat::Rgba => {
+            let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
+            (p, 32u16)
+        }
+        BmpPixelFormat::Rgb24 => {
+            let (p, _) = pack_rgb24(plane, width, height, options)?;
+            (p, 24u16)
+        }
+        other => {
+            return Err(Error::unsupported(format!(
+                "BMP encoder: V5 + linked ICC profile not yet supported for {other:?}",
+            )))
+        }
+    };
+    // Same layout shape as the PROFILE_EMBEDDED path: the path blob
+    // sits where the ICC bytes would. `bV5CSType` distinguishes the
+    // two on the wire.
+    let pixel_bytes = pixels.len() as u32;
+    let path_bytes = linked_path.len() as u32;
+    let dib_size = BITMAPV5HEADER_SIZE + pixel_bytes + path_bytes;
+    let file_size = BITMAPFILEHEADER_SIZE + dib_size;
+    let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE;
+    let profile_data_offset = BITMAPV5HEADER_SIZE + pixel_bytes;
+
+    let mut out = Vec::with_capacity(file_size as usize);
+    write_file_header(&mut out, file_size, pixel_offset);
+    write_dib_header_v5_with_profile(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        bpp,
+        pixel_bytes,
+        PROFILE_LINKED,
+        rendering_intent,
+        profile_data_offset,
+        path_bytes,
+    );
+    out.extend_from_slice(&pixels);
+    out.extend_from_slice(linked_path);
     Ok(out)
 }
 
@@ -1248,12 +1331,13 @@ fn write_dib_header_v4_bitfields(out: &mut Vec<u8>, w: u32, stored_height: i32) 
 /// `image_size` is the byte length of the pixel array — written to
 /// the classic `biSizeImage` slot at offset 20.
 #[allow(clippy::too_many_arguments)]
-fn write_dib_header_v5_embedded_profile(
+fn write_dib_header_v5_with_profile(
     out: &mut Vec<u8>,
     w: u32,
     stored_height: i32,
     bpp: u16,
     image_size: u32,
+    cs_type: u32,
     rendering_intent: u32,
     profile_data_offset: u32,
     profile_size: u32,
@@ -1272,10 +1356,14 @@ fn write_dib_header_v5_embedded_profile(
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
                                                 // V4 tail: R/G/B/A masks (zeroed for BI_RGB).
     out.extend_from_slice(&[0u8; 16]);
-    // bV5CSType
-    out.extend_from_slice(&PROFILE_EMBEDDED.to_le_bytes());
-    // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes) — zero; the embedded
-    // ICC profile is the authoritative description.
+    // bV5CSType — caller-selected: PROFILE_EMBEDDED routes the trailing
+    // blob through `BmpMetadata::icc_profile`; PROFILE_LINKED keeps the
+    // trailing blob as an opaque external-path bytestring that the
+    // decoder surfaces via `profile_data_offset` / `profile_size`
+    // without auto-loading.
+    out.extend_from_slice(&cs_type.to_le_bytes());
+    // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes) — zero; the profile
+    // (embedded or linked) is the authoritative description.
     out.extend_from_slice(&[0u8; 36]);
     // Gamma R / G / B (3 × u32 = 12 bytes) — zero.
     out.extend_from_slice(&[0u8; 12]);

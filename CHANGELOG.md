@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **V5 `PROFILE_LINKED` encode side** (round 210): new
+  `encode_bmp_with_linked_icc_profile(image, linked_path, intent, options)`
+  closes the encode/decode symmetry for the `LCS_PROFILE_LINKED`
+  colour-space tag introduced on the decode side in r205. The encoder
+  writes the same 124-byte `BITMAPV5HEADER` shape as
+  `encode_bmp_with_icc_profile` but with `bV5CSType = PROFILE_LINKED`
+  and a caller-supplied path-string blob in the
+  `bV5ProfileData` / `bV5ProfileSize` slot instead of the ICC bytes
+  themselves. The path encoding is system-dependent per the BMP spec
+  (typically null-terminated ANSI on Windows); the encoder surfaces
+  the buffer verbatim so callers that need UTF-16 / URL transport can
+  pass whatever blob they choose. Supported pixel formats
+  (`Rgba` / `Rgb24`) and `top_down` handling match the embedded path;
+  indexed / 16-bit input still routes through `Unsupported` for the V5
+  paths until the V3 / V4 layouts grow a V5 colour-space tail.
+  Internally the V5-header writer
+  (`write_dib_header_v5_embedded_profile` →
+  `write_dib_header_v5_with_profile`) was generalised to accept the
+  `cs_type` constant rather than hard-coding `PROFILE_EMBEDDED`, so
+  both encode paths share the same on-disk byte layout below the
+  `cs_type` field. Lib tests:
+  `v5_with_linked_icc_profile_path_surfaces`,
+  `v5_linked_icc_top_down_roundtrips`, `v5_linked_icc_rgb24_path`,
+  `v5_linked_icc_rejects_unsupported_format`,
+  `v5_linked_icc_empty_path_still_valid` (+5 lib = 51). No new
+  dependencies; works in both `registry` and standalone
+  (`default-features = false`) builds.
+
 - **V4 / V5 colour-space metadata + embedded ICC profile** (round 205):
   new `decode_bmp_with_metadata` / `decode_dib_with_metadata` entry
   points return a `(BmpImage, BmpMetadata)` pair so callers can read

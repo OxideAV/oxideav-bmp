@@ -50,7 +50,8 @@ pub use decoder::{decode_bmp, decode_bmp_with_metadata, decode_dib, decode_dib_w
 pub use decoder::{decode_bmp_videoframe, decode_dib_videoframe};
 pub use encoder::{
     encode_bmp, encode_bmp_plane, encode_bmp_plane_with_options, encode_bmp_with_icc_profile,
-    encode_bmp_with_options, BmpEncodeOptions, EncodedBmpFormat,
+    encode_bmp_with_linked_icc_profile, encode_bmp_with_options, BmpEncodeOptions,
+    EncodedBmpFormat,
 };
 #[cfg(feature = "registry")]
 pub use encoder::{encode_bmp_videoframe, encode_dib_videoframe};
@@ -1519,6 +1520,137 @@ mod tests {
         assert_eq!(md.color_space, Some(BmpColorSpace::ProfileEmbedded));
         assert_eq!(md.profile_size, Some(bogus));
         assert!(md.icc_profile.is_none(), "out-of-range ICC must be None");
+    }
+
+    #[test]
+    fn v5_with_linked_icc_profile_path_surfaces() {
+        // Encoder writes a V5 header with bV5CSType = PROFILE_LINKED and
+        // a path-string blob in the trailing slot. The decoder
+        // distinguishes PROFILE_LINKED from PROFILE_EMBEDDED, surfaces
+        // the offset / size pointing at the blob, and (per spec) does
+        // not auto-load the blob — `icc_profile` stays `None`.
+        let (src, w, h) = rgba_checker(4, 4);
+        let path = b"C:\\Windows\\System32\\spool\\drivers\\color\\sRGB.icm\0".to_vec();
+        let bytes = encode_bmp_with_linked_icc_profile(
+            &src,
+            &path,
+            LCS_GM_GRAPHICS,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V5 linked encode must succeed");
+        // On-disk header is V5.
+        let header_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(header_size, BITMAPV5HEADER_SIZE);
+        // bV5CSType at file offset 14 + 56 = 70 must be PROFILE_LINKED.
+        let cs_type = u32::from_le_bytes([bytes[70], bytes[71], bytes[72], bytes[73]]);
+        assert_eq!(cs_type, PROFILE_LINKED);
+
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("V5 linked must decode");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(img.planes[0].data, src.planes[0].data);
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileLinked));
+        assert_eq!(
+            md.rendering_intent,
+            Some(BmpRenderingIntent::RelativeColorimetric)
+        );
+        // Linked-path blob is surfaced via offset+size; the decoder does
+        // not load it into `icc_profile` (that slot is reserved for the
+        // PROFILE_EMBEDDED case).
+        assert!(md.icc_profile.is_none());
+        assert_eq!(md.profile_size, Some(path.len() as u32));
+        // The path bytes themselves live where the offset points, after
+        // the pixel array. Pull them back to confirm round-trip.
+        let off = md.profile_data_offset.expect("offset present") as usize;
+        let size = md.profile_size.unwrap() as usize;
+        let dib_start = BITMAPFILEHEADER_SIZE as usize;
+        let actual = &bytes[dib_start + off..dib_start + off + size];
+        assert_eq!(actual, path.as_slice());
+    }
+
+    #[test]
+    fn v5_linked_icc_top_down_roundtrips() {
+        // Linked-profile path under top-down ordering: biHeight goes
+        // negative and the path blob still round-trips bit-for-bit.
+        let (src, _, h) = rgba_checker(2, 2);
+        let path = b"file:///tmp/profile.icc\0".to_vec();
+        let bytes = encode_bmp_with_linked_icc_profile(
+            &src,
+            &path,
+            0,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .expect("V5 linked top-down");
+        // biHeight at offset 22 is negative.
+        let bi_height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(bi_height, -(h as i32));
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("decode V5 linked top-down");
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileLinked));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Unspecified));
+        let off = md.profile_data_offset.unwrap() as usize;
+        let size = md.profile_size.unwrap() as usize;
+        let dib_start = BITMAPFILEHEADER_SIZE as usize;
+        assert_eq!(&bytes[dib_start + off..dib_start + off + size], path);
+    }
+
+    #[test]
+    fn v5_linked_icc_rgb24_path() {
+        // 24-bit BGR + linked-profile path.
+        let src = rgb24_checker(4, 2);
+        let path = b"sRGB-v4.icc\0".to_vec();
+        let bytes = encode_bmp_with_linked_icc_profile(
+            &src,
+            &path,
+            LCS_GM_IMAGES,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V5 + RGB24 linked encode");
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode");
+        assert_eq!((img.width, img.height), (4, 2));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileLinked));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Perceptual));
+        assert_eq!(md.profile_size, Some(path.len() as u32));
+        // Pixel (0,0) is red per `rgb24_checker`.
+        assert_eq!(&img.planes[0].data[..4], &[255u8, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v5_linked_icc_rejects_unsupported_format() {
+        // Same constraint as the embedded path: indexed formats use a
+        // V3 header whose layout precludes the V5 colour-space tail.
+        // Reject with `Unsupported` rather than emit a wrong-shape file.
+        let w = 4u32;
+        let h = 4u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let err = encode_bmp_with_linked_icc_profile(&src, b"path", 0, BmpEncodeOptions::default())
+            .expect_err("Indexed8 must be rejected");
+        assert!(matches!(err, BmpError::Unsupported(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn v5_linked_icc_empty_path_still_valid() {
+        // Empty path blob is structurally valid — the V5 header records
+        // `profile_size = 0` and the decoder surfaces that cleanly. The
+        // BMP itself is still a perfectly-decodable image.
+        let (src, w, h) = rgba_checker(2, 2);
+        let bytes = encode_bmp_with_linked_icc_profile(&src, &[], 0, BmpEncodeOptions::default())
+            .expect("empty linked path must encode");
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("must decode");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileLinked));
+        assert_eq!(md.profile_size, Some(0));
+        assert!(md.icc_profile.is_none());
     }
 
     #[test]
