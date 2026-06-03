@@ -1481,10 +1481,174 @@ mod tests {
     }
 
     #[test]
+    fn v5_embedded_icc_rgb565_path() {
+        // V5 + ICC path now also supports 16-bit BI_BITFIELDS 5-6-5.
+        // The V5 header carries `biCompression = BI_BITFIELDS` with the
+        // canonical R=0xF800 / G=0x07E0 / B=0x001F masks in the
+        // four-mask region (offsets 40..56 of the DIB header), and the
+        // embedded ICC blob still lives at `bV5ProfileData`
+        // immediately after the pixel array.
+        let w = 4u32;
+        let h = 2u32;
+        // Build a 5-6-5 image: row 0 = red (0xF800), row 1 = green
+        // (0x07E0). Stored host-LE in the source plane so the encoder's
+        // `pack_rgb565` byte-copy keeps the wire format intact.
+        let mut data = Vec::with_capacity((w * h * 2) as usize);
+        for y in 0..h {
+            let pixel = if y == 0 { 0xF800u16 } else { 0x07E0u16 };
+            for _ in 0..w {
+                data.extend_from_slice(&pixel.to_le_bytes());
+            }
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Rgb565,
+            planes: vec![BmpPlane {
+                stride: w as usize * 2,
+                data,
+            }],
+            palette: None,
+            pts: None,
+        };
+        let icc = b"icc:rgb565-test".to_vec();
+        let bytes =
+            encode_bmp_with_icc_profile(&src, &icc, LCS_GM_GRAPHICS, BmpEncodeOptions::default())
+                .expect("V5 + RGB565 ICC encode");
+
+        // Header is V5 (124 bytes), bpp = 16, biCompression = BI_BITFIELDS.
+        let hdr_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(hdr_size, BITMAPV5HEADER_SIZE);
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert_eq!(bpp, 16);
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_BITFIELDS);
+        // Mask region at offsets 14 + 40..56.
+        let r_mask = u32::from_le_bytes([bytes[54], bytes[55], bytes[56], bytes[57]]);
+        let g_mask = u32::from_le_bytes([bytes[58], bytes[59], bytes[60], bytes[61]]);
+        let b_mask = u32::from_le_bytes([bytes[62], bytes[63], bytes[64], bytes[65]]);
+        let a_mask = u32::from_le_bytes([bytes[66], bytes[67], bytes[68], bytes[69]]);
+        assert_eq!(
+            (r_mask, g_mask, b_mask, a_mask),
+            (0xF800, 0x07E0, 0x001F, 0)
+        );
+        // bV5CSType at 14 + 56 = 70..74 = PROFILE_EMBEDDED.
+        let cs_type = u32::from_le_bytes([bytes[70], bytes[71], bytes[72], bytes[73]]);
+        assert_eq!(cs_type, PROFILE_EMBEDDED);
+
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("V5 + ICC must decode");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileEmbedded));
+        assert_eq!(
+            md.rendering_intent,
+            Some(BmpRenderingIntent::RelativeColorimetric)
+        );
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        // Top row decodes back to red, second row to green. 5-6-5 →
+        // 8-bit expansion: F800 → R=255 G=0 B=0, 07E0 → R=0 G=255 B=0.
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+        let stride = img.planes[0].stride;
+        assert_eq!(&img.planes[0].data[stride..stride + 4], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn v5_embedded_icc_rgb565_top_down_roundtrips() {
+        // Same 16-bpp BI_BITFIELDS V5 + ICC path with `top_down = true`.
+        // `biHeight` goes negative and the ICC blob still rounds-trips.
+        let w = 2u32;
+        let h = 2u32;
+        // Single colour everywhere = 0xF81F (pure magenta in 5-6-5).
+        let mut data = Vec::with_capacity((w * h * 2) as usize);
+        for _ in 0..(w as usize * h as usize) {
+            data.extend_from_slice(&0xF81Fu16.to_le_bytes());
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Rgb565,
+            planes: vec![BmpPlane {
+                stride: w as usize * 2,
+                data,
+            }],
+            palette: None,
+            pts: None,
+        };
+        let icc = vec![0u8, 1, 2, 3, 4, 5, 6, 7];
+        let bytes = encode_bmp_with_icc_profile(
+            &src,
+            &icc,
+            0,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .expect("V5 + RGB565 top-down ICC encode");
+        // biHeight at file offset 22 negative.
+        let bi_height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(bi_height, -(h as i32));
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode V5 top-down rgb565");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Unspecified));
+        // Magenta (0xF81F): R=31, G=0, B=31 → 8-bit (255, 0, 255).
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 255, 255]);
+    }
+
+    #[test]
+    fn v5_linked_icc_rgb565_path() {
+        // PROFILE_LINKED + Rgb565: encoder writes a 124-byte V5 header
+        // with `biCompression = BI_BITFIELDS`, 5-6-5 mask quadruple in
+        // the four-mask region, and a path blob in the trailing slot.
+        // The decoder side surfaces `BmpColorSpace::ProfileLinked` plus
+        // the `profile_data_offset` / `profile_size` pointer without
+        // auto-loading the path.
+        let w = 4u32;
+        let h = 2u32;
+        let mut data = Vec::with_capacity((w * h * 2) as usize);
+        for _ in 0..(w as usize * h as usize) {
+            data.extend_from_slice(&0x001Fu16.to_le_bytes()); // blue
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Rgb565,
+            planes: vec![BmpPlane {
+                stride: w as usize * 2,
+                data,
+            }],
+            palette: None,
+            pts: None,
+        };
+        let path = b"sRGB-v4-rgb565.icc\0".to_vec();
+        let bytes = encode_bmp_with_linked_icc_profile(
+            &src,
+            &path,
+            LCS_GM_IMAGES,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V5 + RGB565 linked encode");
+        let cs_type = u32::from_le_bytes([bytes[70], bytes[71], bytes[72], bytes[73]]);
+        assert_eq!(cs_type, PROFILE_LINKED);
+        // bV5ProfileSize at file offset 14 + 116 = 130..134.
+        let profile_size = u32::from_le_bytes([bytes[130], bytes[131], bytes[132], bytes[133]]);
+        assert_eq!(profile_size as usize, path.len());
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode linked rgb565");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileLinked));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Perceptual));
+        // Decoder must NOT auto-load the linked path.
+        assert!(md.icc_profile.is_none());
+        // Pure-blue 5-6-5: B=31 → 255.
+        assert_eq!(&img.planes[0].data[..4], &[0, 0, 255, 255]);
+    }
+
+    #[test]
     fn v5_embedded_icc_rejects_unsupported_format() {
-        // The V5 + ICC path currently only supports the two direct-colour
-        // formats. Indexed input must return `Unsupported` rather than
-        // panicking or silently emitting a wrong-shaped header.
+        // The V5 + ICC path currently only supports the three
+        // direct-colour formats (Rgba / Rgb24 / Rgb565). Indexed input
+        // must return `Unsupported` rather than panicking or silently
+        // emitting a wrong-shaped header.
         let w = 4u32;
         let h = 4u32;
         let palette = four_color_palette();
@@ -1618,9 +1782,10 @@ mod tests {
 
     #[test]
     fn v5_linked_icc_rejects_unsupported_format() {
-        // Same constraint as the embedded path: indexed formats use a
-        // V3 header whose layout precludes the V5 colour-space tail.
-        // Reject with `Unsupported` rather than emit a wrong-shape file.
+        // Same constraint as the embedded path: the three direct-colour
+        // formats (Rgba / Rgb24 / Rgb565) are accepted; indexed formats
+        // use a V3 header whose layout precludes the V5 colour-space
+        // tail, so they must return `Unsupported`.
         let w = 4u32;
         let h = 4u32;
         let palette = four_color_palette();

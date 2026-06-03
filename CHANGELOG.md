@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **V5 + ICC profile encode side now accepts `Rgb565`** (round 225):
+  both `encode_bmp_with_icc_profile` and
+  `encode_bmp_with_linked_icc_profile` grow a third direct-colour arm
+  alongside the existing `Rgba` (32-bit BGRA) and `Rgb24` (24-bit BGR)
+  paths. The new arm emits a 124-byte `BITMAPV5HEADER` with
+  `biCompression = BI_BITFIELDS` and writes the canonical R=0xF800 /
+  G=0x07E0 / B=0x001F masks into the V5 four-mask region at offsets
+  40..56 — the same slot V4 / V5 headers always use for masks, so no
+  separate 12-byte mask tail is written between the header and the
+  pixel array. The trailing slot still carries the ICC blob
+  (`PROFILE_EMBEDDED`) or the path-string blob (`PROFILE_LINKED`)
+  byte-for-byte identical to the `Rgba` / `Rgb24` arms; `top_down`
+  (negative `biHeight`) is honoured. Internally
+  `write_dib_header_v5_with_profile` was generalised to take
+  `(compression, masks)` parameters instead of hard-coding
+  `(BI_RGB, [0; 4])`, with a new `RGB565_MASKS_V5` constant carrying
+  the canonical 5-6-5 quadruple. Indexed input still returns
+  `BmpError::Unsupported` on both V5 paths since threading a colour
+  table through a V5 layout would need a wider rewrite. Lib tests:
+  `v5_embedded_icc_rgb565_path`,
+  `v5_embedded_icc_rgb565_top_down_roundtrips`,
+  `v5_linked_icc_rgb565_path` (+3 lib = 54). No new dependencies;
+  works in both `registry` and standalone
+  (`default-features = false`) builds.
+
 - **V5 `PROFILE_LINKED` encode side** (round 210): new
   `encode_bmp_with_linked_icc_profile(image, linked_path, intent, options)`
   closes the encode/decode symmetry for the `LCS_PROFILE_LINKED`

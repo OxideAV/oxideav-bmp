@@ -315,11 +315,14 @@ pub fn encode_bmp_plane_with_options(
 /// the encoder side; the caller is responsible for supplying a real ICC
 /// 1.x / 2.x / 4.x profile.
 ///
-/// Supported pixel formats: [`BmpPixelFormat::Rgba`] (32-bit BGRA) and
-/// [`BmpPixelFormat::Rgb24`] (24-bit BGR). The 16-bit / indexed formats
-/// already use a V4 header (or a V3 + colour table) whose precise layout
-/// would need a wider rewrite to make room for a V5 colour-space tail;
-/// for now those return [`BmpError::Unsupported`].
+/// Supported pixel formats: [`BmpPixelFormat::Rgba`] (32-bit BGRA),
+/// [`BmpPixelFormat::Rgb24`] (24-bit BGR), and [`BmpPixelFormat::Rgb565`]
+/// (16-bit BI_BITFIELDS 5-6-5 — the V5 header's four-mask region at
+/// offsets 40..56 carries the canonical R=0xF800 / G=0x07E0 / B=0x001F
+/// quadruple so no separate 12-byte mask tail is written before the
+/// pixel array). The indexed formats still use a V3 header whose layout
+/// precludes a V5 colour-space tail, so those return
+/// [`BmpError::Unsupported`].
 ///
 /// `rendering_intent` is the V5 `bV5Intent` field. Use 0 for
 /// "unspecified" or one of the [`LCS_GM_*`](crate::LCS_GM_BUSINESS)
@@ -341,14 +344,18 @@ pub fn encode_bmp_with_icc_profile(
     let plane = &image.planes[0];
     let width = image.width;
     let height = image.height;
-    let (pixels, bpp) = match image.pixel_format {
+    let (pixels, bpp, compression, masks) = match image.pixel_format {
         BmpPixelFormat::Rgba => {
             let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
-            (p, 32u16)
+            (p, 32u16, BI_RGB, [0u32; 4])
         }
         BmpPixelFormat::Rgb24 => {
             let (p, _) = pack_rgb24(plane, width, height, options)?;
-            (p, 24u16)
+            (p, 24u16, BI_RGB, [0u32; 4])
+        }
+        BmpPixelFormat::Rgb565 => {
+            let (p, _) = pack_rgb565(plane, width, height, options)?;
+            (p, 16u16, BI_BITFIELDS, RGB565_MASKS_V5)
         }
         other => {
             return Err(Error::unsupported(format!(
@@ -366,6 +373,10 @@ pub fn encode_bmp_with_icc_profile(
     // `bV5ProfileSize` is the ICC blob length. The on-disk pixel
     // offset that `BITMAPFILEHEADER::bfOffBits` carries skips the V5
     // header but never the profile blob, since the blob lives after
+    // the pixel array. The 16-bpp BI_BITFIELDS arm keeps the same
+    // shape: the four-mask region at offsets 40..56 of the V5 header
+    // already carries R / G / B / A so the decoder reads the masks
+    // out of the header body and never needs a 12-byte tail before
     // the pixel array.
     let pixel_bytes = pixels.len() as u32;
     let icc_bytes = icc_profile.len() as u32;
@@ -382,6 +393,8 @@ pub fn encode_bmp_with_icc_profile(
         signed_stored_height(height, options),
         bpp,
         pixel_bytes,
+        compression,
+        masks,
         PROFILE_EMBEDDED,
         rendering_intent,
         profile_data_offset,
@@ -412,9 +425,10 @@ pub fn encode_bmp_with_icc_profile(
 /// caller can resolve the path itself; the decoder never auto-loads
 /// the linked file.
 ///
-/// Supported pixel formats: [`BmpPixelFormat::Rgba`] and
-/// [`BmpPixelFormat::Rgb24`] (same constraint as
-/// [`encode_bmp_with_icc_profile`]). `rendering_intent` and the
+/// Supported pixel formats: [`BmpPixelFormat::Rgba`],
+/// [`BmpPixelFormat::Rgb24`], and [`BmpPixelFormat::Rgb565`] — the same
+/// three direct-colour formats accepted by
+/// [`encode_bmp_with_icc_profile`]. `rendering_intent` and the
 /// [`BmpEncodeOptions::top_down`] flag have the same meaning. The
 /// linked-path blob is written verbatim; the caller is responsible for
 /// the path-string encoding and any null terminator the consumer
@@ -431,14 +445,18 @@ pub fn encode_bmp_with_linked_icc_profile(
     let plane = &image.planes[0];
     let width = image.width;
     let height = image.height;
-    let (pixels, bpp) = match image.pixel_format {
+    let (pixels, bpp, compression, masks) = match image.pixel_format {
         BmpPixelFormat::Rgba => {
             let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
-            (p, 32u16)
+            (p, 32u16, BI_RGB, [0u32; 4])
         }
         BmpPixelFormat::Rgb24 => {
             let (p, _) = pack_rgb24(plane, width, height, options)?;
-            (p, 24u16)
+            (p, 24u16, BI_RGB, [0u32; 4])
+        }
+        BmpPixelFormat::Rgb565 => {
+            let (p, _) = pack_rgb565(plane, width, height, options)?;
+            (p, 16u16, BI_BITFIELDS, RGB565_MASKS_V5)
         }
         other => {
             return Err(Error::unsupported(format!(
@@ -448,7 +466,9 @@ pub fn encode_bmp_with_linked_icc_profile(
     };
     // Same layout shape as the PROFILE_EMBEDDED path: the path blob
     // sits where the ICC bytes would. `bV5CSType` distinguishes the
-    // two on the wire.
+    // two on the wire. The 16-bpp BI_BITFIELDS arm reuses the V5
+    // header's four-mask region (offsets 40..56) for the canonical
+    // R / G / B / A 5-6-5 layout — no separate 12-byte mask tail.
     let pixel_bytes = pixels.len() as u32;
     let path_bytes = linked_path.len() as u32;
     let dib_size = BITMAPV5HEADER_SIZE + pixel_bytes + path_bytes;
@@ -464,6 +484,8 @@ pub fn encode_bmp_with_linked_icc_profile(
         signed_stored_height(height, options),
         bpp,
         pixel_bytes,
+        compression,
+        masks,
         PROFILE_LINKED,
         rendering_intent,
         profile_data_offset,
@@ -1330,6 +1352,13 @@ fn write_dib_header_v4_bitfields(out: &mut Vec<u8>, w: u32, stored_height: i32) 
 ///
 /// `image_size` is the byte length of the pixel array — written to
 /// the classic `biSizeImage` slot at offset 20.
+///
+/// `compression` and `masks` parameterise the V3-prefix `biCompression`
+/// field and the four-mask region at offsets 40..56. Direct-colour
+/// `BI_RGB` paths pass `(BI_RGB, [0,0,0,0])`; the 16-bit V5 path passes
+/// `(BI_BITFIELDS, [0xF800, 0x07E0, 0x001F, 0])` so the decoder picks
+/// up the canonical RGB 5-6-5 mask layout from the header body the same
+/// way it would on a V4 header.
 #[allow(clippy::too_many_arguments)]
 fn write_dib_header_v5_with_profile(
     out: &mut Vec<u8>,
@@ -1337,6 +1366,8 @@ fn write_dib_header_v5_with_profile(
     stored_height: i32,
     bpp: u16,
     image_size: u32,
+    compression: u32,
+    masks: [u32; 4],
     cs_type: u32,
     rendering_intent: u32,
     profile_data_offset: u32,
@@ -1348,19 +1379,24 @@ fn write_dib_header_v5_with_profile(
     out.extend_from_slice(&stored_height.to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes()); // planes
     out.extend_from_slice(&bpp.to_le_bytes());
-    out.extend_from_slice(&BI_RGB.to_le_bytes()); // compression — direct colour
+    out.extend_from_slice(&compression.to_le_bytes()); // direct-colour or BI_BITFIELDS
     out.extend_from_slice(&image_size.to_le_bytes());
     out.extend_from_slice(&2835i32.to_le_bytes()); // x_pels/m ≈ 72 DPI
     out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_used
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 tail: R/G/B/A masks (zeroed for BI_RGB).
-    out.extend_from_slice(&[0u8; 16]);
-    // bV5CSType — caller-selected: PROFILE_EMBEDDED routes the trailing
-    // blob through `BmpMetadata::icc_profile`; PROFILE_LINKED keeps the
-    // trailing blob as an opaque external-path bytestring that the
-    // decoder surfaces via `profile_data_offset` / `profile_size`
-    // without auto-loading.
+                                                // V4 tail: R/G/B/A masks. Zeroed for BI_RGB direct-colour;
+                                                // canonical 5-6-5 layout for 16-bpp BI_BITFIELDS.
+    out.extend_from_slice(&masks[0].to_le_bytes()); // R
+    out.extend_from_slice(&masks[1].to_le_bytes()); // G
+    out.extend_from_slice(&masks[2].to_le_bytes()); // B
+    out.extend_from_slice(&masks[3].to_le_bytes()); // A
+                                                    // bV5CSType — caller-selected: PROFILE_EMBEDDED routes the
+                                                    // trailing blob through `BmpMetadata::icc_profile`;
+                                                    // PROFILE_LINKED keeps the trailing blob as an opaque
+                                                    // external-path bytestring that the decoder surfaces via
+                                                    // `profile_data_offset` / `profile_size` without
+                                                    // auto-loading.
     out.extend_from_slice(&cs_type.to_le_bytes());
     // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes) — zero; the profile
     // (embedded or linked) is the authoritative description.
@@ -1374,6 +1410,11 @@ fn write_dib_header_v5_with_profile(
     out.extend_from_slice(&0u32.to_le_bytes()); // bV5Reserved
                                                 // Total: 40 + 16 + 4 + 36 + 12 + 4 + 4 + 4 + 4 = 124 ✓
 }
+
+/// Canonical RGB 5-6-5 mask quadruple (R, G, B, A=0) — used by the V5
+/// 16-bpp BI_BITFIELDS encode path so its mask region matches the V4
+/// 16-bpp encoder and the decoder's `BI_BITFIELDS` reader.
+const RGB565_MASKS_V5: [u32; 4] = [0xF800, 0x07E0, 0x001F, 0x0000];
 
 // ---------------------------------------------------------------------------
 // AND mask (ICO)
