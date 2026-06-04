@@ -315,20 +315,29 @@ pub fn encode_bmp_plane_with_options(
 /// the encoder side; the caller is responsible for supplying a real ICC
 /// 1.x / 2.x / 4.x profile.
 ///
-/// Supported pixel formats: [`BmpPixelFormat::Rgba`] (32-bit BGRA),
-/// [`BmpPixelFormat::Rgb24`] (24-bit BGR), and [`BmpPixelFormat::Rgb565`]
-/// (16-bit BI_BITFIELDS 5-6-5 — the V5 header's four-mask region at
-/// offsets 40..56 carries the canonical R=0xF800 / G=0x07E0 / B=0x001F
-/// quadruple so no separate 12-byte mask tail is written before the
-/// pixel array). The indexed formats still use a V3 header whose layout
-/// precludes a V5 colour-space tail, so those return
-/// [`BmpError::Unsupported`].
+/// Supported pixel formats:
+///
+/// * Direct-colour: [`BmpPixelFormat::Rgba`] (32-bit BGRA),
+///   [`BmpPixelFormat::Rgb24`] (24-bit BGR), [`BmpPixelFormat::Rgb565`]
+///   (16-bit `BI_BITFIELDS` 5-6-5 — the V5 header's four-mask region at
+///   offsets 40..56 carries the canonical R=0xF800 / G=0x07E0 / B=0x001F
+///   quadruple so no separate 12-byte mask tail is written before the
+///   pixel array).
+/// * Indexed: [`BmpPixelFormat::Indexed8`], [`BmpPixelFormat::Indexed4`],
+///   [`BmpPixelFormat::Indexed1`] — emitted always as uncompressed
+///   `BI_RGB` (V5 + RLE is not a documented pairing), with the colour
+///   table written between the 124-byte V5 header and the pixel array
+///   and `biClrUsed` set per [`BmpEncodeOptions::minimal_palette`]. The
+///   ICC blob still rides at `bV5ProfileData` immediately after the
+///   pixel array; `bfOffBits` skips the V5 header + palette to point at
+///   the pixels exactly the same way a V3 indexed BMP advertises its
+///   pixel-array offset.
 ///
 /// `rendering_intent` is the V5 `bV5Intent` field. Use 0 for
 /// "unspecified" or one of the [`LCS_GM_*`](crate::LCS_GM_BUSINESS)
 /// constants. The encoder honours [`BmpEncodeOptions::top_down`]
-/// (negative `biHeight`) but ignores `minimal_palette` for the direct-
-/// colour paths since they carry no colour table.
+/// (negative `biHeight`) on every path and honours
+/// [`BmpEncodeOptions::minimal_palette`] on the indexed paths.
 ///
 /// Roundtrips: [`decode_bmp_with_metadata`](crate::decode_bmp_with_metadata)
 /// reads the ICC blob back into [`BmpMetadata::icc_profile`](crate::BmpMetadata::icc_profile).
@@ -340,6 +349,15 @@ pub fn encode_bmp_with_icc_profile(
 ) -> Result<Vec<u8>> {
     if image.planes.is_empty() {
         return Err(Error::invalid("BMP encoder: empty frame plane"));
+    }
+    if image.pixel_format.is_indexed() {
+        return encode_bmp_v5_indexed_with_profile_blob(
+            image,
+            icc_profile,
+            PROFILE_EMBEDDED,
+            rendering_intent,
+            options,
+        );
     }
     let plane = &image.planes[0];
     let width = image.width;
@@ -425,14 +443,18 @@ pub fn encode_bmp_with_icc_profile(
 /// caller can resolve the path itself; the decoder never auto-loads
 /// the linked file.
 ///
-/// Supported pixel formats: [`BmpPixelFormat::Rgba`],
-/// [`BmpPixelFormat::Rgb24`], and [`BmpPixelFormat::Rgb565`] — the same
-/// three direct-colour formats accepted by
-/// [`encode_bmp_with_icc_profile`]. `rendering_intent` and the
-/// [`BmpEncodeOptions::top_down`] flag have the same meaning. The
-/// linked-path blob is written verbatim; the caller is responsible for
-/// the path-string encoding and any null terminator the consumer
-/// expects.
+/// Supported pixel formats: every format accepted by
+/// [`encode_bmp_with_icc_profile`] — [`BmpPixelFormat::Rgba`],
+/// [`BmpPixelFormat::Rgb24`], [`BmpPixelFormat::Rgb565`], plus
+/// [`BmpPixelFormat::Indexed8`] / [`BmpPixelFormat::Indexed4`] /
+/// [`BmpPixelFormat::Indexed1`] (always written as uncompressed
+/// `BI_RGB`, with the colour table sitting between the V5 header and
+/// the pixel array). `rendering_intent`,
+/// [`BmpEncodeOptions::top_down`], and
+/// [`BmpEncodeOptions::minimal_palette`] all have the same meaning as on
+/// the embedded path. The linked-path blob is written verbatim; the
+/// caller is responsible for the path-string encoding and any null
+/// terminator the consumer expects.
 pub fn encode_bmp_with_linked_icc_profile(
     image: &BmpImage,
     linked_path: &[u8],
@@ -441,6 +463,15 @@ pub fn encode_bmp_with_linked_icc_profile(
 ) -> Result<Vec<u8>> {
     if image.planes.is_empty() {
         return Err(Error::invalid("BMP encoder: empty frame plane"));
+    }
+    if image.pixel_format.is_indexed() {
+        return encode_bmp_v5_indexed_with_profile_blob(
+            image,
+            linked_path,
+            PROFILE_LINKED,
+            rendering_intent,
+            options,
+        );
     }
     let plane = &image.planes[0];
     let width = image.width;
@@ -493,6 +524,100 @@ pub fn encode_bmp_with_linked_icc_profile(
     );
     out.extend_from_slice(&pixels);
     out.extend_from_slice(linked_path);
+    Ok(out)
+}
+
+/// Shared V5 + profile-blob assembler for the indexed encode paths
+/// ([`BmpPixelFormat::Indexed8`] / `Indexed4` / `Indexed1`). Both the
+/// embedded (`PROFILE_EMBEDDED`) and linked (`PROFILE_LINKED`) public
+/// entry points dispatch here when the input carries a palette; the
+/// only thing that changes between the two is the `cs_type` tag and
+/// the meaning of the trailing blob (ICC bytes vs path bytes — the
+/// encoder treats both as opaque payload).
+///
+/// Layout (file-byte offsets given relative to start of file):
+/// * 0..14 `BITMAPFILEHEADER`
+/// * 14..138 `BITMAPV5HEADER` (124 B; `biClrUsed` reflects the on-disk
+///   colour-table length)
+/// * 138..138+pal `RGBQUAD` colour table (`pal = entries × 4`)
+/// * 138+pal..138+pal+pix Packed indexed pixel bytes
+/// * 138+pal+pix..end Profile blob (ICC bytes or path bytes)
+///
+/// `bfOffBits` is `14 + 124 + pal` so consumers reading the V5 BMP
+/// land on the pixel array exactly as with a V3 indexed BMP.
+/// `bV5ProfileData` is DIB-relative (so `124 + pal + pix`), matching
+/// the direct-colour V5 paths. RLE is never used on the V5 paths
+/// because the BMP spec doesn't define how an RLE pixel stream and a
+/// trailing colour-management blob co-exist on disk; the indexed
+/// `top_down = true` direct-colour fall-back already routes through
+/// uncompressed `BI_RGB` for the same reason.
+fn encode_bmp_v5_indexed_with_profile_blob(
+    image: &BmpImage,
+    blob: &[u8],
+    cs_type: u32,
+    rendering_intent: u32,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    let plane = &image.planes[0];
+    let width = image.width;
+    let height = image.height;
+    let bpp: u16 = match image.pixel_format {
+        BmpPixelFormat::Indexed8 => 8,
+        BmpPixelFormat::Indexed4 => 4,
+        BmpPixelFormat::Indexed1 => 1,
+        _ => {
+            return Err(Error::invalid(
+                "encode_bmp_v5_indexed_with_profile_blob: not an indexed format",
+            ));
+        }
+    };
+    let palette = image
+        .palette
+        .as_ref()
+        .ok_or_else(|| Error::invalid("BMP encoder: V5 + ICC indexed input requires a palette"))?;
+    let entries = written_palette_entries(bpp, palette, options);
+    let full = palette_entry_count(bpp);
+    let clr_used = if entries >= full { 0 } else { entries as u32 };
+
+    // Pack pixel bytes (honours `top_down` via `source_row`).
+    let (pixels, _) = pack_indexed(plane, bpp as usize, width, height, options)?;
+
+    let palette_bytes = (entries * 4) as u32;
+    let pixel_bytes = pixels.len() as u32;
+    let blob_bytes = blob.len() as u32;
+    let dib_size = BITMAPV5HEADER_SIZE + palette_bytes + pixel_bytes + blob_bytes;
+    let file_size = BITMAPFILEHEADER_SIZE + dib_size;
+    let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE + palette_bytes;
+    // DIB-relative; matches what the direct-colour V5 paths advertise.
+    let profile_data_offset = BITMAPV5HEADER_SIZE + palette_bytes + pixel_bytes;
+
+    let mut out = Vec::with_capacity(file_size as usize);
+    write_file_header(&mut out, file_size, pixel_offset);
+    write_dib_header_v5_indexed_with_profile(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        bpp,
+        pixel_bytes,
+        clr_used,
+        cs_type,
+        rendering_intent,
+        profile_data_offset,
+        blob_bytes,
+    );
+    // Colour table (B, G, R, 0x00) right after the V5 header.
+    for i in 0..entries {
+        if let Some(rgb) = palette.entries.get(i) {
+            out.push(rgb[2]); // B
+            out.push(rgb[1]); // G
+            out.push(rgb[0]); // R
+            out.push(0x00);
+        } else {
+            out.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        }
+    }
+    out.extend_from_slice(&pixels);
+    out.extend_from_slice(blob);
     Ok(out)
 }
 
@@ -1415,6 +1540,52 @@ fn write_dib_header_v5_with_profile(
 /// 16-bpp BI_BITFIELDS encode path so its mask region matches the V4
 /// 16-bpp encoder and the decoder's `BI_BITFIELDS` reader.
 const RGB565_MASKS_V5: [u32; 4] = [0xF800, 0x07E0, 0x001F, 0x0000];
+
+/// V5 header writer for the indexed encode paths. Layout is identical
+/// to [`write_dib_header_v5_with_profile`] except that `biCompression`
+/// is fixed at `BI_RGB`, the four-mask region at offsets 40..56 is
+/// zeroed (the colour table that follows the V5 header carries the
+/// colour assignment), and `biClrUsed` is written explicitly so a
+/// minimal-palette table can be advertised to the decoder.
+///
+/// The header still finishes with the V5 tail
+/// (`bV5Intent` / `bV5ProfileData` / `bV5ProfileSize` / `bV5Reserved`),
+/// so the trailing ICC or path blob lives at `bV5ProfileData` after
+/// the pixel array exactly like the direct-colour V5 paths.
+#[allow(clippy::too_many_arguments)]
+fn write_dib_header_v5_indexed_with_profile(
+    out: &mut Vec<u8>,
+    w: u32,
+    stored_height: i32,
+    bpp: u16,
+    image_size: u32,
+    clr_used: u32,
+    cs_type: u32,
+    rendering_intent: u32,
+    profile_data_offset: u32,
+    profile_size: u32,
+) {
+    out.extend_from_slice(&BITMAPV5HEADER_SIZE.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&stored_height.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&bpp.to_le_bytes());
+    out.extend_from_slice(&BI_RGB.to_le_bytes()); // indexed V5 → always uncompressed
+    out.extend_from_slice(&image_size.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes());
+    out.extend_from_slice(&clr_used.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
+                                                // V4 mask region zeroed for BI_RGB indexed.
+    out.extend_from_slice(&[0u8; 16]);
+    out.extend_from_slice(&cs_type.to_le_bytes());
+    out.extend_from_slice(&[0u8; 36]); // CIEXYZTRIPLE — zero, profile is authoritative
+    out.extend_from_slice(&[0u8; 12]); // Gamma R/G/B — zero
+    out.extend_from_slice(&rendering_intent.to_le_bytes());
+    out.extend_from_slice(&profile_data_offset.to_le_bytes());
+    out.extend_from_slice(&profile_size.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // bV5Reserved
+}
 
 // ---------------------------------------------------------------------------
 // AND mask (ICO)

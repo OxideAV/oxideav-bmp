@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **V5 + ICC profile encode side now accepts indexed input** (round 231):
+  `encode_bmp_with_icc_profile` and `encode_bmp_with_linked_icc_profile`
+  grow three new arms — `Indexed8`, `Indexed4`, `Indexed1` — closing the
+  last "Unsupported" gap on the V5 + ICC paths. The encoder emits a
+  124-byte `BITMAPV5HEADER` with `biCompression = BI_RGB`, writes the
+  caller-supplied `BmpPalette` between the V5 header and the pixel array
+  (so `bfOffBits = 14 + 124 + entries × 4`), sets `biClrUsed` from the
+  palette (honouring `BmpEncodeOptions::minimal_palette` to trim the
+  on-disk colour table to exactly the entries the caller supplied), and
+  parks the ICC blob (`PROFILE_EMBEDDED`) or path-string blob
+  (`PROFILE_LINKED`) at `bV5ProfileData` immediately after the pixel
+  array — same DIB-relative offset shape as the direct-colour V5 paths.
+  RLE is never chosen on the V5 paths since the BMP spec doesn't define
+  how an RLE pixel stream and a trailing colour-management blob co-exist
+  on disk. `top_down` (negative `biHeight`) is honoured on every indexed
+  arm. The decoder side needs no change: it already resolves indexed V5
+  BMPs through the existing palette + pixel-array path and surfaces the
+  ICC / linked-path blob through the existing `BmpMetadata` shape.
+  Internally a new `BmpPixelFormat::is_indexed()` helper plus a private
+  `encode_bmp_v5_indexed_with_profile_blob` + a paired
+  `write_dib_header_v5_indexed_with_profile` writer carry the new layout.
+  Lib tests: `v5_embedded_icc_indexed8_roundtrips`,
+  `v5_embedded_icc_indexed8_minimal_palette`,
+  `v5_embedded_icc_indexed8_top_down_roundtrips`,
+  `v5_embedded_icc_indexed4_path`, `v5_embedded_icc_indexed1_path`,
+  `v5_linked_icc_indexed8_path`,
+  `v5_linked_icc_indexed4_minimal_palette_path` (+7 lib = 61). The two
+  pre-existing `v5_*_rejects_unsupported_format` tests were rewritten in
+  the same commit to assert the still-valid contract (indexed input
+  without a palette returns `InvalidData`), since "indexed = rejected"
+  is no longer the right premise. No new dependencies; works in both
+  `registry` and standalone (`default-features = false`) builds.
+
 - **V5 + ICC profile encode side now accepts `Rgb565`** (round 225):
   both `encode_bmp_with_icc_profile` and
   `encode_bmp_with_linked_icc_profile` grow a third direct-colour arm

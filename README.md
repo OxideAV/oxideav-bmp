@@ -63,17 +63,20 @@ its ICC offset / size (slice falls past EOF) leaves
 metadata path can never make decode fail on its own.
 
 `encode_bmp_with_icc_profile` is the matching encode side: pass an
-`Rgba`, `Rgb24`, or `Rgb565` `BmpImage` plus an ICC blob plus an
-intent constant (0 for unspecified, or one of `LCS_GM_BUSINESS` /
-`LCS_GM_GRAPHICS` / `LCS_GM_IMAGES` / `LCS_GM_ABS_COLORIMETRIC`) and
-the encoder emits a 124-byte `BITMAPV5HEADER` with
-`bV5CSType = PROFILE_EMBEDDED` followed by the pixel array and the ICC
-blob. `top_down` is honoured; indexed input is rejected with
-`BmpError::Unsupported` for now (those use a V3 header whose layout
-would need a wider rewrite to make room for a V5 colour-space tail).
-The `Rgb565` arm sets `biCompression = BI_BITFIELDS` and writes the
-canonical 5-6-5 masks into the V5 four-mask region; no separate
-12-byte mask tail sits between the header and the pixel array.
+`Rgba`, `Rgb24`, `Rgb565`, `Indexed8`, `Indexed4`, or `Indexed1`
+`BmpImage` plus an ICC blob plus an intent constant (0 for
+unspecified, or one of `LCS_GM_BUSINESS` / `LCS_GM_GRAPHICS` /
+`LCS_GM_IMAGES` / `LCS_GM_ABS_COLORIMETRIC`) and the encoder emits a
+124-byte `BITMAPV5HEADER` with `bV5CSType = PROFILE_EMBEDDED` followed
+by the colour table (for indexed input) + pixel array + ICC blob.
+`top_down` is honoured on every arm; `minimal_palette` trims the
+on-disk colour table on the indexed paths. The `Rgb565` arm sets
+`biCompression = BI_BITFIELDS` and writes the canonical 5-6-5 masks
+into the V5 four-mask region; no separate 12-byte mask tail sits
+between the header and the pixel array. The indexed paths set
+`biCompression = BI_RGB` (RLE is never chosen on V5 paths since the
+spec doesn't define how an RLE pixel stream and a trailing
+colour-management blob co-exist on disk).
 
 `encode_bmp_with_linked_icc_profile` writes the same 124-byte
 `BITMAPV5HEADER` shape but with `bV5CSType = PROFILE_LINKED` and a
@@ -85,8 +88,8 @@ pass whatever blob they choose. Decoder side: `decode_bmp_with_metadata`
 sets `BmpColorSpace::ProfileLinked` and exposes `profile_data_offset` /
 `profile_size` so callers can resolve the path themselves — the
 decoder never auto-loads the linked file. Supported pixel formats
-(`Rgba` / `Rgb24` / `Rgb565`) and `top_down` handling match the
-embedded path.
+(`Rgba` / `Rgb24` / `Rgb565` / `Indexed8` / `Indexed4` / `Indexed1`),
+`top_down`, and `minimal_palette` handling match the embedded path.
 
 `Rgb565` input on either V5 + ICC path emits a 124-byte V5 header
 with `biCompression = BI_BITFIELDS`; the canonical R=0xF800 /
@@ -94,10 +97,23 @@ G=0x07E0 / B=0x001F masks ride in the header's four-mask region at
 offsets 40..56 (the V4 / V5 mask slot) so no separate 12-byte mask
 tail is written before the pixel array. The ICC blob
 (`PROFILE_EMBEDDED`) or path-string blob (`PROFILE_LINKED`) sits in
-the trailing slot exactly as for the `Rgba` / `Rgb24` arms. Indexed
-formats still return `Unsupported` on the V5 + ICC paths since
-threading a colour table through a V5 layout would need a wider
-rewrite than the depth-mode round budget.
+the trailing slot exactly as for the `Rgba` / `Rgb24` arms.
+
+`Indexed8` / `Indexed4` / `Indexed1` input is also accepted on both
+V5 + ICC paths (round 231): the encoder emits a 124-byte V5 header
+with `biCompression = BI_RGB`, writes the colour table between the
+header and the pixel array (so `bfOffBits = 14 + 124 + entries × 4`),
+sets `biClrUsed` from the supplied palette (honouring
+`minimal_palette` to trim the on-disk table to exactly the entries
+the caller provided), and parks the ICC or path blob at
+`bV5ProfileData` immediately after the pixel array. RLE is never
+chosen on the V5 paths since the BMP spec doesn't define how an RLE
+pixel stream and a trailing colour-management blob co-exist on disk;
+`top_down` is honoured. The decoder side resolves indices against the
+palette the same way it does for V3 indexed BMPs and surfaces the
+ICC blob (`PROFILE_EMBEDDED`) or the path-string blob
+(`PROFILE_LINKED`) through the existing `BmpMetadata` shape with no
+caller changes.
 
 `BI_ALPHABITFIELDS` (compression value 6) is the four-mask variant of
 `BI_BITFIELDS` documented for Windows CE 5.0+ and accepted by recent

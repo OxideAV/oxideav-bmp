@@ -1644,26 +1644,24 @@ mod tests {
     }
 
     #[test]
-    fn v5_embedded_icc_rejects_unsupported_format() {
-        // The V5 + ICC path currently only supports the three
-        // direct-colour formats (Rgba / Rgb24 / Rgb565). Indexed input
-        // must return `Unsupported` rather than panicking or silently
-        // emitting a wrong-shaped header.
+    fn v5_embedded_icc_indexed_without_palette_errors() {
+        // V5 + ICC indexed input requires a palette; without one the
+        // encoder must return an error rather than emit a header with
+        // no colour table.
         let w = 4u32;
         let h = 4u32;
-        let palette = four_color_palette();
         let (data, stride) = indexed_checker(w, h);
         let src = BmpImage {
             width: w,
             height: h,
             pixel_format: BmpPixelFormat::Indexed8,
             planes: vec![BmpPlane { stride, data }],
-            palette: Some(palette),
+            palette: None,
             pts: None,
         };
-        let err = encode_bmp_with_icc_profile(&src, b"any", 0, BmpEncodeOptions::default())
-            .expect_err("Indexed8 must be rejected");
-        assert!(matches!(err, BmpError::Unsupported(_)), "got {err:?}");
+        let err = encode_bmp_with_icc_profile(&src, b"icc", 0, BmpEncodeOptions::default())
+            .expect_err("indexed-without-palette must be rejected");
+        assert!(matches!(err, BmpError::InvalidData(_)), "got {err:?}");
     }
 
     #[test]
@@ -1781,26 +1779,25 @@ mod tests {
     }
 
     #[test]
-    fn v5_linked_icc_rejects_unsupported_format() {
-        // Same constraint as the embedded path: the three direct-colour
-        // formats (Rgba / Rgb24 / Rgb565) are accepted; indexed formats
-        // use a V3 header whose layout precludes the V5 colour-space
-        // tail, so they must return `Unsupported`.
+    fn v5_linked_icc_indexed_without_palette_errors() {
+        // Same constraint as the embedded path: indexed input is now
+        // accepted, but the caller still has to supply a palette. A
+        // missing palette is a contract violation, not an unsupported
+        // format.
         let w = 4u32;
         let h = 4u32;
-        let palette = four_color_palette();
         let (data, stride) = indexed_checker(w, h);
         let src = BmpImage {
             width: w,
             height: h,
             pixel_format: BmpPixelFormat::Indexed8,
             planes: vec![BmpPlane { stride, data }],
-            palette: Some(palette),
+            palette: None,
             pts: None,
         };
         let err = encode_bmp_with_linked_icc_profile(&src, b"path", 0, BmpEncodeOptions::default())
-            .expect_err("Indexed8 must be rejected");
-        assert!(matches!(err, BmpError::Unsupported(_)), "got {err:?}");
+            .expect_err("indexed-without-palette must be rejected");
+        assert!(matches!(err, BmpError::InvalidData(_)), "got {err:?}");
     }
 
     #[test]
@@ -1841,5 +1838,323 @@ mod tests {
         // 5-bit → 8-bit expansion: 31 -> 0xFF, 0 -> 0x00. Alpha 1-bit:
         // 1 expanded to 0xFF.
         assert_eq!(&img.planes[0].data[..4], &[0xFF, 0x00, 0xFF, 0xFF]);
+    }
+
+    // -----------------------------------------------------------------------
+    // V5 + ICC profile encode for indexed formats (round 231)
+    //
+    // Layout: [BITMAPFILEHEADER 14] [BITMAPV5HEADER 124] [colour table]
+    //         [packed indexed pixels] [profile blob]. `bfOffBits` skips
+    //         the V5 header + palette to point at the pixels; the
+    //         decoder side already accepts arbitrary header sizes ahead
+    //         of the palette so the roundtrip works without any decoder
+    //         change.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v5_embedded_icc_indexed8_roundtrips() {
+        // Indexed8 + embedded ICC: V5 header carries `biClrUsed = 0`
+        // (full 256-entry table by default) and the ICC blob rides at
+        // `bV5ProfileData` after the pixel array. Decoding back to RGBA
+        // resolves indices against the palette as usual; the metadata
+        // path also surfaces the ICC bytes verbatim.
+        let w = 8u32;
+        let h = 4u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let icc = b"icc:indexed8-v5".to_vec();
+        let bytes =
+            encode_bmp_with_icc_profile(&src, &icc, LCS_GM_IMAGES, BmpEncodeOptions::default())
+                .expect("V5 + ICC + Indexed8 encode");
+        // Header is V5, bpp = 8, BI_RGB, biClrUsed = 0 (full table).
+        let hdr_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(hdr_size, BITMAPV5HEADER_SIZE);
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert_eq!(bpp, 8);
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_RGB);
+        let clr_used = u32::from_le_bytes([bytes[46], bytes[47], bytes[48], bytes[49]]);
+        assert_eq!(clr_used, 0, "full table → biClrUsed = 0 sentinel");
+        // bV5CSType at 14 + 56 = 70.
+        let cs_type = u32::from_le_bytes([bytes[70], bytes[71], bytes[72], bytes[73]]);
+        assert_eq!(cs_type, PROFILE_EMBEDDED);
+        // bfOffBits at 10..14 skips header + 256×4 colour table.
+        let off_bits = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(
+            off_bits,
+            BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE + 256 * 4
+        );
+
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode V5 + ICC + Indexed8");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileEmbedded));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Perceptual));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        // Pixel (0,0) is palette entry 0 (red).
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+        // Pixel (1,0) is palette entry 1 (green).
+        assert_eq!(&img.planes[0].data[4..8], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn v5_embedded_icc_indexed8_minimal_palette() {
+        // `minimal_palette = true` shrinks the on-disk colour table to
+        // the supplied entry count and records `biClrUsed = entries`.
+        // The pixel array starts immediately after the trimmed table,
+        // not 1024 bytes in.
+        let w = 4u32;
+        let h = 2u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let icc = b"icc:minimal-table".to_vec();
+        let bytes = encode_bmp_with_icc_profile(
+            &src,
+            &icc,
+            0,
+            BmpEncodeOptions {
+                minimal_palette: true,
+                ..Default::default()
+            },
+        )
+        .expect("V5 + ICC + minimal palette");
+        let clr_used = u32::from_le_bytes([bytes[46], bytes[47], bytes[48], bytes[49]]);
+        assert_eq!(clr_used, 4, "minimal_palette → 4 entries recorded");
+        let off_bits = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(
+            off_bits,
+            BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE + 4 * 4,
+            "pixels start after the 4-entry trimmed table",
+        );
+        // Roundtrip still works.
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode minimal-palette V5");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v5_embedded_icc_indexed8_top_down_roundtrips() {
+        // `top_down = true` writes `biHeight` negative and orders rows
+        // top-first. The ICC blob still rides at `bV5ProfileData` after
+        // the pixel array.
+        let w = 4u32;
+        let h = 4u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let icc = vec![0xDEu8, 0xAD, 0xBE, 0xEF];
+        let bytes = encode_bmp_with_icc_profile(
+            &src,
+            &icc,
+            LCS_GM_GRAPHICS,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .expect("V5 + ICC + Indexed8 + top_down");
+        let bi_height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(bi_height, -(h as i32));
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode top-down V5 indexed");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        assert_eq!(
+            md.rendering_intent,
+            Some(BmpRenderingIntent::RelativeColorimetric)
+        );
+        // Row 0 in the picture is row 0 in the source (top-down).
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v5_embedded_icc_indexed4_path() {
+        // 4-bpp indexed: hi-nibble = left pixel. V5 header records
+        // `bpp = 4`, the 16-entry table sits between the header and the
+        // pixel array, and the ICC blob lives at `bV5ProfileData`.
+        let w = 8u32;
+        let h = 4u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed4,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let icc = b"icc:idx4".to_vec();
+        let bytes =
+            encode_bmp_with_icc_profile(&src, &icc, LCS_GM_BUSINESS, BmpEncodeOptions::default())
+                .expect("V5 + ICC + Indexed4");
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert_eq!(bpp, 4);
+        // 16-entry default table → off_bits = 14 + 124 + 64.
+        let off_bits = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(
+            off_bits,
+            BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE + 16 * 4
+        );
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode V5 + Indexed4");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileEmbedded));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Saturation));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        // Pixel (0,0) is palette entry 0 (red).
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v5_embedded_icc_indexed1_path() {
+        // 1-bpp indexed (monochrome). Default table is 2 × 4 = 8 bytes;
+        // pixels start at `14 + 124 + 8 = 146`.
+        let w = 8u32;
+        let h = 2u32;
+        let palette = BmpPalette {
+            entries: vec![[0, 0, 0], [255, 255, 255]],
+        };
+        // 1-bit data: alternate 0/1 horizontally.
+        let stride = w as usize;
+        let data: Vec<u8> = (0..(w * h)).map(|i| (i & 1) as u8).collect();
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed1,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let icc = b"icc:mono".to_vec();
+        let bytes = encode_bmp_with_icc_profile(&src, &icc, 0, BmpEncodeOptions::default())
+            .expect("V5 + ICC + Indexed1");
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert_eq!(bpp, 1);
+        let off_bits = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(
+            off_bits,
+            BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE + 2 * 4
+        );
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode V5 + Indexed1");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        // First pixel is index 0 (black).
+        assert_eq!(&img.planes[0].data[..4], &[0, 0, 0, 255]);
+        // Second pixel is index 1 (white).
+        assert_eq!(&img.planes[0].data[4..8], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn v5_linked_icc_indexed8_path() {
+        // PROFILE_LINKED + Indexed8: same layout as the embedded variant
+        // but `bV5CSType = PROFILE_LINKED` and the trailing blob is a
+        // path-string rather than an ICC profile. The decoder surfaces
+        // the path offset / size and leaves `icc_profile = None`.
+        let w = 4u32;
+        let h = 4u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let path = b"C:\\ICC\\Indexed8.icm\0".to_vec();
+        let bytes = encode_bmp_with_linked_icc_profile(
+            &src,
+            &path,
+            LCS_GM_IMAGES,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V5 + PROFILE_LINKED + Indexed8");
+        let cs_type = u32::from_le_bytes([bytes[70], bytes[71], bytes[72], bytes[73]]);
+        assert_eq!(cs_type, PROFILE_LINKED);
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode linked V5 indexed");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileLinked));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Perceptual));
+        assert!(md.icc_profile.is_none());
+        assert_eq!(md.profile_size, Some(path.len() as u32));
+        // Pull the path blob back at the surfaced offset.
+        let off = md.profile_data_offset.unwrap() as usize;
+        let size = md.profile_size.unwrap() as usize;
+        let dib_start = BITMAPFILEHEADER_SIZE as usize;
+        assert_eq!(&bytes[dib_start + off..dib_start + off + size], path);
+        // Pixels survive too.
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v5_linked_icc_indexed4_minimal_palette_path() {
+        // Indexed4 + minimal_palette + linked profile in one go. The
+        // 4-entry table shrinks the colour-table region to 16 bytes;
+        // pixel-offset, profile-offset, and decoded pixels all reflect
+        // the trimmed layout.
+        let w = 8u32;
+        let h = 2u32;
+        let palette = four_color_palette();
+        let (data, stride) = indexed_checker(w, h);
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed4,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(palette),
+            pts: None,
+        };
+        let path = b"linked-trimmed.icm".to_vec();
+        let bytes = encode_bmp_with_linked_icc_profile(
+            &src,
+            &path,
+            0,
+            BmpEncodeOptions {
+                minimal_palette: true,
+                ..Default::default()
+            },
+        )
+        .expect("V5 + linked + Indexed4 + minimal");
+        let clr_used = u32::from_le_bytes([bytes[46], bytes[47], bytes[48], bytes[49]]);
+        assert_eq!(clr_used, 4);
+        let off_bits = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(
+            off_bits,
+            BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE + 4 * 4
+        );
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode minimal linked V5 idx4");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileLinked));
+        assert_eq!(md.profile_size, Some(path.len() as u32));
+        let off = md.profile_data_offset.unwrap() as usize;
+        let dib_start = BITMAPFILEHEADER_SIZE as usize;
+        assert_eq!(
+            &bytes[dib_start + off..dib_start + off + path.len()],
+            path.as_slice(),
+        );
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
     }
 }

@@ -49,6 +49,20 @@ pub enum BmpPixelFormat {
     Indexed1,
 }
 
+impl BmpPixelFormat {
+    /// `true` if the format carries an attached [`BmpPalette`] (i.e.
+    /// `Indexed8` / `Indexed4` / `Indexed1`); `false` for direct-colour
+    /// formats. Used by the V5 + ICC-profile encode paths to dispatch
+    /// between the direct-colour layout (header → pixels → ICC) and the
+    /// indexed layout (header → palette → pixels → ICC).
+    pub fn is_indexed(self) -> bool {
+        matches!(
+            self,
+            BmpPixelFormat::Indexed8 | BmpPixelFormat::Indexed4 | BmpPixelFormat::Indexed1
+        )
+    }
+}
+
 /// A colour palette for use with indexed BMP formats.
 ///
 /// Each entry is `[R, G, B]` (24-bit sRGB). Up to 256 entries for 8-bit
