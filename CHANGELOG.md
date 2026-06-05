@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed ICC profile accessor on V5 metadata** (round 237):
+  `BmpMetadata::icc_profile_ref()` returns a new `BmpIccProfileRef<'_>`
+  enum that collapses the `PROFILE_EMBEDDED` / `PROFILE_LINKED` /
+  no-ICC discrimination into a single discriminated view, so callers
+  no longer have to match on `color_space` and then read
+  `icc_profile` / `linked_profile_path` / `profile_data_offset` /
+  `profile_size` by hand. Variants: `Embedded(&[u8])`,
+  `Linked(&[u8])`, `Declared { cs_type, profile_data_offset,
+  profile_size }` (V5 declared a `PROFILE_*` but the trailing-slot
+  bytes were unreachable), and `None` (no V5 ICC reference). The
+  `PROFILE_LINKED` path bytestring is now also surfaced through a new
+  named field `BmpMetadata::linked_profile_path: Option<Vec<u8>>` in
+  parallel to `icc_profile` for the embedded variant; the decoder
+  still never opens the file the path points at. Lib test:
+  `v5_icc_profile_ref_discriminates_embedded_linked_and_absent`
+  (+1 lib = 62) covers Embedded, Linked, None (V3), and lying-offset
+  Declared{...} outcomes; both `decode_bmp_with_metadata` and
+  `decode_dib_with_metadata` populate the new linked-path field. The
+  private V5-trailing-slot extractor was renamed from
+  `read_embedded_icc` to `read_profile_slot` to reflect that the same
+  byte-extraction shape serves both the embedded and linked variants
+  (the `bV5CSType` discriminator decides which named field receives
+  the bytes).
+
 - **V5 + ICC profile encode side now accepts indexed input** (round 231):
   `encode_bmp_with_icc_profile` and `encode_bmp_with_linked_icc_profile`
   grow three new arms — `Indexed8`, `Indexed4`, `Indexed1` — closing the

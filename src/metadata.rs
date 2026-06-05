@@ -100,6 +100,63 @@ impl BmpRenderingIntent {
     }
 }
 
+/// Typed view of the V5 ICC profile reference.
+///
+/// Discriminates the three V5 colour-management outcomes a caller cares
+/// about without forcing it to match `bV5CSType` and read `icc_profile`
+/// / `profile_data_offset` / `profile_size` by hand:
+///
+/// * [`BmpIccProfileRef::None`] — the BMP doesn't declare an ICC
+///   profile (V3 / V4 / OS-2 headers, or a V5 header whose `bV5CSType`
+///   is `LCS_CALIBRATED_RGB` / `LCS_sRGB` / `LCS_WINDOWS_COLOR_SPACE`).
+/// * [`BmpIccProfileRef::Embedded`] — the V5 header carries
+///   `PROFILE_EMBEDDED` and the ICC profile bytes were successfully
+///   sliced out of the input buffer.
+/// * [`BmpIccProfileRef::Linked`] — the V5 header carries
+///   `PROFILE_LINKED` and the trailing slot held a caller-encoded path
+///   bytestring that was successfully sliced out of the input buffer.
+/// * [`BmpIccProfileRef::Declared`] — the V5 header declared either
+///   PROFILE_* variant but the trailing-slot offset/size lay past EOF
+///   or had size `0`; the declared fields are still surfaced so the
+///   caller can investigate, but the bytes are unavailable.
+///
+/// The variant returned by [`BmpMetadata::icc_profile_ref`] is borrowed
+/// from `self`; callers that need owned bytes can `to_vec()` the slice
+/// or use the existing `icc_profile` / `linked_profile_path` fields
+/// directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BmpIccProfileRef<'a> {
+    /// No V5 ICC profile reference is present.
+    None,
+    /// `bV5CSType = PROFILE_EMBEDDED` and the embedded ICC bytes were
+    /// sliced out of the input. `bytes` is the embedded profile.
+    Embedded(&'a [u8]),
+    /// `bV5CSType = PROFILE_LINKED` and the linked path bytestring was
+    /// sliced out of the input. `path_bytes` is verbatim — the BMP
+    /// spec leaves path encoding system-dependent (typically null-
+    /// terminated ANSI on Windows), so the caller decides how to
+    /// interpret it.
+    Linked(&'a [u8]),
+    /// The V5 header declared one of the PROFILE_* variants but the
+    /// trailing-slot reference could not be resolved against the input
+    /// buffer (truncated file, lying offset, or zero size). The
+    /// declared `cs_type` plus `profile_data_offset` / `profile_size`
+    /// are still surfaced on [`BmpMetadata`] so the caller can decide
+    /// whether to treat the BMP as invalid or fall back to a default
+    /// colour space.
+    Declared {
+        /// Whichever of [`PROFILE_EMBEDDED`](crate::PROFILE_EMBEDDED)
+        /// / [`PROFILE_LINKED`](crate::PROFILE_LINKED) the V5 header
+        /// declared.
+        cs_type: u32,
+        /// The DIB-relative `bV5ProfileData` offset the V5 header
+        /// declared.
+        profile_data_offset: u32,
+        /// The `bV5ProfileSize` value the V5 header declared.
+        profile_size: u32,
+    },
+}
+
 /// Header-derived colour-space metadata for a decoded BMP.
 ///
 /// V3 / OS/2 headers don't carry any of this; the decoder fills every
@@ -107,7 +164,12 @@ impl BmpRenderingIntent {
 /// V4 fills `color_space` / `endpoints` / `gamma_rgb`. V5 additionally
 /// fills `rendering_intent`; for the [`BmpColorSpace::ProfileEmbedded`]
 /// variant the embedded ICC profile bytes are pulled into
-/// [`Self::icc_profile`].
+/// [`Self::icc_profile`], and for the [`BmpColorSpace::ProfileLinked`]
+/// variant the path bytestring is pulled into
+/// [`Self::linked_profile_path`]. The typed accessor
+/// [`Self::icc_profile_ref`] returns a single
+/// [`BmpIccProfileRef`] discriminated view of whichever variant is
+/// present.
 #[derive(Debug, Clone)]
 pub struct BmpMetadata {
     /// Reported DIB header size. 12 = OS/2 `BITMAPCOREHEADER`, 40 = V3
@@ -144,6 +206,19 @@ pub struct BmpMetadata {
     /// fields are still populated so callers can inspect what was
     /// declared).
     pub icc_profile: Option<Vec<u8>>,
+    /// Linked-path bytestring when [`color_space`](Self::color_space)
+    /// is [`BmpColorSpace::ProfileLinked`]. The path blob sits in the
+    /// trailing slot at the same DIB-relative `bV5ProfileData` /
+    /// `bV5ProfileSize` location used by the embedded variant — only
+    /// the `bV5CSType` discriminator distinguishes the two on the
+    /// wire. `None` for every other colour-space variant, and for
+    /// `ProfileLinked` cases where the declared offset / size slip
+    /// past EOF or have size `0` (the declared fields stay populated
+    /// so the caller can investigate). The decoder never auto-loads
+    /// the file the path points at: this slot is the path bytestring
+    /// verbatim and its encoding is system-dependent per the BMP
+    /// spec (typically null-terminated ANSI on Windows).
+    pub linked_profile_path: Option<Vec<u8>>,
 }
 
 impl BmpMetadata {
@@ -176,6 +251,43 @@ impl BmpMetadata {
             profile_data_offset: header.profile_data_offset,
             profile_size: header.profile_size,
             icc_profile: None,
+            linked_profile_path: None,
+        }
+    }
+
+    /// Typed accessor that returns the V5 ICC profile reference as a
+    /// single discriminated [`BmpIccProfileRef`] view.
+    ///
+    /// Saves callers from matching on `color_space` and then reading
+    /// `icc_profile` / `linked_profile_path` / `profile_data_offset` /
+    /// `profile_size` by hand: the accessor returns
+    /// [`BmpIccProfileRef::Embedded`] / [`BmpIccProfileRef::Linked`]
+    /// when the trailing-slot bytes are present, or
+    /// [`BmpIccProfileRef::Declared`] when the V5 header declared a
+    /// PROFILE_* variant but the trailing-slot reference couldn't be
+    /// resolved (truncated file, lying offset, zero size). For every
+    /// other colour-space variant (and for V3 / V4 / OS-2 headers
+    /// where `color_space` is `None` or non-PROFILE) the accessor
+    /// returns [`BmpIccProfileRef::None`].
+    pub fn icc_profile_ref(&self) -> BmpIccProfileRef<'_> {
+        match self.color_space {
+            Some(BmpColorSpace::ProfileEmbedded) => match self.icc_profile.as_deref() {
+                Some(bytes) => BmpIccProfileRef::Embedded(bytes),
+                None => BmpIccProfileRef::Declared {
+                    cs_type: PROFILE_EMBEDDED,
+                    profile_data_offset: self.profile_data_offset.unwrap_or(0),
+                    profile_size: self.profile_size.unwrap_or(0),
+                },
+            },
+            Some(BmpColorSpace::ProfileLinked) => match self.linked_profile_path.as_deref() {
+                Some(bytes) => BmpIccProfileRef::Linked(bytes),
+                None => BmpIccProfileRef::Declared {
+                    cs_type: PROFILE_LINKED,
+                    profile_data_offset: self.profile_data_offset.unwrap_or(0),
+                    profile_size: self.profile_size.unwrap_or(0),
+                },
+            },
+            _ => BmpIccProfileRef::None,
         }
     }
 }

@@ -52,6 +52,30 @@ match md.color_space {
 }
 ```
 
+The typed accessor `BmpMetadata::icc_profile_ref()` collapses the
+PROFILE_EMBEDDED / PROFILE_LINKED / no-ICC discrimination into a
+single `BmpIccProfileRef<'_>` enum so callers don't have to match on
+`color_space` and then read `icc_profile` / `linked_profile_path` /
+`profile_data_offset` / `profile_size` by hand:
+
+```rust
+use oxideav_bmp::BmpIccProfileRef;
+match md.icc_profile_ref() {
+    BmpIccProfileRef::Embedded(icc)    => { /* embedded ICC bytes */ }
+    BmpIccProfileRef::Linked(path)     => { /* path bytestring */ }
+    BmpIccProfileRef::Declared { .. }  => { /* V5 declared a PROFILE_* but the bytes were unreachable */ }
+    BmpIccProfileRef::None             => { /* V3 / V4 / V5 LCS_* — no ICC reference */ }
+}
+```
+
+`PROFILE_LINKED` bitmaps now also surface the path bytestring through
+the dedicated `BmpMetadata::linked_profile_path: Option<Vec<u8>>`
+field (parallel to `icc_profile` for the embedded variant). The
+decoder still never opens the file the path points at — the path is
+returned verbatim and its encoding (typically null-terminated ANSI on
+Windows) is the caller's responsibility.
+
+
 V3 / OS/2 headers report every metadata field as `None` (they pre-date
 colour management). V4 fills `color_space` / `endpoints` / `gamma_rgb`;
 V5 additionally fills `rendering_intent`. The decode-path itself is

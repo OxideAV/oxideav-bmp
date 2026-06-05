@@ -210,7 +210,18 @@ pub fn decode_bmp_with_metadata(input: &[u8]) -> Result<(BmpImage, BmpMetadata)>
     // a file-path bytestring at the same slot; we surface the offset +
     // size but never load it.
     if metadata.color_space == Some(BmpColorSpace::ProfileEmbedded) {
-        metadata.icc_profile = read_embedded_icc(
+        metadata.icc_profile = read_profile_slot(
+            input,
+            BITMAPFILEHEADER_SIZE as usize,
+            header.profile_data_offset.unwrap_or(0) as usize,
+            header.profile_size.unwrap_or(0) as usize,
+        );
+    } else if metadata.color_space == Some(BmpColorSpace::ProfileLinked) {
+        // PROFILE_LINKED carries a path bytestring at the same
+        // bV5ProfileData / bV5ProfileSize slot the embedded variant
+        // uses for ICC bytes. The decoder surfaces the path verbatim
+        // and never opens the file it points at.
+        metadata.linked_profile_path = read_profile_slot(
             input,
             BITMAPFILEHEADER_SIZE as usize,
             header.profile_data_offset.unwrap_or(0) as usize,
@@ -252,7 +263,17 @@ pub fn decode_dib_with_metadata(
     if metadata.color_space == Some(BmpColorSpace::ProfileEmbedded) {
         // DIB-relative offset: ICC bytes sit at `input[bV5ProfileData..]`
         // with no file-header offset to add.
-        metadata.icc_profile = read_embedded_icc(
+        metadata.icc_profile = read_profile_slot(
+            input,
+            0,
+            header.profile_data_offset.unwrap_or(0) as usize,
+            header.profile_size.unwrap_or(0) as usize,
+        );
+    } else if metadata.color_space == Some(BmpColorSpace::ProfileLinked) {
+        // Same DIB-relative slot as the embedded variant; the
+        // bV5CSType discriminator is what distinguishes path-bytes
+        // from ICC-bytes on the wire.
+        metadata.linked_profile_path = read_profile_slot(
             input,
             0,
             header.profile_data_offset.unwrap_or(0) as usize,
@@ -262,7 +283,13 @@ pub fn decode_dib_with_metadata(
     Ok((image, metadata))
 }
 
-/// Slice the embedded ICC profile out of the input buffer.
+/// Slice the V5 trailing-slot blob (embedded ICC bytes or the linked
+/// path bytestring) out of the input buffer.
+///
+/// The PROFILE_EMBEDDED and PROFILE_LINKED variants share the same
+/// `bV5ProfileData` / `bV5ProfileSize` slot layout — only the
+/// `bV5CSType` discriminator distinguishes them on the wire — so the
+/// slicing math is identical for both.
 ///
 /// `base` is the offset of the DIB header start within `input`
 /// (14 bytes for a BMP file, 0 for a headerless DIB). `data_offset` is
@@ -271,7 +298,7 @@ pub fn decode_dib_with_metadata(
 /// past the end of `input` so a malformed V5 header can't poison the
 /// metadata path — declared offsets and sizes are still surfaced on
 /// the returned [`BmpMetadata`] so callers can investigate.
-fn read_embedded_icc(
+fn read_profile_slot(
     input: &[u8],
     base: usize,
     data_offset: usize,

@@ -58,7 +58,7 @@ pub use encoder::{encode_bmp_videoframe, encode_dib_videoframe};
 pub use encoder::{encode_dib, encode_dib_plane};
 pub use error::{BmpError, Result};
 pub use image::{BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
-pub use metadata::{BmpColorSpace, BmpMetadata, BmpRenderingIntent};
+pub use metadata::{BmpColorSpace, BmpIccProfileRef, BmpMetadata, BmpRenderingIntent};
 pub use types::{
     row_stride, DibHeader, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE,
     BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB, BMP_MAGIC,
@@ -2156,5 +2156,88 @@ mod tests {
             path.as_slice(),
         );
         assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v5_icc_profile_ref_discriminates_embedded_linked_and_absent() {
+        // Typed accessor `BmpMetadata::icc_profile_ref` returns a
+        // single `BmpIccProfileRef` view of the V5 trailing-slot
+        // bytes. Cover the three live outcomes the decoder produces:
+        //   1. PROFILE_EMBEDDED + readable blob   → Embedded(&[u8])
+        //   2. PROFILE_LINKED   + readable blob   → Linked(&[u8])
+        //   3. No PROFILE_* (V3 / sRGB / V4 / V5  → None
+        //      LCS_* variants).
+        // Plus the lying-offset path: PROFILE_EMBEDDED with a
+        // bV5ProfileSize that walks past EOF must surface as
+        // Declared{cs_type, profile_data_offset, profile_size} — the
+        // header's claims are kept so a caller can investigate
+        // without the bytes themselves being available.
+
+        // (1) Embedded.
+        let (src, _, _) = rgba_checker(4, 4);
+        let icc = b"ICC-PROFILE-EMBEDDED-TEST".to_vec();
+        let bytes_embedded =
+            encode_bmp_with_icc_profile(&src, &icc, LCS_GM_IMAGES, BmpEncodeOptions::default())
+                .expect("V5 + embedded encode");
+        let (_, md_embedded) = decode_bmp_with_metadata(&bytes_embedded).expect("decode embedded");
+        match md_embedded.icc_profile_ref() {
+            BmpIccProfileRef::Embedded(bytes) => assert_eq!(bytes, icc.as_slice()),
+            other => panic!("expected Embedded(...), got {other:?}"),
+        }
+
+        // (2) Linked.
+        let path = b"/usr/share/color/icc/sRGB.icc\0".to_vec();
+        let bytes_linked = encode_bmp_with_linked_icc_profile(
+            &src,
+            &path,
+            LCS_GM_GRAPHICS,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V5 + linked encode");
+        let (_, md_linked) = decode_bmp_with_metadata(&bytes_linked).expect("decode linked");
+        match md_linked.icc_profile_ref() {
+            BmpIccProfileRef::Linked(bytes) => assert_eq!(bytes, path.as_slice()),
+            other => panic!("expected Linked(...), got {other:?}"),
+        }
+        // Linked-path bytes are also surfaced via the named field, in
+        // parallel to `icc_profile` for the embedded variant.
+        assert_eq!(
+            md_linked.linked_profile_path.as_deref(),
+            Some(path.as_slice())
+        );
+        // Embedded slot remains empty for the linked variant — the
+        // discriminator on `cs_type` is what decides which slot the
+        // trailing bytes go into.
+        assert!(md_linked.icc_profile.is_none());
+
+        // (3) Absent — a plain V3 BMP has no V5 colour-management
+        // tail at all, so the accessor reports None.
+        let (bytes_v3, _) = encode_bmp(&src).expect("V3 encode");
+        let (_, md_v3) = decode_bmp_with_metadata(&bytes_v3).expect("decode V3");
+        assert_eq!(md_v3.color_space, None);
+        assert_eq!(md_v3.icc_profile_ref(), BmpIccProfileRef::None);
+
+        // (4) Lying offset / size: take the embedded-blob output and
+        // overwrite bV5ProfileSize with a wildly out-of-range value.
+        // bV5ProfileSize lives at file offset 14 + 116 = 130 (the
+        // existing tests already document this offset). The accessor
+        // must report Declared{...} with the bogus size echoed back.
+        let mut bytes_bad = bytes_embedded.clone();
+        let bogus = 0xFFFF_0000u32;
+        bytes_bad[130..134].copy_from_slice(&bogus.to_le_bytes());
+        let (_, md_bad) = decode_bmp_with_metadata(&bytes_bad).expect("decode lying-size");
+        match md_bad.icc_profile_ref() {
+            BmpIccProfileRef::Declared {
+                cs_type,
+                profile_size,
+                ..
+            } => {
+                assert_eq!(cs_type, PROFILE_EMBEDDED);
+                assert_eq!(profile_size, bogus);
+            }
+            other => panic!("expected Declared{{..}}, got {other:?}"),
+        }
+        // The named field also stays None for the bytes-unavailable case.
+        assert!(md_bad.icc_profile.is_none());
     }
 }
