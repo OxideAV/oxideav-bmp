@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **V3+ device-resolution + palette-count metadata surfaced on
+  `BmpMetadata`** (round 255): the four V3-and-later
+  `BITMAPINFOHEADER` fields that pre-date the V4/V5 colour-management
+  tail — `biXPelsPerMeter`, `biYPelsPerMeter`, `biClrUsed`,
+  `biClrImportant` — are now exposed via
+  `BmpMetadata::pixels_per_meter_x` / `pixels_per_meter_y` /
+  `colors_used` / `colors_important`, each as `Option<i32>` /
+  `Option<u32>`. `None` distinguishes the OS/2 12-byte
+  `BITMAPCOREHEADER` case (the fields don't exist there) from V3+
+  headers that set the field to the documented `0` sentinel
+  ("resolution unknown" / "all colours important"). Two named
+  helpers `BmpMetadata::dpi_x()` / `dpi_y()` convert the
+  pels-per-metre values to dots-per-inch using one inch = 0.0254 m
+  exactly, rounded to the nearest integer; both return `None` for
+  the `0` sentinel and for semantically-invalid negative inputs so
+  a misencoded file can't yield a nonsensical "0 DPI" or negative
+  DPI downstream. Surfaced through both `decode_bmp_with_metadata`
+  and `decode_dib_with_metadata` (the metadata builder reads from
+  the already-parsed `DibHeader` so no pixel-pipeline changes were
+  needed). Lib tests (+5 = 67):
+  `v3_metadata_surfaces_resolution_and_palette_fields` exercises a
+  hand-built 72-DPI / 144-DPI V3 fixture against the dot-per-inch
+  conversion + the four raw fields;
+  `v3_metadata_zero_resolution_returns_none_dpi` covers the
+  documented `0` sentinel (raw fields stay `Some(0)`, `dpi_*`
+  returns `None`);
+  `v3_metadata_rejects_negative_pels_per_meter` covers misencoded
+  negative inputs;
+  `os2_bitmapcoreheader_metadata_has_no_resolution_fields` covers
+  the OS/2 V1 fall-back to `None`; and
+  `v5_metadata_inherits_resolution_fields` confirms V5 headers
+  carry the same fields at the same DIB-relative offsets as V3.
+  All metadata changes are purely additive — `decode_bmp` /
+  `decode_dib` / the `Decoder` trait-impl path are untouched.
+
 - **Typed ICC profile accessor on V5 metadata** (round 237):
   `BmpMetadata::icc_profile_ref()` returns a new `BmpIccProfileRef<'_>`
   enum that collapses the `PROFILE_EMBEDDED` / `PROFILE_LINKED` /

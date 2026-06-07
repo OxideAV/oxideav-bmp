@@ -2240,4 +2240,166 @@ mod tests {
         // The named field also stays None for the bytes-unavailable case.
         assert!(md_bad.icc_profile.is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // V3+ device-resolution + palette-count metadata
+    // (`biXPelsPerMeter`, `biYPelsPerMeter`, `biClrUsed`, `biClrImportant`).
+    // -----------------------------------------------------------------------
+    //
+    // V3 `BITMAPINFOHEADER` (40 bytes, Windows 3.0) was the first BMP
+    // header generation to carry the four fields above; V4 and V5 inherit
+    // them at the same byte offsets. The OS/2 `BITMAPCOREHEADER` (12 B)
+    // pre-dates every one of them. `BmpMetadata` surfaces all four
+    // verbatim and offers a `dpi_*` convenience that converts the
+    // pels-per-metre field to dots-per-inch.
+
+    /// Hand-assemble a 1×1 V3 BMP whose `biXPelsPerMeter` /
+    /// `biYPelsPerMeter` / `biClrUsed` / `biClrImportant` fields take
+    /// caller-supplied values. Used to verify the V3 metadata path picks
+    /// the bytes up at the documented offsets.
+    fn build_v3_with_resolution(
+        x_pels_per_meter: i32,
+        y_pels_per_meter: i32,
+        clr_used: u32,
+        clr_important: u32,
+    ) -> Vec<u8> {
+        let pixel_bytes = 4u32;
+        let file_size = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE + pixel_bytes;
+        let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE;
+        let mut out = Vec::with_capacity(file_size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&pixel_offset.to_le_bytes());
+        // BITMAPINFOHEADER body (40 B):
+        out.extend_from_slice(&BITMAPINFOHEADER_SIZE.to_le_bytes());
+        out.extend_from_slice(&1i32.to_le_bytes()); // width
+        out.extend_from_slice(&1i32.to_le_bytes()); // height (positive: bottom-up)
+        out.extend_from_slice(&1u16.to_le_bytes()); // planes
+        out.extend_from_slice(&32u16.to_le_bytes()); // bpp
+        out.extend_from_slice(&BI_RGB.to_le_bytes()); // compression
+        out.extend_from_slice(&pixel_bytes.to_le_bytes()); // image size
+        out.extend_from_slice(&x_pels_per_meter.to_le_bytes());
+        out.extend_from_slice(&y_pels_per_meter.to_le_bytes());
+        out.extend_from_slice(&clr_used.to_le_bytes());
+        out.extend_from_slice(&clr_important.to_le_bytes());
+        // One BGRA pixel.
+        out.extend_from_slice(&0xFF112233u32.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn v3_metadata_surfaces_resolution_and_palette_fields() {
+        // 2835 pels/m ≈ 72 DPI (the encoder's own default); 5669 pels/m
+        // ≈ 144 DPI exactly. clr_used/clr_important pass through verbatim.
+        let bytes = build_v3_with_resolution(2835, 5669, 16, 8);
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("V3 must decode");
+        assert_eq!(md.header_size, BITMAPINFOHEADER_SIZE);
+        assert_eq!(md.pixels_per_meter_x, Some(2835));
+        assert_eq!(md.pixels_per_meter_y, Some(5669));
+        assert_eq!(md.colors_used, Some(16));
+        assert_eq!(md.colors_important, Some(8));
+        // Conversion to DPI (rounded to nearest integer; 0.0254 m / in).
+        assert_eq!(md.dpi_x(), Some(72));
+        assert_eq!(md.dpi_y(), Some(144));
+    }
+
+    #[test]
+    fn v3_metadata_zero_resolution_returns_none_dpi() {
+        // The "unknown / unspecified" sentinel (`0` pels/m) on the V3+
+        // resolution fields must surface as None from `dpi_*` so callers
+        // don't see a nonsensical 0 DPI. The raw field stays as `Some(0)`
+        // — the sentinel is distinguishable from "header didn't carry
+        // the field" (`None` for OS/2 `BITMAPCOREHEADER`).
+        let bytes = build_v3_with_resolution(0, 0, 0, 0);
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("V3 must decode");
+        assert_eq!(md.pixels_per_meter_x, Some(0));
+        assert_eq!(md.pixels_per_meter_y, Some(0));
+        assert_eq!(md.colors_used, Some(0));
+        assert_eq!(md.colors_important, Some(0));
+        assert_eq!(md.dpi_x(), None);
+        assert_eq!(md.dpi_y(), None);
+    }
+
+    #[test]
+    fn v3_metadata_rejects_negative_pels_per_meter() {
+        // Negative pixels-per-metre is semantically meaningless (the
+        // field is documented as a target-device resolution, not a
+        // signed offset). The raw value is still passed through so
+        // callers can investigate, but `dpi_*` returns None so a
+        // misencoded file doesn't generate a "DPI = some-large-negative"
+        // report downstream.
+        let bytes = build_v3_with_resolution(-2835, -5669, 0, 0);
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("V3 must decode");
+        assert_eq!(md.pixels_per_meter_x, Some(-2835));
+        assert_eq!(md.pixels_per_meter_y, Some(-5669));
+        assert_eq!(md.dpi_x(), None);
+        assert_eq!(md.dpi_y(), None);
+    }
+
+    #[test]
+    fn os2_bitmapcoreheader_metadata_has_no_resolution_fields() {
+        // The OS/2 12-byte BITMAPCOREHEADER pre-dates the
+        // biXPelsPerMeter / biYPelsPerMeter / biClrUsed / biClrImportant
+        // fields entirely. The metadata path must surface all four as
+        // None — distinguishable from V3+ headers that set the fields
+        // to zero. Build a minimal 1×1 24-bpp BITMAPCOREHEADER fixture
+        // by hand.
+        let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPCOREHEADER_SIZE;
+        // Row stride for a 1px-wide 24-bpp row, padded to 4 bytes.
+        let row = 4u32;
+        let file_size = pixel_offset + row;
+        let mut out = Vec::with_capacity(file_size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&pixel_offset.to_le_bytes());
+        // BITMAPCOREHEADER body (12 B): size + u16 width + u16 height +
+        // u16 planes + u16 bcBitCount.
+        out.extend_from_slice(&BITMAPCOREHEADER_SIZE.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        // One BGR padded pixel.
+        out.extend_from_slice(&[0x11, 0x22, 0x33, 0x00]);
+
+        let (_, md) = decode_bmp_with_metadata(&out).expect("OS/2 V1 must decode");
+        assert_eq!(md.header_size, BITMAPCOREHEADER_SIZE);
+        assert!(md.pixels_per_meter_x.is_none());
+        assert!(md.pixels_per_meter_y.is_none());
+        assert!(md.colors_used.is_none());
+        assert!(md.colors_important.is_none());
+        assert!(md.dpi_x().is_none());
+        assert!(md.dpi_y().is_none());
+    }
+
+    #[test]
+    fn v5_metadata_inherits_resolution_fields() {
+        // V4 / V5 headers carry biXPelsPerMeter etc. at the same byte
+        // offsets as V3, so a V5 fixture must also surface them.
+        // `build_v5_srgb_32bpp` writes zeros to those slots, so use a
+        // 96-DPI value (3780 pels/m) injected via in-place byte edit.
+        let mut bytes = build_v5_srgb_32bpp(0x11223344, 0);
+        // biXPelsPerMeter sits at file offset 14 + 24 = 38; biYPelsPerMeter
+        // at 14 + 28 = 42; biClrUsed at 14 + 32 = 46; biClrImportant at
+        // 14 + 36 = 50 (matching the V3 layout at the same offsets in the
+        // DIB body).
+        let x = 3780i32; // ≈ 96 DPI
+        let y = 3780i32;
+        bytes[38..42].copy_from_slice(&x.to_le_bytes());
+        bytes[42..46].copy_from_slice(&y.to_le_bytes());
+        bytes[46..50].copy_from_slice(&5u32.to_le_bytes());
+        bytes[50..54].copy_from_slice(&3u32.to_le_bytes());
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("V5 must decode");
+        assert_eq!(md.header_size, BITMAPV5HEADER_SIZE);
+        assert_eq!(md.pixels_per_meter_x, Some(x));
+        assert_eq!(md.pixels_per_meter_y, Some(y));
+        assert_eq!(md.colors_used, Some(5));
+        assert_eq!(md.colors_important, Some(3));
+        assert_eq!(md.dpi_x(), Some(96));
+        assert_eq!(md.dpi_y(), Some(96));
+    }
 }

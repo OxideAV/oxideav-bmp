@@ -16,9 +16,9 @@
 //! so the metadata path stays additive to the existing API surface.
 
 use crate::types::{
-    DibHeader, BITMAPV4HEADER_SIZE, LCS_CALIBRATED_RGB, LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS,
-    LCS_GM_GRAPHICS, LCS_GM_IMAGES, LCS_S_RGB, LCS_WINDOWS_COLOR_SPACE, PROFILE_EMBEDDED,
-    PROFILE_LINKED,
+    DibHeader, BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE, LCS_CALIBRATED_RGB,
+    LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS, LCS_GM_GRAPHICS, LCS_GM_IMAGES, LCS_S_RGB,
+    LCS_WINDOWS_COLOR_SPACE, PROFILE_EMBEDDED, PROFILE_LINKED,
 };
 
 /// Colour-space declaration carried by a V4 / V5 BMP header.
@@ -219,6 +219,45 @@ pub struct BmpMetadata {
     /// verbatim and its encoding is system-dependent per the BMP
     /// spec (typically null-terminated ANSI on Windows).
     pub linked_profile_path: Option<Vec<u8>>,
+    /// Horizontal resolution of the target device, in pixels per
+    /// metre (`biXPelsPerMeter`). The BMP spec documents this as a
+    /// signed `LONG`; this field passes the raw value through
+    /// unchanged so callers that depend on the exact wire bytes can
+    /// roundtrip them. Convert to dots-per-inch with
+    /// [`Self::dpi_x`].
+    ///
+    /// `None` for OS/2 `BITMAPCOREHEADER` bitmaps (which pre-date
+    /// the resolution fields entirely). `Some(0)` is the documented
+    /// "resolution unknown / not specified" sentinel for V3+ and is
+    /// surfaced verbatim — it is *not* collapsed to `None` so callers
+    /// can distinguish "header doesn't carry the field" from "header
+    /// carries the field but the encoder didn't set it".
+    pub pixels_per_meter_x: Option<i32>,
+    /// Vertical resolution of the target device, in pixels per metre
+    /// (`biYPelsPerMeter`). Same shape and conventions as
+    /// [`Self::pixels_per_meter_x`].
+    pub pixels_per_meter_y: Option<i32>,
+    /// Number of palette entries the bitmap actually uses
+    /// (`biClrUsed`). Per the BMP spec a value of `0` for an indexed
+    /// bitmap means "all `2^biBitCount` colours are used"; this
+    /// field passes the raw value through unchanged so callers can
+    /// distinguish the sentinel from an explicit count. For
+    /// non-indexed depths (16 / 24 / 32 bpp), the value still has a
+    /// meaning the spec acknowledges — it specifies the size of the
+    /// colour-table-as-display-optimisation-hint that may sit between
+    /// the header and the pixel array.
+    ///
+    /// `None` for OS/2 `BITMAPCOREHEADER` bitmaps (no `biClrUsed`
+    /// field).
+    pub colors_used: Option<u32>,
+    /// Number of palette entries the spec considers "important" for
+    /// rendering the bitmap (`biClrImportant`). A value of `0`
+    /// means "all colours are important" per the
+    /// `BITMAPINFOHEADER` documentation; this field passes the raw
+    /// value through unchanged so callers can distinguish that
+    /// sentinel from explicit values. `None` for OS/2
+    /// `BITMAPCOREHEADER` bitmaps.
+    pub colors_important: Option<u32>,
 }
 
 impl BmpMetadata {
@@ -234,6 +273,15 @@ impl BmpMetadata {
         // undefined-but-present). V3 / OS/2 leave them empty.
         let color_space = header.cs_type.map(BmpColorSpace::from_raw);
         let rendering_intent = header.intent.map(BmpRenderingIntent::from_raw);
+        // V3 (BITMAPINFOHEADER) is the first header generation to carry
+        // biXPelsPerMeter / biYPelsPerMeter / biClrUsed / biClrImportant.
+        // V4 / V5 inherit the same offsets unchanged. OS/2
+        // BITMAPCOREHEADER (12 B) predates all four fields, so the
+        // header parser fills DibHeader with zero placeholders there;
+        // surface those as `None` to keep "header doesn't carry the
+        // field" distinguishable from "header carries the field with
+        // value zero".
+        let carries_v3_tail = header.header_size >= BITMAPINFOHEADER_SIZE;
         Self {
             header_size: header.header_size,
             color_space,
@@ -252,7 +300,67 @@ impl BmpMetadata {
             profile_size: header.profile_size,
             icc_profile: None,
             linked_profile_path: None,
+            pixels_per_meter_x: if carries_v3_tail {
+                Some(header.x_pels_per_meter)
+            } else {
+                None
+            },
+            pixels_per_meter_y: if carries_v3_tail {
+                Some(header.y_pels_per_meter)
+            } else {
+                None
+            },
+            colors_used: if carries_v3_tail {
+                Some(header.clr_used)
+            } else {
+                None
+            },
+            colors_important: if carries_v3_tail {
+                Some(header.clr_important)
+            } else {
+                None
+            },
         }
+    }
+
+    /// Convert [`Self::pixels_per_meter_x`] to dots per inch (DPI),
+    /// rounded to the nearest integer. Uses the SI definition of
+    /// one inch = 0.0254 metres exactly.
+    ///
+    /// Returns `None` when the metadata has no horizontal resolution
+    /// (OS/2 `BITMAPCOREHEADER`) or when the recorded value is `0`
+    /// (the documented "resolution unknown" sentinel for V3+
+    /// headers). Negative pixels-per-metre is semantically invalid;
+    /// `dpi_x` returns `None` in that case so callers don't see a
+    /// nonsensical negative DPI.
+    pub fn dpi_x(&self) -> Option<u32> {
+        Self::pels_per_meter_to_dpi(self.pixels_per_meter_x?)
+    }
+
+    /// Convert [`Self::pixels_per_meter_y`] to dots per inch (DPI),
+    /// rounded to the nearest integer. See [`Self::dpi_x`] for the
+    /// conventions used.
+    pub fn dpi_y(&self) -> Option<u32> {
+        Self::pels_per_meter_to_dpi(self.pixels_per_meter_y?)
+    }
+
+    /// Shared conversion helper: pixels-per-metre → dots-per-inch,
+    /// rounded to the nearest integer using one inch = 0.0254 m.
+    /// Returns `None` for the documented "unknown" sentinel (`0`)
+    /// and for negative inputs (semantically invalid).
+    fn pels_per_meter_to_dpi(pels_per_meter: i32) -> Option<u32> {
+        if pels_per_meter <= 0 {
+            return None;
+        }
+        // One inch is 0.0254 metres exactly, so DPI = pels/m * 0.0254.
+        // Use integer arithmetic with rounding so the conversion stays
+        // bit-exact across platforms: dpi = (pels_per_meter * 254 + 5000) / 10000.
+        // The numerator fits in i64 because pels_per_meter is bounded
+        // by i32::MAX (~ 2.1e9) and 254 * 2.1e9 ≈ 5.3e11.
+        let num = i64::from(pels_per_meter) * 254 + 5000;
+        let dpi = num / 10000;
+        // dpi is at most i32::MAX * 254 / 10000 ≈ 54.5M, fits in u32.
+        Some(dpi as u32)
     }
 
     /// Typed accessor that returns the V5 ICC profile reference as a

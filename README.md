@@ -29,6 +29,35 @@ honours the 3-byte `RGBTRIPLE` colour-table layout (V3+ uses 4-byte
 the sign of `biHeight`; output is always top-down `Rgba`. `BI_JPEG`
 and `BI_PNG` are rejected at the boundary.
 
+### V3+ device-resolution + palette-count metadata
+
+`BmpMetadata` (returned by `decode_bmp_with_metadata` /
+`decode_dib_with_metadata`) also surfaces the four V3+ metadata fields
+that pre-date colour management: `biXPelsPerMeter`, `biYPelsPerMeter`,
+`biClrUsed`, and `biClrImportant`. The named accessors:
+
+```rust
+let (_image, md) = oxideav_bmp::decode_bmp_with_metadata(bytes)?;
+md.pixels_per_meter_x      // Option<i32>  — None on OS/2 V1
+md.pixels_per_meter_y      // Option<i32>
+md.colors_used             // Option<u32>  — `0` = "all 2^bpp"
+md.colors_important        // Option<u32>  — `0` = "all important"
+md.dpi_x();                // Option<u32>  — derived, rounded to nearest
+md.dpi_y();                // Option<u32>
+```
+
+V3 (`BITMAPINFOHEADER`, 40 B) is the first BMP header generation to
+carry these fields; V4 and V5 inherit them at the same byte offsets.
+The OS/2 12-byte `BITMAPCOREHEADER` pre-dates them entirely and the
+accessors return `None`. For V3+ headers the raw pels-per-metre value
+is passed through verbatim (so the `0` "resolution unknown" sentinel
+is distinguishable from "header doesn't carry the field"); the
+`dpi_x()` / `dpi_y()` helpers convert to dots-per-inch using exactly
+one inch = 0.0254 m and round to the nearest integer. The helpers
+return `None` for the `0` sentinel and for semantically-invalid
+negative values so a misencoded file doesn't generate a nonsensical
+"0 DPI" or negative DPI downstream.
+
 ### V4 / V5 colour-space metadata + embedded ICC profile
 
 `decode_bmp_with_metadata` / `decode_dib_with_metadata` return a
