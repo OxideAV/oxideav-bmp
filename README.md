@@ -23,11 +23,36 @@ sub-images.
 | 32        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
 
 `BITMAPCOREHEADER` (OS/2 1.x, 12 B), `BITMAPINFOHEADER` (v3, 40 B),
+`BITMAPV2INFOHEADER` (52 B, Adobe-intermediate RGB-masks-in-header),
+`BITMAPV3INFOHEADER` (56 B, adds the in-header alpha mask slot),
 `BITMAPV4HEADER`, and `BITMAPV5HEADER` are all accepted. The OS/2 path
 honours the 3-byte `RGBTRIPLE` colour-table layout (V3+ uses 4-byte
 `RGBQUAD`). Bottom-up and top-down row orders are auto-detected from
 the sign of `biHeight`; output is always top-down `Rgba`. `BI_JPEG`
 and `BI_PNG` are rejected at the boundary.
+
+### `BITMAPV2INFOHEADER` (52 B) + `BITMAPV3INFOHEADER` (56 B)
+
+V2 (52 B) and V3 (56 B) are the Adobe-published intermediate header
+generations that sit between `BITMAPINFOHEADER` (40 B) and
+`BITMAPV4HEADER` (108 B). V2 extends V3-INFO by 12 bytes of in-header
+R/G/B bit masks (offsets 40 / 44 / 48), so a `BI_BITFIELDS` 52-byte
+header carries its masks **inside** the header body — no separate
+12-byte mask tail sits between the header and the pixel array. V3
+(56 B) extends V2 by a 4-byte alpha mask at offset 52, matching the
+slot V4 / V5 use; `BI_BITFIELDS` on a 56-byte header therefore
+behaves as the four-mask R/G/B/A path that V3 `BI_ALPHABITFIELDS`
+provides on the 40-byte header. The full colour-space tail (V4 adds
+`bV4CSType` / endpoints / gamma at offset 56+; V5 piles
+`bV5Intent` / `bV5ProfileData` / `bV5ProfileSize` / reserved on top)
+is absent on both intermediate headers, so the metadata path returns
+`color_space = None` / `endpoints = None` / `gamma_rgb = None` /
+`rendering_intent = None` for these files while the V3-tail fields
+(`pixels_per_meter_x` / `pixels_per_meter_y` / `colors_used` /
+`colors_important`) stay readable since V2 inherits every byte
+24..40 from `BITMAPINFOHEADER`. A zero alpha mask on V3 collapses to
+opaque output (the same convention V3 `BI_ALPHABITFIELDS` and V4 / V5
+use).
 
 ### V3+ device-resolution + palette-count metadata
 

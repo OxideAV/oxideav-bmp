@@ -61,9 +61,10 @@ pub use image::{BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
 pub use metadata::{BmpColorSpace, BmpIccProfileRef, BmpMetadata, BmpRenderingIntent};
 pub use types::{
     row_stride, DibHeader, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE,
-    BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB, BMP_MAGIC,
-    LCS_CALIBRATED_RGB, LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS, LCS_GM_GRAPHICS, LCS_GM_IMAGES,
-    LCS_S_RGB, LCS_WINDOWS_COLOR_SPACE, PROFILE_EMBEDDED, PROFILE_LINKED,
+    BITMAPV2INFOHEADER_SIZE, BITMAPV3INFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE,
+    BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB, BMP_MAGIC, LCS_CALIBRATED_RGB,
+    LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS, LCS_GM_GRAPHICS, LCS_GM_IMAGES, LCS_S_RGB,
+    LCS_WINDOWS_COLOR_SPACE, PROFILE_EMBEDDED, PROFILE_LINKED,
 };
 
 #[cfg(feature = "registry")]
@@ -1278,6 +1279,139 @@ mod tests {
         );
         let img = decode_bmp(&bytes).expect("must decode");
         assert_eq!(&img.planes[0].data[..4], &[0x11, 0x22, 0x33, 0xFF]);
+    }
+
+    // -----------------------------------------------------------------------
+    // V2 (52 B) `BITMAPV2INFOHEADER` + V3 (56 B) `BITMAPV3INFOHEADER` —
+    // Adobe-published intermediate DIB header variants.
+    // -----------------------------------------------------------------------
+    //
+    // V2 extends `BITMAPINFOHEADER` (40 B) by 12 bytes of in-header R/G/B
+    // bit masks at offsets 40, 44, 48; V3 extends V2 by a 4-byte alpha
+    // mask at offset 52. The mask block sits in the same byte slots V4 /
+    // V5 use, so a 52-byte `BI_BITFIELDS` BMP — or a 56-byte one with
+    // alpha — should decode through the same mask-driven 16/32-bpp path
+    // as the V4 / V5 case, just without the colour-space tail. Per the
+    // Wikipedia survey of header generations, this lets the decoder
+    // accept files written by readers that adopted the in-header masks
+    // without committing to the full 108-byte V4 colour-space block.
+
+    /// Build a `BITMAPV{2,3}INFOHEADER` BMP with `BI_BITFIELDS`,
+    /// 32-bpp, the supplied R/G/B (and optional alpha) masks living
+    /// **inside** the header at offsets 40 / 44 / 48 / 52, and a single
+    /// 4-byte pixel payload directly after the header.
+    fn raw_v2_or_v3_info_32bpp(
+        header_size: u32,
+        masks_rgb: [u32; 3],
+        mask_a: Option<u32>,
+        pixel: u32,
+    ) -> Vec<u8> {
+        assert!(header_size == 52 || header_size == 56);
+        // pixel_offset = 14 (file header) + header_size; no trailing
+        // mask tail (masks ride inside the header body).
+        let pixel_offset = BITMAPFILEHEADER_SIZE + header_size;
+        let mut v = Vec::new();
+        v.extend_from_slice(b"BM");
+        v.extend_from_slice(&0u32.to_le_bytes()); // file size — leave 0, decoder ignores
+        v.extend_from_slice(&0u16.to_le_bytes()); // reserved1
+        v.extend_from_slice(&0u16.to_le_bytes()); // reserved2
+        v.extend_from_slice(&pixel_offset.to_le_bytes());
+        // DIB header body
+        v.extend_from_slice(&header_size.to_le_bytes());
+        v.extend_from_slice(&1i32.to_le_bytes()); // width
+        v.extend_from_slice(&1i32.to_le_bytes()); // height (bottom-up)
+        v.extend_from_slice(&1u16.to_le_bytes()); // planes
+        v.extend_from_slice(&32u16.to_le_bytes()); // bpp
+        v.extend_from_slice(&BI_BITFIELDS.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // biSizeImage
+        v.extend_from_slice(&0i32.to_le_bytes()); // x ppm
+        v.extend_from_slice(&0i32.to_le_bytes()); // y ppm
+        v.extend_from_slice(&0u32.to_le_bytes()); // clr used
+        v.extend_from_slice(&0u32.to_le_bytes()); // clr important
+                                                  // In-header masks
+        v.extend_from_slice(&masks_rgb[0].to_le_bytes()); // R @ 40
+        v.extend_from_slice(&masks_rgb[1].to_le_bytes()); // G @ 44
+        v.extend_from_slice(&masks_rgb[2].to_le_bytes()); // B @ 48
+        if header_size == 56 {
+            // Alpha mask @ 52; if caller didn't pass one assume zero
+            // ("no alpha", opaque per `BI_BITFIELDS` convention).
+            v.extend_from_slice(&mask_a.unwrap_or(0).to_le_bytes());
+        }
+        // Pixel payload (one 4-byte BGRA word).
+        v.extend_from_slice(&pixel.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn v2_info_header_52b_bitfields_32bpp_decodes() {
+        // V2 has only R/G/B in-header masks (no alpha slot). Canonical
+        // BGRA-style masks; pixel 0xAABBCCDD splits as:
+        //   R = (… & 0x00FF0000) >> 16 = 0xBB
+        //   G = (… & 0x0000FF00) >>  8 = 0xCC
+        //   B = (… & 0x000000FF)       = 0xDD
+        //   A → opaque (no alpha mask present on V2)
+        let bytes = raw_v2_or_v3_info_32bpp(
+            52,
+            [0x00FF_0000, 0x0000_FF00, 0x0000_00FF],
+            None,
+            0xAABB_CCDD,
+        );
+        let img = decode_bmp(&bytes).expect("V2 BITMAPV2INFOHEADER must decode");
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(&img.planes[0].data[..4], &[0xBB, 0xCC, 0xDD, 0xFF]);
+    }
+
+    #[test]
+    fn v3_info_header_56b_bitfields_32bpp_decodes_with_alpha() {
+        // V3 adds the in-header alpha mask at offset 52. Same canonical
+        // BGRA-style layout as V4, but on a 56-byte header (no colour-
+        // space tail). Payload alpha nibble survives.
+        let bytes = raw_v2_or_v3_info_32bpp(
+            56,
+            [0x00FF_0000, 0x0000_FF00, 0x0000_00FF],
+            Some(0xFF00_0000),
+            0xAABB_CCDD,
+        );
+        let img = decode_bmp(&bytes).expect("V3 BITMAPV3INFOHEADER must decode");
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(&img.planes[0].data[..4], &[0xBB, 0xCC, 0xDD, 0xAA]);
+    }
+
+    #[test]
+    fn v3_info_header_56b_zero_alpha_mask_yields_opaque() {
+        // Alpha mask = 0 on V3 means "no alpha" — same convention as
+        // V3 `BI_ALPHABITFIELDS` and V4 / V5 with an explicit zero mask.
+        let bytes = raw_v2_or_v3_info_32bpp(
+            56,
+            [0x00FF_0000, 0x0000_FF00, 0x0000_00FF],
+            Some(0),
+            0x0011_2233,
+        );
+        let img = decode_bmp(&bytes).expect("must decode");
+        assert_eq!(&img.planes[0].data[..4], &[0x11, 0x22, 0x33, 0xFF]);
+    }
+
+    #[test]
+    fn v2_info_header_52b_metadata_reports_header_size() {
+        // Metadata path: the 52-byte header pre-dates the V4 colour-
+        // space tail (cs_type / endpoints / gamma at offset 56+), so
+        // every colour-management field stays `None`. The classic V3
+        // tail (DPI + colour-count) is still readable since V2 inherits
+        // every byte 24..40 from `BITMAPINFOHEADER`.
+        let bytes = raw_v2_or_v3_info_32bpp(
+            52,
+            [0x00FF_0000, 0x0000_FF00, 0x0000_00FF],
+            None,
+            0x0000_00FF,
+        );
+        let (_img, md) = decode_bmp_with_metadata(&bytes).expect("decode + metadata");
+        assert_eq!(md.header_size, 52);
+        assert!(md.color_space.is_none());
+        assert!(md.endpoints.is_none());
+        assert!(md.gamma_rgb.is_none());
+        assert!(md.rendering_intent.is_none());
+        assert_eq!(md.pixels_per_meter_x, Some(0));
+        assert_eq!(md.colors_used, Some(0));
     }
 
     // -----------------------------------------------------------------------

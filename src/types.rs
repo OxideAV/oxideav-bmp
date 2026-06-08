@@ -28,6 +28,22 @@ pub const BITMAPFILEHEADER_SIZE: u32 = 14;
 /// with this; v4/v5 extend it but we only read the extra bytes when the
 /// compression field is `BI_BITFIELDS`.
 pub const BITMAPINFOHEADER_SIZE: u32 = 40;
+/// `BITMAPV2INFOHEADER` (52 B) — Adobe-published intermediate header
+/// that extends `BITMAPINFOHEADER` by 12 bytes of in-header R/G/B
+/// bit masks (at offsets 40, 44, 48). Documented by Wikipedia as
+/// undocumented-by-Microsoft but accepted by some readers; layout
+/// matches the V4 / V5 mask-block prefix so a 52-byte
+/// `BI_BITFIELDS` header can be read with the same in-header mask
+/// reads V4 / V5 already use, just without the colour-space tail
+/// that V4 adds at offset 56+.
+pub const BITMAPV2INFOHEADER_SIZE: u32 = 52;
+/// `BITMAPV3INFOHEADER` (56 B) — extends `BITMAPV2INFOHEADER` by a
+/// 4-byte alpha bit mask at offset 52 (same slot V4 / V5 use). Per
+/// the Wikipedia survey of header generations, this is the first
+/// header to carry an integrated alpha channel; V4 (108 B) and V5
+/// (124 B) inherit the same mask layout and add the colour-space
+/// tail on top.
+pub const BITMAPV3INFOHEADER_SIZE: u32 = 56;
 pub const BITMAPV4HEADER_SIZE: u32 = 108;
 pub const BITMAPV5HEADER_SIZE: u32 = 124;
 /// Size of the OS/2 1.x `BITMAPCOREHEADER` (a.k.a. OS21XBITMAPHEADER).

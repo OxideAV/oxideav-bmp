@@ -392,15 +392,28 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
 
     let (mask_r, mask_g, mask_b, mask_a) =
         if compression == BI_BITFIELDS || compression == BI_ALPHABITFIELDS {
-            if header_size >= BITMAPV4HEADER_SIZE {
-                // v4/v5 store the masks in the header body. `BI_ALPHABITFIELDS`
-                // on a v4+ header is equivalent to `BI_BITFIELDS` since the
-                // alpha mask is already part of the fixed header layout.
+            if header_size >= BITMAPV2INFOHEADER_SIZE {
+                // V2 (52 B) / V3 (56 B) Adobe-intermediate headers and
+                // every V4+ header carry the R/G/B mask block inside the
+                // header body at offsets 40..52. V3 / V4 / V5 extend that
+                // by 4 bytes of in-header alpha mask at offset 52. Read
+                // alpha when the header is large enough to include it
+                // (>= 56 B) regardless of whether `compression` is
+                // `BI_BITFIELDS` or `BI_ALPHABITFIELDS` — the latter is
+                // documented as the "always-four-masks" cousin and the
+                // former is the original three-mask variant that V3+
+                // grew an alpha slot for; both reach the same bytes on
+                // a V3+ header.
+                let ma = if header_size >= BITMAPV3INFOHEADER_SIZE {
+                    Some(read_u32_le(input, 52))
+                } else {
+                    None
+                };
                 (
                     Some(read_u32_le(input, 40)),
                     Some(read_u32_le(input, 44)),
                     Some(read_u32_le(input, 48)),
-                    Some(read_u32_le(input, 52)),
+                    ma,
                 )
             } else {
                 // V3 (40-byte) header: masks live in the bytes immediately

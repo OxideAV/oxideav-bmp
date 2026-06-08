@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`BITMAPV2INFOHEADER` (52 B) + `BITMAPV3INFOHEADER` (56 B) decode**
+  (round 261): the two Adobe-published intermediate DIB header
+  generations that sit between `BITMAPINFOHEADER` (40 B) and
+  `BITMAPV4HEADER` (108 B) now decode through the same mask-driven
+  16 / 32-bpp path the V4 / V5 case uses. V2 carries the R / G / B
+  bit masks **inside** the header body at offsets 40 / 44 / 48 (no
+  trailing 12-byte mask tail between header and pixel array); V3
+  adds the 4-byte alpha mask at offset 52 (matching the slot V4 / V5
+  use). The full V4 colour-space tail — `bV4CSType`, the
+  `CIEXYZTRIPLE` endpoints, the R / G / B gamma triple — is absent
+  on both intermediate headers, so the metadata path returns
+  `color_space = None` / `endpoints = None` / `gamma_rgb = None` /
+  `rendering_intent = None` while the V3-tail fields the 40-byte
+  `BITMAPINFOHEADER` already carries
+  (`pixels_per_meter_x` / `pixels_per_meter_y` / `colors_used` /
+  `colors_important`) stay readable since V2 inherits every byte
+  24..40 from the base header. New public size constants
+  `BITMAPV2INFOHEADER_SIZE = 52` and `BITMAPV3INFOHEADER_SIZE = 56`
+  re-exported from the crate root alongside the existing
+  `BITMAPV4HEADER_SIZE` / `BITMAPV5HEADER_SIZE`. Lib tests (+4 = 71):
+  `v2_info_header_52b_bitfields_32bpp_decodes` exercises the V2
+  three-mask path against canonical BGRA-style masks and a
+  0xAABBCCDD payload;
+  `v3_info_header_56b_bitfields_32bpp_decodes_with_alpha` covers the
+  V3 four-mask path with a populated alpha mask;
+  `v3_info_header_56b_zero_alpha_mask_yields_opaque` covers the
+  documented zero-alpha-mask → opaque convention (same as V3
+  `BI_ALPHABITFIELDS` and V4 / V5);
+  `v2_info_header_52b_metadata_reports_header_size` asserts the
+  metadata builder reports `header_size = 52`, leaves every V4 / V5
+  colour-management field at `None`, and surfaces the V3 DPI +
+  palette-count fields as inherited from `BITMAPINFOHEADER`.
 - **V3+ device-resolution + palette-count metadata surfaced on
   `BmpMetadata`** (round 255): the four V3-and-later
   `BITMAPINFOHEADER` fields that pre-date the V4/V5 colour-management
