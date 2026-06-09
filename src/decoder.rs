@@ -112,11 +112,8 @@ pub fn decode_bmp(input: &[u8]) -> Result<BmpImage> {
     if input.len() < (BITMAPFILEHEADER_SIZE + BITMAPCOREHEADER_SIZE) as usize {
         return Err(Error::invalid("BMP: input shorter than header"));
     }
-    let magic = read_u16_le(input, 0);
-    if magic != BMP_MAGIC {
-        return Err(Error::invalid("BMP: missing 'BM' signature"));
-    }
-    let pixel_offset = read_u32_le(input, 10) as usize;
+    let file_header = BitmapFileHeader::parse(input)?;
+    let pixel_offset = file_header.pixel_offset as usize;
     let dib = &input[BITMAPFILEHEADER_SIZE as usize..];
     decode_dib_with_offset(dib, input, pixel_offset)
 }
@@ -195,11 +192,8 @@ pub fn decode_bmp_with_metadata(input: &[u8]) -> Result<(BmpImage, BmpMetadata)>
     if input.len() < (BITMAPFILEHEADER_SIZE + BITMAPCOREHEADER_SIZE) as usize {
         return Err(Error::invalid("BMP: input shorter than header"));
     }
-    let magic = read_u16_le(input, 0);
-    if magic != BMP_MAGIC {
-        return Err(Error::invalid("BMP: missing 'BM' signature"));
-    }
-    let pixel_offset = read_u32_le(input, 10) as usize;
+    let file_header = BitmapFileHeader::parse(input)?;
+    let pixel_offset = file_header.pixel_offset as usize;
     let dib = &input[BITMAPFILEHEADER_SIZE as usize..];
     let (header, _) = parse_dib_header(dib)?;
     let image = decode_dib_payload(&header, input, pixel_offset)?;

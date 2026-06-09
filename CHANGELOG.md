@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed `BitmapFileHeader` parser** (round 265): the 14-byte
+  `BITMAPFILEHEADER` that prefixes every real `.bmp` file now has a
+  dedicated public struct with named accessors for each on-disk
+  field (`file_type` / `file_size` / `reserved1` / `reserved2` /
+  `pixel_offset`) instead of the inline `read_u16_le` / `read_u32_le`
+  pokes the decoder open-coded historically. Three entry points are
+  exposed: `BitmapFileHeader::from_bytes` (unchecked field read,
+  returns `None` on a short buffer; suitable for fuzz / probe
+  consumers), `BitmapFileHeader::parse` (validates buffer length +
+  the `0x4D42` `bfType` signature), and `BitmapFileHeader::to_bytes`
+  (renders the deterministic 14-byte layout for encoder consumers).
+  Two informational predicates round out the surface:
+  `has_canonical_magic()` distinguishes `"BM"` from the OS/2-era
+  alternates (`BA` array, `CI` colour icon, `CP` colour pointer)
+  the decoder doesn't accept, and `reserved_is_clean()` reports
+  whether `bfReserved1` / `bfReserved2` are both zero (the spec
+  says they "must be zero" but real-world writers leak garbage
+  there). The decoder's `decode_bmp` and `decode_bmp_with_metadata`
+  entry points now funnel through `BitmapFileHeader::parse`, so the
+  validated `bfType` check and the "shorter than header" error
+  string used historically are now reachable from a single source.
+  Re-exported from the crate root alongside the existing typed
+  `DibHeader`.
+
 - **`BITMAPV2INFOHEADER` (52 B) + `BITMAPV3INFOHEADER` (56 B) decode**
   (round 261): the two Adobe-published intermediate DIB header
   generations that sit between `BITMAPINFOHEADER` (40 B) and

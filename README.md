@@ -31,6 +31,32 @@ honours the 3-byte `RGBTRIPLE` colour-table layout (V3+ uses 4-byte
 the sign of `biHeight`; output is always top-down `Rgba`. `BI_JPEG`
 and `BI_PNG` are rejected at the boundary.
 
+### Typed `BitmapFileHeader` view
+
+The 14-byte `BITMAPFILEHEADER` prefix is also surfaced as a typed
+struct for callers that want to inspect the file header without
+running the full decode (probe / dispatcher / fuzz consumers):
+
+```rust
+use oxideav_bmp::BitmapFileHeader;
+
+// `parse` validates buffer length + the `0x4D42` `bfType` signature.
+let h = BitmapFileHeader::parse(bytes)?;
+assert!(h.has_canonical_magic());     // distinguishes "BM" from OS/2
+                                      // `BA`/`CI`/`CP` archive variants
+let _ = h.file_size;                  // bfSize (may be 0 — informational)
+let _ = h.pixel_offset;               // bfOffBits — start of pixel array
+let _ = h.reserved_is_clean();        // bfReserved1/2 zero per the spec
+
+// `from_bytes` is the unchecked variant (returns `None` on a short
+// buffer; the magic check is skipped). Encoder consumers go the
+// other way via `to_bytes()` for a deterministic 14-byte layout.
+```
+
+`decode_bmp` and `decode_bmp_with_metadata` now both funnel the file
+header parse through this struct, so the "shorter than header" and
+"missing 'BM' signature" error messages come from a single source.
+
 ### `BITMAPV2INFOHEADER` (52 B) + `BITMAPV3INFOHEADER` (56 B)
 
 V2 (52 B) and V3 (56 B) are the Adobe-published intermediate header
