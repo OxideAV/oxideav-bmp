@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed `BitmapInfoHeader` parser + `DibHeaderKind` discriminator**
+  (round 268): the 40-byte `BITMAPINFOHEADER` that opens every
+  V3-and-later DIB now has a dedicated public struct mirroring the
+  eleven documented fields at their on-disk offsets (`header_size` /
+  `width` / `height` / `planes` / `bit_count` / `compression` /
+  `image_size` / `x_pels_per_meter` / `y_pels_per_meter` / `clr_used`
+  / `clr_important`), completing the typed-header pair started by
+  r265's `BitmapFileHeader`. Entry points mirror the file-header
+  shape: `from_bytes` (unchecked, `None` on a sub-40-byte buffer),
+  `parse` (validates buffer length + the `biSize` discrimination the
+  header-types doc prescribes — `biSize = 12` is rejected with a
+  dedicated message since the `WORD`-based `BITMAPCOREHEADER` layout
+  would read back as garbage through INFO offsets; other sub-40 sizes
+  are rejected as unsupported; `>= 40` is accepted since the V2 / V3
+  / V4 / V5 generations and odd in-the-wild sizes such as the OS/2
+  2.x 64-byte variant all carry the 40-byte INFO prefix), and
+  `to_bytes` (deterministic 40-byte render). Accessors:
+  `kind() -> Option<DibHeaderKind>`, `is_top_down()` (negative
+  `biHeight`), `absolute_width()` / `absolute_height()`,
+  `row_stride()` (the documented `((w*bpp + 31) & !31) >> 3`
+  formula), `palette_entries()` (`biClrUsed` with the `0 = 2^bpp`
+  sentinel applied on indexed depths), and the informational
+  `planes_is_valid()` (`biPlanes == 1`, "must be set to 1"). The new
+  `DibHeaderKind` enum maps the six known `biSize` generations
+  (12 / 40 / 52 / 56 / 108 / 124 → `Core` / `Info` / `V2Info` /
+  `V3Info` / `V4` / `V5`) with `from_size` / `size` / the
+  `has_info_prefix()` predicate (everything but `Core` shares the
+  INFO field layout as a prefix). The decoder's `parse_dib_header`
+  now reads the eleven base fields through the typed struct so the
+  offsets live in one place; the extended mask / colour-space tails
+  stay on the wide `DibHeader` and every error message is unchanged.
+  Lib tests (+21 = 115; crate total 155): layout/offset render,
+  byte roundtrips (including dirty values), short-buffer `None` /
+  `Err`, CORE-size + sub-40 rejection, extended + unknown `>= 40`
+  acceptance, planes / top-down / stride / palette accessor
+  semantics, the Bitmap Storage doc's Redbrick.bmp worked example
+  (32×32 4-bpp header bytes parse to the documented values, 512-byte
+  index array reconstructed from `row_stride()`), `DibHeaderKind`
+  mapping exhaustiveness + roundtrip, and an encoder/decoder
+  agreement check on a real encoded BMP. Re-exported from the crate
+  root alongside `BitmapFileHeader` / `DibHeader`.
+
 - **Typed `BitmapFileHeader` parser** (round 265): the 14-byte
   `BITMAPFILEHEADER` that prefixes every real `.bmp` file now has a
   dedicated public struct with named accessors for each on-disk

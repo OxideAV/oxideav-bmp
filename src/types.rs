@@ -330,6 +330,289 @@ impl BitmapFileHeader {
     }
 }
 
+/// DIB header generation, discriminated by the `biSize` value stored in
+/// the first DWORD of every DIB header.
+///
+/// The Bitmap Header Types page documents four basic header types —
+/// `BITMAPCOREHEADER`, `BITMAPINFOHEADER`, `BITMAPV4HEADER`,
+/// `BITMAPV5HEADER` — "differentiated by the Size member, which is the
+/// first DWORD in each of the structures". V5 is an extended V4, which
+/// is an extended INFO; the CORE header shares only the `Size` member
+/// (its body is `WORD`-based and laid out differently). The two
+/// Adobe-published intermediates (52 / 56 bytes, surveyed in the staged
+/// Wikipedia file-format page) slot between INFO and V4 and share the
+/// 40-byte INFO prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DibHeaderKind {
+    /// 12-byte OS/2 `BITMAPCOREHEADER` — `WORD` width / height, no
+    /// compression field, `RGBTRIPLE` colour table.
+    Core,
+    /// 40-byte `BITMAPINFOHEADER` (the baseline modern header).
+    Info,
+    /// 52-byte `BITMAPV2INFOHEADER` — INFO + in-header R/G/B masks.
+    V2Info,
+    /// 56-byte `BITMAPV3INFOHEADER` — V2 + in-header alpha mask.
+    V3Info,
+    /// 108-byte `BITMAPV4HEADER` — adds the colour-space tail
+    /// (`bV4CSType`, endpoints, gamma).
+    V4,
+    /// 124-byte `BITMAPV5HEADER` — adds rendering intent + ICC profile
+    /// offset / size.
+    V5,
+}
+
+impl DibHeaderKind {
+    /// Map a `biSize` value to the header generation it declares.
+    /// Returns `None` for sizes that match none of the six known
+    /// generations (e.g. the OS/2 2.x 64-byte variant, which the
+    /// decoder tolerates by reading only the 40-byte INFO prefix).
+    pub fn from_size(size: u32) -> Option<Self> {
+        match size {
+            BITMAPCOREHEADER_SIZE => Some(Self::Core),
+            BITMAPINFOHEADER_SIZE => Some(Self::Info),
+            BITMAPV2INFOHEADER_SIZE => Some(Self::V2Info),
+            BITMAPV3INFOHEADER_SIZE => Some(Self::V3Info),
+            BITMAPV4HEADER_SIZE => Some(Self::V4),
+            BITMAPV5HEADER_SIZE => Some(Self::V5),
+            _ => None,
+        }
+    }
+
+    /// On-disk byte size of this header generation (the canonical
+    /// `biSize` value).
+    pub fn size(&self) -> u32 {
+        match self {
+            Self::Core => BITMAPCOREHEADER_SIZE,
+            Self::Info => BITMAPINFOHEADER_SIZE,
+            Self::V2Info => BITMAPV2INFOHEADER_SIZE,
+            Self::V3Info => BITMAPV3INFOHEADER_SIZE,
+            Self::V4 => BITMAPV4HEADER_SIZE,
+            Self::V5 => BITMAPV5HEADER_SIZE,
+        }
+    }
+
+    /// `true` for every generation that shares the 40-byte
+    /// `BITMAPINFOHEADER` field layout as a prefix (INFO / V2 / V3 /
+    /// V4 / V5). `false` only for [`DibHeaderKind::Core`], whose
+    /// `WORD`-based body has "only the Size member in common with
+    /// other bitmap header structures" per the header-types page.
+    pub fn has_info_prefix(&self) -> bool {
+        !matches!(self, Self::Core)
+    }
+}
+
+/// Typed view of the 40-byte `BITMAPINFOHEADER` — the eleven-field
+/// structure that opens every V3-and-later DIB header.
+///
+/// On-disk layout (little-endian, no padding), field-for-field from
+/// the `BITMAPINFOHEADER (wingdi.h)` structure page:
+///
+/// ```text
+///   off  0  DWORD biSize          — bytes required by the structure; does
+///                                   NOT include the colour table or the
+///                                   colour masks appended after it
+///   off  4  LONG  biWidth         — width in pixels
+///   off  8  LONG  biHeight        — height in pixels; positive = bottom-up
+///                                   DIB, negative = top-down DIB. Compressed
+///                                   formats must use a positive height.
+///   off 12  WORD  biPlanes        — "must be set to 1"
+///   off 14  WORD  biBitCount      — bits per pixel
+///   off 16  DWORD biCompression   — BI_RGB / BI_RLE8 / BI_RLE4 /
+///                                   BI_BITFIELDS / BI_JPEG / BI_PNG …
+///   off 20  DWORD biSizeImage     — image size in bytes; may be 0 for
+///                                   uncompressed RGB bitmaps
+///   off 24  LONG  biXPelsPerMeter — horizontal device resolution
+///   off 28  LONG  biYPelsPerMeter — vertical device resolution
+///   off 32  DWORD biClrUsed       — colour-table entries actually used;
+///                                   0 = the 2^biBitCount maximum
+///   off 36  DWORD biClrImportant  — important colours; 0 = all
+/// ```
+///
+/// The extended generations (V2 / V3 / V4 / V5) keep these eleven
+/// fields at the same offsets and append masks / colour-space fields
+/// after them, so this struct doubles as the typed prefix view for any
+/// `biSize >= 40` header. The full extended parse (masks, colour-space
+/// tail, ICC slot) stays on [`DibHeader`]; this struct is the narrow
+/// 1:1 mirror for probe / dispatcher / encoder consumers, the same
+/// shape [`BitmapFileHeader`] provides for the 14-byte file header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BitmapInfoHeader {
+    /// `biSize` — declared structure size. 40 for the plain INFO
+    /// header; 52 / 56 / 108 / 124 for the extended generations that
+    /// carry this layout as a prefix. Surfaced as-read.
+    pub header_size: u32,
+    /// `biWidth` — signed width in pixels. Negative widths are not
+    /// meaningful; the decoder rejects them, this view surfaces the
+    /// raw value.
+    pub width: i32,
+    /// `biHeight` — signed height. Positive = bottom-up (origin at the
+    /// lower-left corner), negative = top-down (origin upper-left).
+    pub height: i32,
+    /// `biPlanes` — documented as "must be set to 1". Surfaced raw;
+    /// see [`Self::planes_is_valid`].
+    pub planes: u16,
+    /// `biBitCount` — bits per pixel.
+    pub bit_count: u16,
+    /// `biCompression` — see [`BI_RGB`], [`BI_RLE8`], [`BI_RLE4`],
+    /// [`BI_BITFIELDS`], [`BI_JPEG`], [`BI_PNG`], [`BI_ALPHABITFIELDS`].
+    pub compression: u32,
+    /// `biSizeImage` — image size in bytes; 0 is legal for
+    /// uncompressed RGB bitmaps (the stride formula reconstructs it).
+    pub image_size: u32,
+    /// `biXPelsPerMeter` — horizontal resolution of the target device,
+    /// pixels per metre.
+    pub x_pels_per_meter: i32,
+    /// `biYPelsPerMeter` — vertical resolution, pixels per metre.
+    pub y_pels_per_meter: i32,
+    /// `biClrUsed` — number of colour-table entries actually used by
+    /// the bitmap. 0 means the full `2^biBitCount` table for indexed
+    /// depths.
+    pub clr_used: u32,
+    /// `biClrImportant` — number of colour indices considered
+    /// important; 0 means all colours are important.
+    pub clr_important: u32,
+}
+
+impl BitmapInfoHeader {
+    /// Size of the on-disk structure — always 40 bytes.
+    pub const SIZE: usize = BITMAPINFOHEADER_SIZE as usize;
+
+    /// Read the eleven fields out of the first 40 bytes of `buf`
+    /// **without** validating the `biSize` discriminator. Returns
+    /// `None` if `buf` is shorter than 40 bytes. Probe / fuzz
+    /// consumers that want the raw field view use this; callers that
+    /// want the `biSize` discrimination enforced use [`Self::parse`].
+    pub fn from_bytes(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::SIZE {
+            return None;
+        }
+        Some(Self {
+            header_size: read_u32_le(buf, 0),
+            width: read_i32_le(buf, 4),
+            height: read_i32_le(buf, 8),
+            planes: read_u16_le(buf, 12),
+            bit_count: read_u16_le(buf, 14),
+            compression: read_u32_le(buf, 16),
+            image_size: read_u32_le(buf, 20),
+            x_pels_per_meter: read_i32_le(buf, 24),
+            y_pels_per_meter: read_i32_le(buf, 28),
+            clr_used: read_u32_le(buf, 32),
+            clr_important: read_u32_le(buf, 36),
+        })
+    }
+
+    /// Parse + validate the INFO header at the start of `buf`.
+    ///
+    /// Validation is the `biSize` discrimination the header-types page
+    /// prescribes ("differentiated by the Size member, which is the
+    /// first DWORD"):
+    ///
+    /// * `buf` must hold at least the 40-byte structure;
+    /// * `biSize == 12` is rejected with a dedicated message — that's
+    ///   the `BITMAPCOREHEADER` layout, whose `WORD`-based body would
+    ///   read back as garbage through this struct's field offsets;
+    /// * `biSize < 40` (and ≠ 12) is rejected as unsupported;
+    /// * `biSize >= 40` is accepted — the extended generations
+    ///   (52 / 56 / 108 / 124, plus odd in-the-wild sizes such as the
+    ///   OS/2 2.x 64-byte variant) all carry this 40-byte layout as a
+    ///   prefix, matching the decoder's leniency.
+    ///
+    /// Everything else (width sign, planes, bit depth, compression) is
+    /// surfaced as-read for the caller to judge — the decoder applies
+    /// its own semantic checks downstream.
+    pub fn parse(buf: &[u8]) -> crate::error::Result<Self> {
+        let h = Self::from_bytes(buf)
+            .ok_or_else(|| crate::error::BmpError::invalid("BMP: DIB header truncated"))?;
+        if h.header_size == BITMAPCOREHEADER_SIZE {
+            return Err(crate::error::BmpError::invalid(
+                "BMP: biSize=12 is BITMAPCOREHEADER, not BITMAPINFOHEADER",
+            ));
+        }
+        if h.header_size < BITMAPINFOHEADER_SIZE {
+            return Err(crate::error::BmpError::invalid(format!(
+                "BMP: unsupported header size {}",
+                h.header_size
+            )));
+        }
+        Ok(h)
+    }
+
+    /// Render the 40-byte on-disk representation. Inverse of
+    /// [`Self::from_bytes`] / [`Self::parse`].
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        out[0..4].copy_from_slice(&self.header_size.to_le_bytes());
+        out[4..8].copy_from_slice(&self.width.to_le_bytes());
+        out[8..12].copy_from_slice(&self.height.to_le_bytes());
+        out[12..14].copy_from_slice(&self.planes.to_le_bytes());
+        out[14..16].copy_from_slice(&self.bit_count.to_le_bytes());
+        out[16..20].copy_from_slice(&self.compression.to_le_bytes());
+        out[20..24].copy_from_slice(&self.image_size.to_le_bytes());
+        out[24..28].copy_from_slice(&self.x_pels_per_meter.to_le_bytes());
+        out[28..32].copy_from_slice(&self.y_pels_per_meter.to_le_bytes());
+        out[32..36].copy_from_slice(&self.clr_used.to_le_bytes());
+        out[36..40].copy_from_slice(&self.clr_important.to_le_bytes());
+        out
+    }
+
+    /// The header generation `biSize` declares, or `None` when the
+    /// size matches no known generation (the decoder still accepts
+    /// such headers if `biSize >= 40`, reading the INFO prefix only).
+    pub fn kind(&self) -> Option<DibHeaderKind> {
+        DibHeaderKind::from_size(self.header_size)
+    }
+
+    /// `true` when `biPlanes` carries the documented "must be set
+    /// to 1" value. Informational — `parse` does not reject other
+    /// values, mirroring the reserved-word treatment on
+    /// [`BitmapFileHeader`].
+    pub fn planes_is_valid(&self) -> bool {
+        self.planes == 1
+    }
+
+    /// `true` for a top-down DIB (negative `biHeight`, origin at the
+    /// upper-left corner per the structure page).
+    pub fn is_top_down(&self) -> bool {
+        self.height < 0
+    }
+
+    /// Width in pixels with the (illegal) sign stripped.
+    pub fn absolute_width(&self) -> u32 {
+        self.width.unsigned_abs()
+    }
+
+    /// Height in pixels regardless of the bottom-up / top-down sign.
+    pub fn absolute_height(&self) -> u32 {
+        self.height.unsigned_abs()
+    }
+
+    /// Minimum row stride in bytes for an uncompressed bitmap with
+    /// these dimensions: the structure page's
+    /// `((((biWidth * biBitCount) + 31) & ~31) >> 3)` formula, shared
+    /// with [`row_stride`].
+    pub fn row_stride(&self) -> usize {
+        row_stride(self.absolute_width() as usize, self.bit_count as usize)
+    }
+
+    /// Colour-table entry count implied by `biClrUsed` + `biBitCount`
+    /// for the indexed depths (1 / 4 / 8 bpp): `biClrUsed` when
+    /// non-zero, otherwise the `2^biBitCount` maximum the structure
+    /// page documents for a zero `biClrUsed`. Non-indexed depths
+    /// return 0 (any optional optimal palette is not consumed by the
+    /// pixel pipeline).
+    pub fn palette_entries(&self) -> usize {
+        if matches!(self.bit_count, 1 | 4 | 8) {
+            if self.clr_used == 0 {
+                1usize << self.bit_count
+            } else {
+                self.clr_used as usize
+            }
+        } else {
+            0
+        }
+    }
+}
+
 /// Minimum number of little-endian bytes in `buf` starting at `off`
 /// needed to read a u32. Small helper that keeps parse sites noise-free.
 #[inline]
@@ -622,5 +905,349 @@ mod tests {
         buf[10] = 26; // bfOffBits = end-of-header
         let h = BitmapFileHeader::parse(&buf).unwrap();
         assert_eq!(h.pixel_offset, 26);
+    }
+
+    // -----------------------------------------------------------------
+    // BitmapInfoHeader (typed 40-byte BITMAPINFOHEADER view)
+    // -----------------------------------------------------------------
+
+    // A canonical 40-byte BITMAPINFOHEADER: 7×3, bottom-up, 1 plane,
+    // 24 bpp, BI_RGB, image_size 0 (legal for uncompressed RGB),
+    // 2835 pels/m (~72 DPI) both axes, no colour table.
+    fn canonical_info_header() -> BitmapInfoHeader {
+        BitmapInfoHeader {
+            header_size: BITMAPINFOHEADER_SIZE,
+            width: 7,
+            height: 3,
+            planes: 1,
+            bit_count: 24,
+            compression: BI_RGB,
+            image_size: 0,
+            x_pels_per_meter: 2835,
+            y_pels_per_meter: 2835,
+            clr_used: 0,
+            clr_important: 0,
+        }
+    }
+
+    #[test]
+    fn info_header_size_constant_matches_struct_size() {
+        assert_eq!(BitmapInfoHeader::SIZE, 40);
+        assert_eq!(BitmapInfoHeader::SIZE, BITMAPINFOHEADER_SIZE as usize);
+    }
+
+    #[test]
+    fn info_header_to_bytes_lays_down_documented_offsets() {
+        // Field-for-field check of the on-disk little-endian layout:
+        // biSize @0, biWidth @4, biHeight @8, biPlanes @12,
+        // biBitCount @14, biCompression @16, biSizeImage @20,
+        // biXPelsPerMeter @24, biYPelsPerMeter @28, biClrUsed @32,
+        // biClrImportant @36.
+        let h = BitmapInfoHeader {
+            header_size: 40,
+            width: 0x0102_0304,
+            height: -2,
+            planes: 1,
+            bit_count: 32,
+            compression: BI_BITFIELDS,
+            image_size: 0x0A0B_0C0D,
+            x_pels_per_meter: 2835,
+            y_pels_per_meter: -2835,
+            clr_used: 5,
+            clr_important: 7,
+        };
+        let b = h.to_bytes();
+        assert_eq!(&b[0..4], &[40, 0, 0, 0]);
+        assert_eq!(&b[4..8], &[0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(&b[8..12], &(-2i32).to_le_bytes());
+        assert_eq!(&b[12..14], &[1, 0]);
+        assert_eq!(&b[14..16], &[32, 0]);
+        assert_eq!(&b[16..20], &[3, 0, 0, 0]); // BI_BITFIELDS = 3
+        assert_eq!(&b[20..24], &[0x0D, 0x0C, 0x0B, 0x0A]);
+        assert_eq!(&b[24..28], &2835i32.to_le_bytes());
+        assert_eq!(&b[28..32], &(-2835i32).to_le_bytes());
+        assert_eq!(&b[32..36], &[5, 0, 0, 0]);
+        assert_eq!(&b[36..40], &[7, 0, 0, 0]);
+    }
+
+    #[test]
+    fn info_header_from_bytes_roundtrips() {
+        let original = canonical_info_header();
+        let parsed = BitmapInfoHeader::from_bytes(&original.to_bytes()).unwrap();
+        assert_eq!(parsed, original);
+        // And the byte-level inverse holds too.
+        assert_eq!(parsed.to_bytes(), original.to_bytes());
+    }
+
+    #[test]
+    fn info_header_from_bytes_too_short_returns_none() {
+        // 39 bytes — one short of the documented 40.
+        assert!(BitmapInfoHeader::from_bytes(&[0u8; 39]).is_none());
+        assert!(BitmapInfoHeader::from_bytes(&[]).is_none());
+        // Exactly 40 reads fine (zeroed fields are surfaced raw).
+        assert!(BitmapInfoHeader::from_bytes(&[0u8; 40]).is_some());
+    }
+
+    #[test]
+    fn info_header_from_bytes_ignores_trailing_bytes() {
+        // A real DIB has masks / colour table / pixels after byte 40;
+        // `from_bytes` only consumes the structure itself.
+        let mut buf = Vec::from(canonical_info_header().to_bytes());
+        buf.extend_from_slice(&[0xEE; 128]);
+        let h = BitmapInfoHeader::from_bytes(&buf).unwrap();
+        assert_eq!(h, canonical_info_header());
+    }
+
+    #[test]
+    fn info_header_parse_canonical_succeeds() {
+        let h = BitmapInfoHeader::parse(&canonical_info_header().to_bytes()).unwrap();
+        assert_eq!(h.kind(), Some(DibHeaderKind::Info));
+        assert!(h.planes_is_valid());
+        assert!(!h.is_top_down());
+    }
+
+    #[test]
+    fn info_header_parse_rejects_short_buffer() {
+        let err = BitmapInfoHeader::parse(&[0u8; 20]).unwrap_err();
+        match err {
+            BmpError::InvalidData(msg) => assert!(msg.contains("DIB header truncated")),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn info_header_parse_rejects_core_header_size() {
+        // biSize = 12 declares the WORD-based BITMAPCOREHEADER layout;
+        // reading it through the INFO offsets would produce garbage,
+        // so the discrimination must reject it with a pointed message.
+        let mut h = canonical_info_header();
+        h.header_size = BITMAPCOREHEADER_SIZE;
+        let err = BitmapInfoHeader::parse(&h.to_bytes()).unwrap_err();
+        match err {
+            BmpError::InvalidData(msg) => assert!(msg.contains("BITMAPCOREHEADER")),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn info_header_parse_rejects_sub_40_sizes() {
+        // Anything below 40 that isn't the CORE 12 matches no known
+        // generation and can't even hold the declared structure.
+        for bad in [0u32, 1, 11, 13, 16, 39] {
+            let mut h = canonical_info_header();
+            h.header_size = bad;
+            let err = BitmapInfoHeader::parse(&h.to_bytes()).unwrap_err();
+            match err {
+                BmpError::InvalidData(msg) => {
+                    assert!(msg.contains("unsupported header size"), "size {bad}: {msg}")
+                }
+                other => panic!("unexpected error variant: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn info_header_parse_accepts_extended_generation_sizes() {
+        // V2 (52) / V3 (56) / V4 (108) / V5 (124) all carry the
+        // 40-byte INFO prefix, so the typed prefix parse accepts them.
+        for (size, kind) in [
+            (BITMAPV2INFOHEADER_SIZE, DibHeaderKind::V2Info),
+            (BITMAPV3INFOHEADER_SIZE, DibHeaderKind::V3Info),
+            (BITMAPV4HEADER_SIZE, DibHeaderKind::V4),
+            (BITMAPV5HEADER_SIZE, DibHeaderKind::V5),
+        ] {
+            let mut h = canonical_info_header();
+            h.header_size = size;
+            let parsed = BitmapInfoHeader::parse(&h.to_bytes()).unwrap();
+            assert_eq!(parsed.header_size, size);
+            assert_eq!(parsed.kind(), Some(kind));
+        }
+    }
+
+    #[test]
+    fn info_header_parse_accepts_unknown_size_at_least_40() {
+        // The OS/2 2.x 64-byte variant matches no documented
+        // generation; the decoder reads its 40-byte prefix, so the
+        // typed parse stays equally lenient — `kind()` reports the
+        // non-recognition.
+        let mut h = canonical_info_header();
+        h.header_size = 64;
+        let parsed = BitmapInfoHeader::parse(&h.to_bytes()).unwrap();
+        assert_eq!(parsed.kind(), None);
+    }
+
+    #[test]
+    fn info_header_planes_predicate_is_informational() {
+        // biPlanes "must be set to 1" per the structure page, but the
+        // typed parse surfaces other values rather than rejecting —
+        // semantic checks belong to the decoder.
+        let mut h = canonical_info_header();
+        h.planes = 3;
+        let parsed = BitmapInfoHeader::parse(&h.to_bytes()).unwrap();
+        assert_eq!(parsed.planes, 3);
+        assert!(!parsed.planes_is_valid());
+    }
+
+    #[test]
+    fn info_header_top_down_and_absolute_dimensions() {
+        let mut h = canonical_info_header();
+        h.height = -3;
+        assert!(h.is_top_down());
+        assert_eq!(h.absolute_height(), 3);
+        assert_eq!(h.absolute_width(), 7);
+        h.height = 3;
+        assert!(!h.is_top_down());
+        assert_eq!(h.absolute_height(), 3);
+    }
+
+    #[test]
+    fn info_header_row_stride_matches_documented_formula() {
+        // stride = ((((biWidth * biBitCount) + 31) & ~31) >> 3),
+        // per the structure page's surface-stride formula. 7 px at
+        // 24 bpp = 21 bytes of pixels → padded to 24.
+        let h = canonical_info_header();
+        assert_eq!(h.row_stride(), 24);
+        let mut h1 = h;
+        h1.bit_count = 1;
+        assert_eq!(h1.row_stride(), 4); // 7 bits → 1 byte → padded to 4
+        let mut h32 = h;
+        h32.width = 10;
+        h32.bit_count = 32;
+        assert_eq!(h32.row_stride(), 40);
+    }
+
+    #[test]
+    fn info_header_palette_entries_follow_clr_used_rules() {
+        // The colour-table remarks: for indexed depths a zero
+        // biClrUsed means the 2^biBitCount maximum, non-zero gives the
+        // actual entry count; non-indexed depths carry no table the
+        // pixel pipeline consumes.
+        let mut h = canonical_info_header();
+        h.bit_count = 8;
+        assert_eq!(h.palette_entries(), 256);
+        h.clr_used = 17;
+        assert_eq!(h.palette_entries(), 17);
+        h.bit_count = 4;
+        h.clr_used = 0;
+        assert_eq!(h.palette_entries(), 16);
+        h.bit_count = 1;
+        assert_eq!(h.palette_entries(), 2);
+        h.bit_count = 24;
+        assert_eq!(h.palette_entries(), 0);
+        h.bit_count = 32;
+        h.clr_used = 256; // optional optimal palette — not consumed
+        assert_eq!(h.palette_entries(), 0);
+    }
+
+    #[test]
+    fn info_header_matches_storage_doc_worked_example() {
+        // The Bitmap Storage page's hexadecimal listing of
+        // Redbrick.bmp places the BITMAPINFOHEADER at file bytes
+        // 0x0E..0x36: a 32×32, 1-plane, 4-bpp, BI_RGB bitmap with
+        // every remaining field zero. Reconstruct those bytes and
+        // confirm the typed parse reads the documented values.
+        let mut dib = [0u8; 40];
+        dib[0] = 0x28; // biSize = 40
+        dib[4] = 0x20; // biWidth = 32
+        dib[8] = 0x20; // biHeight = 32
+        dib[12] = 0x01; // biPlanes = 1
+        dib[14] = 0x04; // biBitCount = 4
+        let h = BitmapInfoHeader::parse(&dib).unwrap();
+        assert_eq!(h.kind(), Some(DibHeaderKind::Info));
+        assert_eq!(h.width, 32);
+        assert_eq!(h.height, 32);
+        assert!(h.planes_is_valid());
+        assert_eq!(h.bit_count, 4);
+        assert_eq!(h.compression, BI_RGB);
+        assert_eq!(h.image_size, 0);
+        assert_eq!(h.palette_entries(), 16);
+        // 32 px at 4 bpp = 16 bytes/row, already DWORD-aligned. The
+        // listing's colour-index array spans 0x76..=0x275 = 512 bytes
+        // = 16 × 32 rows.
+        assert_eq!(h.row_stride(), 16);
+        assert_eq!(h.row_stride() * h.absolute_height() as usize, 512);
+    }
+
+    #[test]
+    fn info_header_struct_supports_equality_and_copy() {
+        let a = canonical_info_header();
+        let b = a;
+        assert_eq!(a, b);
+        let mut c = a;
+        c.bit_count = 8;
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn dib_header_kind_from_size_covers_all_generations() {
+        assert_eq!(DibHeaderKind::from_size(12), Some(DibHeaderKind::Core));
+        assert_eq!(DibHeaderKind::from_size(40), Some(DibHeaderKind::Info));
+        assert_eq!(DibHeaderKind::from_size(52), Some(DibHeaderKind::V2Info));
+        assert_eq!(DibHeaderKind::from_size(56), Some(DibHeaderKind::V3Info));
+        assert_eq!(DibHeaderKind::from_size(108), Some(DibHeaderKind::V4));
+        assert_eq!(DibHeaderKind::from_size(124), Some(DibHeaderKind::V5));
+        for unknown in [0u32, 11, 13, 39, 41, 64, 109, 125, u32::MAX] {
+            assert_eq!(DibHeaderKind::from_size(unknown), None, "size {unknown}");
+        }
+    }
+
+    #[test]
+    fn dib_header_kind_size_roundtrips_through_from_size() {
+        for kind in [
+            DibHeaderKind::Core,
+            DibHeaderKind::Info,
+            DibHeaderKind::V2Info,
+            DibHeaderKind::V3Info,
+            DibHeaderKind::V4,
+            DibHeaderKind::V5,
+        ] {
+            assert_eq!(DibHeaderKind::from_size(kind.size()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn dib_header_kind_info_prefix_excludes_core_only() {
+        // Per the header-types page, INFO/V4/V5 nest (V5 extends V4
+        // extends INFO) while CORE shares only the Size member.
+        assert!(!DibHeaderKind::Core.has_info_prefix());
+        for kind in [
+            DibHeaderKind::Info,
+            DibHeaderKind::V2Info,
+            DibHeaderKind::V3Info,
+            DibHeaderKind::V4,
+            DibHeaderKind::V5,
+        ] {
+            assert!(kind.has_info_prefix(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn info_header_decoder_agreement_on_full_bmp() {
+        // The typed view and the full decoder must agree on a real
+        // file: encode a 3×2 RGBA image, then read the DIB prefix at
+        // byte 14 through BitmapInfoHeader and cross-check against
+        // what the decode path produced.
+        let image = crate::image::BmpImage {
+            width: 3,
+            height: 2,
+            pixel_format: crate::image::BmpPixelFormat::Rgba,
+            planes: vec![crate::image::BmpPlane {
+                stride: 12,
+                data: vec![0x40; 24],
+            }],
+            palette: None,
+            pts: None,
+        };
+        let (bytes, _) = crate::encoder::encode_bmp(&image).unwrap();
+        let h = BitmapInfoHeader::parse(&bytes[BitmapFileHeader::SIZE..]).unwrap();
+        assert_eq!(h.kind(), Some(DibHeaderKind::Info));
+        assert_eq!(h.width, 3);
+        assert_eq!(h.height, 2);
+        assert_eq!(h.bit_count, 32);
+        assert_eq!(h.compression, BI_RGB);
+        assert!(h.planes_is_valid());
+        let decoded = crate::decoder::decode_bmp(&bytes).unwrap();
+        assert_eq!(decoded.width, h.absolute_width());
+        assert_eq!(decoded.height, h.absolute_height());
     }
 }

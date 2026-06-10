@@ -366,16 +366,22 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
     if input.len() < header_size as usize {
         return Err(Error::invalid("BMP: header size exceeds input"));
     }
-    let width = read_i32_le(input, 4);
-    let height = read_i32_le(input, 8);
-    let planes = read_u16_le(input, 12);
-    let bpp = read_u16_le(input, 14);
-    let compression = read_u32_le(input, 16);
-    let image_size = read_u32_le(input, 20);
-    let x_pels_per_meter = read_i32_le(input, 24);
-    let y_pels_per_meter = read_i32_le(input, 28);
-    let clr_used = read_u32_le(input, 32);
-    let clr_important = read_u32_le(input, 36);
+    // Every `biSize >= 40` generation (V3 / V2-Adobe / V3-Adobe / V4 /
+    // V5) shares the eleven-field BITMAPINFOHEADER layout as a prefix;
+    // read it through the typed view so the field offsets live in one
+    // place. The length checks above guarantee 40 bytes are present.
+    let base = BitmapInfoHeader::from_bytes(input)
+        .ok_or_else(|| Error::invalid("BMP: DIB header truncated"))?;
+    let width = base.width;
+    let height = base.height;
+    let planes = base.planes;
+    let bpp = base.bit_count;
+    let compression = base.compression;
+    let image_size = base.image_size;
+    let x_pels_per_meter = base.x_pels_per_meter;
+    let y_pels_per_meter = base.y_pels_per_meter;
+    let clr_used = base.clr_used;
+    let clr_important = base.clr_important;
 
     if width <= 0 {
         return Err(Error::invalid("BMP: non-positive width"));

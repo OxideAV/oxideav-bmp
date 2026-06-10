@@ -57,6 +57,39 @@ let _ = h.reserved_is_clean();        // bfReserved1/2 zero per the spec
 header parse through this struct, so the "shorter than header" and
 "missing 'BM' signature" error messages come from a single source.
 
+### Typed `BitmapInfoHeader` view + `DibHeaderKind`
+
+The 40-byte `BITMAPINFOHEADER` that opens every V3-and-later DIB is
+likewise surfaced as a typed struct — the eleven documented fields
+(`header_size` / `width` / `height` / `planes` / `bit_count` /
+`compression` / `image_size` / `x_pels_per_meter` / `y_pels_per_meter`
+/ `clr_used` / `clr_important`) at their on-disk offsets:
+
+```rust
+use oxideav_bmp::{BitmapFileHeader, BitmapInfoHeader, DibHeaderKind};
+
+// `parse` validates buffer length + the biSize discrimination:
+// 12 (CORE — different WORD-based layout) and other sub-40 sizes are
+// rejected; >= 40 is accepted since V2/V3/V4/V5 (and odd in-the-wild
+// sizes like the OS/2 2.x 64-byte variant) all share the 40-byte
+// INFO prefix.
+let h = BitmapInfoHeader::parse(&bmp[BitmapFileHeader::SIZE..])?;
+h.kind();              // Option<DibHeaderKind> — Info/V2Info/V3Info/V4/V5
+h.is_top_down();       // negative biHeight
+h.row_stride();        // documented ((w*bpp + 31) & !31) >> 3 formula
+h.palette_entries();   // biClrUsed with the 0 = 2^bpp sentinel applied
+h.planes_is_valid();   // biPlanes == 1 ("must be set to 1")
+
+// `from_bytes` is the unchecked variant (None on a short buffer);
+// `to_bytes()` renders the deterministic 40-byte layout back.
+// `DibHeaderKind::from_size(biSize)` maps 12/40/52/56/108/124 to the
+// six known header generations.
+```
+
+`parse_dib_header` inside the decoder now reads the eleven base fields
+through this struct (the extended mask / colour-space tails stay on
+the wide `DibHeader`), so the field offsets live in a single place.
+
 ### `BITMAPV2INFOHEADER` (52 B) + `BITMAPV3INFOHEADER` (56 B)
 
 V2 (52 B) and V3 (56 B) are the Adobe-published intermediate header
