@@ -259,12 +259,17 @@ fn header_size_claims_v5_but_only_v3_bytes_present() {
 #[test]
 fn header_size_below_coreheader_is_rejected() {
     let mut bytes = encode_bmp(&rgba_image(4, 4)).unwrap().0;
-    for s in [0u32, 1, 4, 8, 11, 13, 30, 39] {
+    // Illegal `biSize` values: below the 12-byte OS/2 1.x
+    // `BITMAPCOREHEADER` and in the 13..16 gap below the smallest
+    // truncated OS/2 2.x `OS22XBITMAPHEADER`. (Sizes 12, 16..40, and
+    // >=40 are all legitimate header generations and are *not* rejected
+    // on size alone.)
+    for s in [0u32, 1, 4, 8, 11, 13, 14, 15] {
         bytes[14..18].copy_from_slice(&s.to_le_bytes());
         let r = decode_bmp(&bytes);
         assert!(
             r.is_err(),
-            "header_size={s} must be rejected (not 12 or >=40)"
+            "header_size={s} must be rejected (below 12 or in the 13..16 gap)"
         );
     }
 }

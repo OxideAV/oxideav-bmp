@@ -22,14 +22,37 @@ sub-images.
 | 32        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
 | 32        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
 
-`BITMAPCOREHEADER` (OS/2 1.x, 12 B), `BITMAPINFOHEADER` (v3, 40 B),
-`BITMAPV2INFOHEADER` (52 B, Adobe-intermediate RGB-masks-in-header),
-`BITMAPV3INFOHEADER` (56 B, adds the in-header alpha mask slot),
-`BITMAPV4HEADER`, and `BITMAPV5HEADER` are all accepted. The OS/2 path
-honours the 3-byte `RGBTRIPLE` colour-table layout (V3+ uses 4-byte
-`RGBQUAD`). Bottom-up and top-down row orders are auto-detected from
-the sign of `biHeight`; output is always top-down `Rgba`. `BI_JPEG`
-and `BI_PNG` are rejected at the boundary.
+`BITMAPCOREHEADER` (OS/2 1.x, 12 B), the truncated OS/2 2.x
+`OS22XBITMAPHEADER` (16…39 B), `BITMAPINFOHEADER` (v3, 40 B; the full
+64-byte `OS22XBITMAPHEADER` decodes through this path on its 40-byte
+INFO prefix), `BITMAPV2INFOHEADER` (52 B, Adobe-intermediate
+RGB-masks-in-header), `BITMAPV3INFOHEADER` (56 B, adds the in-header
+alpha mask slot), `BITMAPV4HEADER`, and `BITMAPV5HEADER` are all
+accepted. The OS/2 1.x path honours the 3-byte `RGBTRIPLE` colour-table
+layout (the OS/2 2.x and every V3+ header use 4-byte `RGBQUAD`).
+Bottom-up and top-down row orders are auto-detected from the sign of
+`biHeight`; output is always top-down `Rgba`. `BI_JPEG` and `BI_PNG`
+are rejected at the boundary.
+
+### Truncated OS/2 2.x `OS22XBITMAPHEADER` (16…39 B)
+
+The OS/2 2.x header (`BITMAPINFOHEADER2` in IBM's documentation) shares
+the 40-byte `BITMAPINFOHEADER` field layout — 4-byte signed
+width/height, then compression / image-size / resolution / palette
+counts — and grows it by 24 trailing bytes (units / fill-direction /
+halftoning / colour-encoding / app-id) for a full 64-byte form. A
+writer may legally stop the header early and have every field past the
+truncation point read as zero; the 16-byte form (`biSize` / width /
+height / planes / bit-count only) is the canonical case, exercised by
+the BMP Suite's `pal8os2v2-16.bmp`. The decoder reads each field only
+when the declared `biSize` is long enough to contain it and defaults
+the rest to zero. Unlike the 12-byte OS/2 1.x `BITMAPCOREHEADER`, the
+truncated OS/2 2.x header uses the 4-byte signed width/height (so a
+negative `biHeight` selects top-down rows) and 4-byte `RGBQUAD`
+palette. A truncated header has no room for the appended bitfield-mask
+block, so `BI_BITFIELDS` (the OS/2 `Huffman 1D` alias) and `BI_JPEG`
+(the OS/2 `RLE-24` alias) are rejected on these sizes — only plain
+`BI_RGB` / `BI_RLE8` / `BI_RLE4` streams decode.
 
 ### Typed `BitmapFileHeader` view
 

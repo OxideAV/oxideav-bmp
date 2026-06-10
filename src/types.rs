@@ -51,6 +51,26 @@ pub const BITMAPV5HEADER_SIZE: u32 = 124;
 /// field, and 3-byte (RGBTRIPLE) colour-table entries.
 pub const BITMAPCOREHEADER_SIZE: u32 = 12;
 
+/// Size of the full OS/2 2.x `OS22XBITMAPHEADER` (a.k.a.
+/// `BITMAPINFOHEADER2` in IBM's documentation): the 40-byte
+/// `BITMAPINFOHEADER` layout plus 24 trailing bytes (units / fill
+/// direction / halftoning / colour-encoding / app-id). The full form is
+/// decoded by the shared `biSize >= 40` INFO path; the *truncated*
+/// forms in `BITMAPCOREHEADER2_MIN_SIZE..BITMAPINFOHEADER_SIZE` are
+/// decoded by the dedicated truncated-OS22X path.
+pub const OS22XBITMAPHEADER_SIZE: u32 = 64;
+
+/// Smallest legal truncated `OS22XBITMAPHEADER`: the 4-byte `biSize`,
+/// 4-byte width, 4-byte height, 2-byte planes and 2-byte bit-count
+/// (offsets 0..16). The spec permits writers to stop the header at 16
+/// bytes and have every following field (compression, image size,
+/// resolution, palette counts) read as zero — the BMP Suite's
+/// `pal8os2v2-16.bmp` is the canonical example. Unlike the 12-byte
+/// OS/2 1.x `BITMAPCOREHEADER`, the truncated OS/2 2.x header uses the
+/// 4-byte signed width/height and 4-byte `RGBQUAD` palette entries that
+/// the 40-byte `BITMAPINFOHEADER` introduced.
+pub const BITMAPCOREHEADER2_MIN_SIZE: u32 = 16;
+
 /// `biCompression` constants we recognise.
 pub const BI_RGB: u32 = 0;
 pub const BI_RLE8: u32 = 1;

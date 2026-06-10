@@ -697,6 +697,156 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Truncated OS/2 2.x OS22XBITMAPHEADER (biSize 16..40)
+    // -----------------------------------------------------------------------
+
+    /// Hand-assemble a `w×h` 8-bit indexed BMP whose DIB header is a
+    /// *truncated* OS/2 2.x `OS22XBITMAPHEADER` of `header_size` bytes
+    /// (16..40). Fields past the truncation point are simply not written
+    /// — the decoder reads them as zero. Unlike the 12-byte OS/2 1.x
+    /// `BITMAPCOREHEADER`, this header uses 4-byte signed width/height
+    /// and 4-byte `RGBQUAD` palette entries. Rows are bottom-up.
+    fn build_truncated_os22x_8bpp(
+        header_size: u32,
+        w: u32,
+        h: u32,
+        indices_top_down: &[u8],
+        palette: &[[u8; 3]],
+    ) -> Vec<u8> {
+        assert!((16..40).contains(&header_size));
+        assert!(palette.len() <= 256);
+        let row_stride = (w as usize).div_ceil(4) * 4;
+        let mut pixel_array = vec![0u8; row_stride * h as usize];
+        for y in 0..h as usize {
+            let src_y = h as usize - 1 - y;
+            let row = &mut pixel_array[y * row_stride..];
+            for x in 0..w as usize {
+                row[x] = indices_top_down[src_y * w as usize + x];
+            }
+        }
+        // Truncated headers carry biClrUsed = 0 → 2^bpp = 256 RGBQUADs.
+        let palette_entries = 256usize;
+        let palette_bytes = (palette_entries * 4) as u32;
+        let pixel_offset = 14 + header_size + palette_bytes;
+        let file_size = pixel_offset + pixel_array.len() as u32;
+        let mut out = Vec::with_capacity(file_size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&pixel_offset.to_le_bytes());
+        // Truncated OS22XBITMAPHEADER — write only the first
+        // `header_size` bytes of the 40-byte INFO layout.
+        let mut hdr = Vec::with_capacity(40);
+        hdr.extend_from_slice(&header_size.to_le_bytes()); // biSize @0
+        hdr.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth @4
+        hdr.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight @8
+        hdr.extend_from_slice(&1u16.to_le_bytes()); // biPlanes @12
+        hdr.extend_from_slice(&8u16.to_le_bytes()); // biBitCount @14
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // biCompression @16
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // biSizeImage @20
+        hdr.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerM @24
+        hdr.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerM @28
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed @32
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant @36
+        out.extend_from_slice(&hdr[..header_size as usize]);
+        // Colour table: 256 RGBQUAD (B, G, R, 0) entries.
+        for i in 0..palette_entries {
+            if let Some(rgb) = palette.get(i) {
+                out.push(rgb[2]); // B
+                out.push(rgb[1]); // G
+                out.push(rgb[0]); // R
+                out.push(0);
+            } else {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        out.extend_from_slice(&pixel_array);
+        out
+    }
+
+    #[test]
+    fn decode_truncated_os22x_16byte_header() {
+        // 4×2 image: top row index 0 (red), bottom row index 1 (green).
+        // The canonical `pal8os2v2-16.bmp` shape: a 16-byte header with
+        // every field past biBitCount assumed zero.
+        let w = 4u32;
+        let h = 2u32;
+        let mut indices = Vec::with_capacity((w * h) as usize);
+        indices.resize(w as usize, 0u8);
+        indices.resize(2 * w as usize, 1u8);
+        let palette: &[[u8; 3]] = &[[255, 0, 0], [0, 255, 0]];
+        let bytes = build_truncated_os22x_8bpp(16, w, h, &indices, palette);
+        let img = decode_bmp(&bytes).unwrap();
+        assert_eq!(img.width, w);
+        assert_eq!(img.height, h);
+        // Output is top-down Rgba: row 0 red, row 1 green.
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+        let stride = img.planes[0].stride;
+        assert_eq!(&img.planes[0].data[stride..stride + 4], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn decode_truncated_os22x_intermediate_sizes() {
+        // Every truncation point in 16..40 must decode the same pixels —
+        // the partially-present trailing fields are all zero here anyway.
+        let w = 2u32;
+        let h = 2u32;
+        let indices = [0u8, 1, 1, 0];
+        let palette: &[[u8; 3]] = &[[10, 20, 30], [200, 100, 50]];
+        for hs in [16u32, 20, 24, 28, 32, 36] {
+            let bytes = build_truncated_os22x_8bpp(hs, w, h, &indices, palette);
+            let img =
+                decode_bmp(&bytes).unwrap_or_else(|e| panic!("header_size={hs} must decode: {e}"));
+            assert_eq!(img.width, w, "header_size={hs}");
+            assert_eq!(img.height, h, "header_size={hs}");
+            // Top-down row 0: index 0 (10,20,30), index 1 (200,100,50).
+            assert_eq!(&img.planes[0].data[..4], &[10, 20, 30, 255], "hs={hs}");
+            assert_eq!(&img.planes[0].data[4..8], &[200, 100, 50, 255], "hs={hs}");
+        }
+    }
+
+    #[test]
+    fn decode_truncated_os22x_top_down_negative_height() {
+        // The OS/2 2.x header uses 4-byte signed height, so a negative
+        // biHeight means top-down (unlike the 12-byte CORE header, which
+        // is u16 and bottom-up only).
+        let w = 2u32;
+        let mut bytes =
+            build_truncated_os22x_8bpp(16, w, 2, &[0, 1, 1, 0], &[[1, 2, 3], [4, 5, 6]]);
+        // Patch biHeight (@14 + 8 = offset 22) to -2 and reverse the two
+        // pixel rows so the decoded top-down output is unchanged.
+        let neg = (-2i32).to_le_bytes();
+        bytes[22..26].copy_from_slice(&neg);
+        // Swap the two rows in the pixel array. Pixel offset = 14 + 16 +
+        // 256*4. Row stride = 4 (2 px padded to 4).
+        let po = 14 + 16 + 256 * 4;
+        let stride = 4;
+        let (r0, r1) = bytes[po..po + 2 * stride].split_at(stride);
+        let swapped: Vec<u8> = r1.iter().chain(r0.iter()).copied().collect();
+        bytes[po..po + 2 * stride].copy_from_slice(&swapped);
+        let img = decode_bmp(&bytes).unwrap();
+        assert_eq!(img.width, w);
+        assert_eq!(img.height, 2);
+        assert_eq!(&img.planes[0].data[..4], &[1, 2, 3, 255]);
+        assert_eq!(&img.planes[0].data[4..8], &[4, 5, 6, 255]);
+    }
+
+    #[test]
+    fn truncated_os22x_rejects_bitfields_compression() {
+        // A truncated OS/2 2.x header has no room for the appended mask
+        // block, so a BI_BITFIELDS / Huffman-1D (value 3) declaration is
+        // rejected rather than silently mis-decoded.
+        let w = 2u32;
+        let mut bytes =
+            build_truncated_os22x_8bpp(20, w, 2, &[0, 1, 1, 0], &[[1, 2, 3], [4, 5, 6]]);
+        // biCompression lives at offset 14 + 16 = 30 on a >=20-byte
+        // header (header byte offset 16).
+        bytes[30..34].copy_from_slice(&3u32.to_le_bytes());
+        assert!(decode_bmp(&bytes).is_err());
+    }
+
+    // -----------------------------------------------------------------------
     // Minimal palette (biClrUsed-limited colour table)
     // -----------------------------------------------------------------------
 

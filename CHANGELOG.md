@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Truncated OS/2 2.x `OS22XBITMAPHEADER` decode (`biSize` 16…39 B)**
+  (round 275): the OS/2 2.x header (`BITMAPINFOHEADER2` in IBM's
+  documentation) shares the 40-byte `BITMAPINFOHEADER` field layout
+  and may legally be truncated anywhere from 16 bytes upward with the
+  remaining fields read as zero — the canonical 16-byte form
+  (`biSize` / width / height / planes / bit-count only) is exercised
+  by the BMP Suite's `pal8os2v2-16.bmp`. The decoder now accepts these
+  sizes: it reads each field only when the declared `biSize` is long
+  enough to contain it and defaults the rest to zero. Unlike the
+  12-byte OS/2 1.x `BITMAPCOREHEADER`, the truncated OS/2 2.x header
+  uses 4-byte signed width/height (so a negative `biHeight` selects
+  top-down rows) and 4-byte `RGBQUAD` palette entries. A truncated
+  header has no room for the appended bitfield-mask block, so
+  `BI_BITFIELDS` (the OS/2 `Huffman 1D` alias) and `BI_JPEG` (the OS/2
+  `RLE-24` alias) are rejected on these sizes; only plain `BI_RGB` /
+  `BI_RLE8` / `BI_RLE4` streams decode. The full 64-byte
+  `OS22XBITMAPHEADER` continues to decode through the shared
+  `biSize >= 40` INFO path on its 40-byte prefix. Four new lib tests
+  cover the 16-byte form, every intermediate truncation point
+  (20/24/28/32/36 B), the signed-height top-down case, and the
+  `BI_BITFIELDS`-rejection. The `malformed_inputs` size-rejection
+  sweep was narrowed to the genuinely-illegal sizes (below 12 and the
+  13…15 gap) now that 16…39 are legal.
+
 - **Typed `BitmapInfoHeader` parser + `DibHeaderKind` discriminator**
   (round 268): the 40-byte `BITMAPINFOHEADER` that opens every
   V3-and-later DIB now has a dedicated public struct mirroring the

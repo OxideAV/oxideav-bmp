@@ -358,6 +358,18 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
         return parse_bitmapcoreheader(input);
     }
 
+    // OS/2 2.x `OS22XBITMAPHEADER` writers may stop the header anywhere
+    // from 16 bytes (size/width/height/planes/bit-count only) up to its
+    // full 64-byte form; every field past the truncation point reads as
+    // zero. Sizes 16..40 are these truncated forms — they share the
+    // 4-byte signed width/height layout and 4-byte `RGBQUAD` palette of
+    // `BITMAPINFOHEADER`, so we synthesise a 40-byte-equivalent
+    // `DibHeader` from whatever bytes are present. (Full 64-byte
+    // headers fall through to the shared `>= 40` INFO path below.)
+    if (BITMAPCOREHEADER2_MIN_SIZE..BITMAPINFOHEADER_SIZE).contains(&header_size) {
+        return parse_truncated_os22x_header(input, header_size);
+    }
+
     if header_size < BITMAPINFOHEADER_SIZE {
         return Err(Error::invalid(format!(
             "BMP: unsupported header size {header_size}"
@@ -568,6 +580,117 @@ fn parse_bitmapcoreheader(input: &[u8]) -> Result<(DibHeader, usize)> {
             profile_size: None,
         },
         BITMAPCOREHEADER_SIZE as usize,
+    ))
+}
+
+/// Parse a *truncated* OS/2 2.x `OS22XBITMAPHEADER` (`biSize` in
+/// `16..40`) into a [`DibHeader`].
+///
+/// The OS/2 2.x header shares the 40-byte `BITMAPINFOHEADER` field
+/// layout — 4-byte signed width/height, 2-byte planes, 2-byte
+/// bit-count, then `biCompression` / `biSizeImage` / resolution /
+/// palette counts — but a writer may stop the header early and have the
+/// remaining fields read as zero. The 16-byte form (size/width/height/
+/// planes/bit-count only) is the canonical case; the BMP Suite's
+/// `pal8os2v2-16.bmp` is encoded this way. We read each field only when
+/// `header_size` is long enough to include it and default the rest to
+/// zero (the same "trailing fields are zero" rule the spec describes).
+///
+/// Layout (offsets shared with `BITMAPINFOHEADER`):
+/// ```text
+///   off  0  u32  biSize        (16..40 here)
+///   off  4  i32  biWidth
+///   off  8  i32  biHeight      (signed — top-down when negative)
+///   off 12  u16  biPlanes      (must be 1)
+///   off 14  u16  biBitCount
+///   off 16  u32  biCompression (present only when header_size >= 20)
+///   off 20  u32  biSizeImage   (present only when header_size >= 24)
+///   off 24  i32  biXPelsPerM   (present only when header_size >= 28)
+///   off 28  i32  biYPelsPerM   (present only when header_size >= 32)
+///   off 32  u32  biClrUsed     (present only when header_size >= 36)
+///   off 36  u32  biClrImportant(present only when header_size >= 40)
+/// ```
+fn parse_truncated_os22x_header(input: &[u8], header_size: u32) -> Result<(DibHeader, usize)> {
+    let hs = header_size as usize;
+    if input.len() < hs {
+        return Err(Error::invalid("BMP: OS22XBITMAPHEADER truncated"));
+    }
+    // Read a field that lives at `[off, off + 4)` only when the declared
+    // header is long enough to fully contain it; otherwise the field is
+    // absent and reads as zero per the truncated-header convention.
+    let opt_u32 = |off: usize| -> u32 {
+        if hs >= off + 4 {
+            read_u32_le(input, off)
+        } else {
+            0
+        }
+    };
+    let opt_i32 = |off: usize| -> i32 {
+        if hs >= off + 4 {
+            read_i32_le(input, off)
+        } else {
+            0
+        }
+    };
+
+    let width = read_i32_le(input, 4);
+    let height = read_i32_le(input, 8);
+    let planes = read_u16_le(input, 12);
+    let bpp = read_u16_le(input, 14);
+    let compression = opt_u32(16);
+    let image_size = opt_u32(20);
+    let x_pels_per_meter = opt_i32(24);
+    let y_pels_per_meter = opt_i32(28);
+    let clr_used = opt_u32(32);
+    let clr_important = opt_u32(36);
+
+    if width <= 0 {
+        return Err(Error::invalid("BMP: non-positive width"));
+    }
+    if planes != 1 {
+        return Err(Error::invalid(format!("BMP: planes={planes} (must be 1)")));
+    }
+    // A truncated OS/2 2.x header has no room for the appended R/G/B(/A)
+    // bitfield mask block (that block sits between the header and the
+    // pixel array on a 40-byte `BITMAPINFOHEADER`, but here the header
+    // never reaches 40 bytes). `Huffman 1D` (the OS/2 alias for
+    // compression value 3) and `RLE-24` (value 4) are likewise
+    // undecodable here. Reject anything other than the plain `BI_RGB` /
+    // `BI_RLE8` / `BI_RLE4` stream a truncated header can legally carry.
+    match compression {
+        BI_RGB | BI_RLE8 | BI_RLE4 => {}
+        c => {
+            return Err(Error::invalid(format!(
+                "BMP: truncated OS22XBITMAPHEADER cannot carry compression {c}"
+            )));
+        }
+    }
+
+    Ok((
+        DibHeader {
+            header_size,
+            width,
+            height,
+            planes,
+            bpp,
+            compression,
+            image_size,
+            x_pels_per_meter,
+            y_pels_per_meter,
+            clr_used,
+            clr_important,
+            mask_r: None,
+            mask_g: None,
+            mask_b: None,
+            mask_a: None,
+            cs_type: None,
+            endpoints: None,
+            gamma_rgb: None,
+            intent: None,
+            profile_data_offset: None,
+            profile_size: None,
+        },
+        hs,
     ))
 }
 
