@@ -448,6 +448,30 @@ Round 129 headline numbers (Apple M-series, `--quick`):
 | `roundtrip_rgba_320x240`                      | ~3.95 GiB/s    |
 | `roundtrip_dib_ico_rgba_64x64`                | ~1.7 GiB/s     |
 
+### Round 286 — single-allocation flat-buffer decode
+
+The uncompressed pixel-unpack path (`decode_pixels`, every bit depth)
+was profiled and rewritten to fill one flat top-down RGBA plane in a
+single pass instead of building a `Vec<Vec<u8>>` (one allocation per
+scanline) and then reversing + concatenating it. Pixels are written
+through a `chunks_exact_mut(4)` cursor — no per-pixel capacity checks,
+no second copy — and the bottom-up flip is resolved by an index map.
+For 16 bpp `BI_BITFIELDS` at ≥ 2^18 pixels a 65 536-entry value→RGBA
+lookup table replaces the four per-pixel mask expansions. Decoded
+bytes are bit-identical (FNV-1a-verified before/after across 32/24/16
+bpp + 8/4-bit indexed). Best-of-5 wall-clock decode, Apple M-series:
+
+| Case (decode)        | Before  | After   | Speedup |
+| -------------------- | ------- | ------- | ------- |
+| 32 bpp BGRA 320×240  | 56.1 µs | 9.6 µs  | ≈5.9×   |
+| 24 bpp BGR 640×480   | 253 µs  | 32 µs   | ≈8.0×   |
+| 8-bit indexed 320×240| 57.7 µs | 27.8 µs | ≈2.1×   |
+| 4-bit indexed 320×240| 68.4 µs | 48.4 µs | ≈1.4×   |
+| 16 bpp 5-6-5 320×240 | 141 µs  | 113 µs  | ≈1.25×  |
+
+Uncompressed-corpus sum ≈710 µs → ≈380 µs (≈1.86×). RLE paths
+unchanged.
+
 ## Registration
 
 ```rust

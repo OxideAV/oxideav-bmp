@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **Single-allocation flat-buffer uncompressed decode** (round 286,
+  profile-opt depth round): the uncompressed pixel-unpack path
+  (`decode_pixels`, all of 1 / 4 / 8 / 16 / 24 / 32 bpp) previously
+  built a `Vec<Vec<u8>>` — one heap allocation per scanline — pushed
+  each pixel with `extend_from_slice(&[r, g, b, a])`, and then the
+  caller reversed the row vector and concatenated it into one flat
+  plane: three passes over the pixels plus `height + 1` separate
+  allocations. The decoder now allocates the destination RGBA plane
+  once and writes each source scanline straight to its final top-down
+  position (the bottom-up flip is resolved by an index map instead of
+  a later `rev()` + concat), writing pixels through a
+  `chunks_exact_mut(4)` cursor so there is no per-pixel capacity check
+  and no second copy. For 16 bpp `BI_BITFIELDS`, images at or above
+  2^18 pixels precompute the full 65 536-entry value→RGBA table once
+  and replace the four per-pixel mask `expand()` calls with a single
+  indexed load; smaller images keep the direct per-pixel path so an
+  icon never pays the table-build cost. Output bytes are bit-identical
+  (FNV-1a-verified across the 32-bit BGRA, 24-bit BGR, 16-bit 5-6-5
+  bitfields, 8-bit and 4-bit indexed fixtures, before vs. after). On a
+  best-of-5 wall-clock harness the per-format decode dropped: 32 bpp
+  320×240 56→9.6 µs (≈5.9×), 24 bpp 640×480 253→32 µs (≈8×), 8-bit
+  indexed 320×240 58→28 µs (≈2.1×), 4-bit 68→48 µs (≈1.4×), 16 bpp
+  5-6-5 640×480 ≈193 µs via the LUT; the RLE paths are unchanged. The
+  full uncompressed corpus sum fell ≈710→≈380 µs (≈1.86×). All 159
+  existing tests continue to pass with no decoded-byte changes.
+
 ### Added
 
 - **Truncated OS/2 2.x `OS22XBITMAPHEADER` decode (`biSize` 16…39 B)**

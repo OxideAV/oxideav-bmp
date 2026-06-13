@@ -777,18 +777,10 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
         });
     }
 
-    let rows = decode_pixels(h, whole, pixel_offset, &palette)?;
-
-    // Flip if needed so output is always top-down (consumer-friendly).
-    let rows = if h.is_top_down() {
-        rows
-    } else {
-        rows.into_iter().rev().collect()
-    };
-    let mut flat = Vec::with_capacity(width as usize * height as usize * 4);
-    for row in rows {
-        flat.extend_from_slice(&row);
-    }
+    // `decode_pixels` already writes a single flat top-down RGBA plane
+    // (it resolves the bottom-up flip internally), so no row reversal or
+    // concatenation pass is needed here.
+    let flat = decode_pixels(h, whole, pixel_offset, &palette)?;
 
     Ok(BmpImage {
         width,
@@ -891,12 +883,25 @@ fn read_palette(h: &DibHeader, whole: &[u8], _pixel_offset: usize) -> Result<Vec
     Ok(out)
 }
 
+/// Decode the uncompressed pixel array straight into a single flat
+/// top-down RGBA buffer.
+///
+/// Earlier revisions built a `Vec<Vec<u8>>` (one heap allocation per
+/// scanline) and pushed every pixel with `extend_from_slice(&[r,g,b,a])`,
+/// then the caller reversed the row vector and concatenated it into one
+/// flat plane — three passes over the pixels plus `height + 1` separate
+/// allocations. We now allocate the destination plane once and write each
+/// source scanline directly to its final top-down position: a bottom-up
+/// DIB places source row `y` at destination row `height-1-y`, a top-down
+/// DIB at row `y`. Each pixel is written as a fixed 4-byte slice into a
+/// `chunks_exact_mut(4)` cursor, so there is no per-pixel capacity check
+/// and no second copy. Output bytes are identical to the previous path.
 fn decode_pixels(
     h: &DibHeader,
     whole: &[u8],
     pixel_offset: usize,
     palette: &[[u8; 4]],
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<Vec<u8>> {
     let width = h.absolute_width() as usize;
     let height = h.absolute_height() as usize;
     let stride = h.row_stride();
@@ -911,53 +916,81 @@ fn decode_pixels(
         return Err(Error::invalid("BMP: pixel array truncated"));
     }
     let pixels = &whole[pixel_offset..pixel_end];
-    let mut rows: Vec<Vec<u8>> = Vec::with_capacity(height);
+
+    // Reject unsupported depths before the destination allocation so a
+    // bogus `bpp` never reserves the full RGBA plane. (`decode_dib_payload`
+    // already filters bpp upstream, but keeping the guard here makes the
+    // function self-contained against future direct callers.)
+    if !matches!(h.bpp, 1 | 4 | 8 | 16 | 24 | 32) {
+        return Err(Error::invalid(format!(
+            "BMP: unsupported bit depth {}",
+            h.bpp
+        )));
+    }
+
+    // Single destination allocation: width × height × 4 RGBA bytes, laid
+    // out top-down. `row_dst(y)` maps a source scanline index to its
+    // destination scanline index (the flip happens here instead of via a
+    // later `rev()` + concat pass).
+    let out_stride = width * 4;
+    let mut out = vec![0u8; out_stride.saturating_mul(height)];
+    let top_down = h.is_top_down();
+    let row_dst = |y: usize| -> usize {
+        if top_down {
+            y
+        } else {
+            height - 1 - y
+        }
+    };
 
     match h.bpp {
         1 => {
             for y in 0..height {
                 let row = &pixels[y * stride..y * stride + stride];
-                let mut out = Vec::with_capacity(width * 4);
-                for x in 0..width {
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                for (x, px) in dst.chunks_exact_mut(4).enumerate() {
                     let byte = row[x / 8];
                     let bit = (byte >> (7 - (x % 8))) & 1;
-                    let rgba = palette
-                        .get(bit as usize)
-                        .copied()
-                        .unwrap_or([0, 0, 0, 0xFF]);
-                    out.extend_from_slice(&rgba);
+                    px.copy_from_slice(
+                        &palette
+                            .get(bit as usize)
+                            .copied()
+                            .unwrap_or([0, 0, 0, 0xFF]),
+                    );
                 }
-                rows.push(out);
             }
         }
         4 => {
             for y in 0..height {
                 let row = &pixels[y * stride..y * stride + stride];
-                let mut out = Vec::with_capacity(width * 4);
-                for x in 0..width {
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                for (x, px) in dst.chunks_exact_mut(4).enumerate() {
                     let byte = row[x / 2];
                     let idx = if x & 1 == 0 { byte >> 4 } else { byte & 0x0F };
-                    let rgba = palette
-                        .get(idx as usize)
-                        .copied()
-                        .unwrap_or([0, 0, 0, 0xFF]);
-                    out.extend_from_slice(&rgba);
+                    px.copy_from_slice(
+                        &palette
+                            .get(idx as usize)
+                            .copied()
+                            .unwrap_or([0, 0, 0, 0xFF]),
+                    );
                 }
-                rows.push(out);
             }
         }
         8 => {
             for y in 0..height {
                 let row = &pixels[y * stride..y * stride + width];
-                let mut out = Vec::with_capacity(width * 4);
-                for &idx in row {
-                    let rgba = palette
-                        .get(idx as usize)
-                        .copied()
-                        .unwrap_or([0, 0, 0, 0xFF]);
-                    out.extend_from_slice(&rgba);
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                for (px, &idx) in dst.chunks_exact_mut(4).zip(row.iter()) {
+                    px.copy_from_slice(
+                        &palette
+                            .get(idx as usize)
+                            .copied()
+                            .unwrap_or([0, 0, 0, 0xFF]),
+                    );
                 }
-                rows.push(out);
             }
         }
         16 => {
@@ -981,35 +1014,70 @@ fn decode_pixels(
             let (gs, gn) = shift_len(mg);
             let (bs, bn) = shift_len(mb);
             let (as_, an) = shift_len(ma);
-            for y in 0..height {
-                let row = &pixels[y * stride..y * stride + width * 2];
-                let mut out = Vec::with_capacity(width * 4);
-                for x in 0..width {
-                    let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as u32;
-                    let r = expand(((v & mr) >> rs) as u8, rn);
-                    let g = expand(((v & mg) >> gs) as u8, gn);
-                    let b = expand(((v & mb) >> bs) as u8, bn);
-                    let a = if an > 0 {
+            // A 16bpp pixel has only 65 536 distinct values, so for large
+            // images we precompute the entire value → RGBA table once and
+            // replace the four per-pixel `expand()` calls with a single
+            // indexed load. Building the 256 KiB table itself costs 65 536
+            // mask-expansions, so it only pays for itself once the image is
+            // several times that size; below the threshold the direct
+            // per-pixel path is at least as fast and a small icon never eats
+            // a full-table build. Both paths produce bit-identical bytes;
+            // the 1<<18-pixel (256 K) cutoff was picked from the round-286
+            // profiling harness, where the LUT is a clear win at 640×480 and
+            // a wash at 320×240.
+            let total_px = width.saturating_mul(height);
+            if total_px >= 1 << 18 {
+                let mut lut = vec![0u8; 65_536 * 4];
+                for (v, slot) in lut.chunks_exact_mut(4).enumerate() {
+                    let v = v as u32;
+                    slot[0] = expand(((v & mr) >> rs) as u8, rn);
+                    slot[1] = expand(((v & mg) >> gs) as u8, gn);
+                    slot[2] = expand(((v & mb) >> bs) as u8, bn);
+                    slot[3] = if an > 0 {
                         expand(((v & ma) >> as_) as u8, an)
                     } else {
                         0xFF
                     };
-                    out.extend_from_slice(&[r, g, b, a]);
                 }
-                rows.push(out);
+                for y in 0..height {
+                    let row = &pixels[y * stride..y * stride + width * 2];
+                    let d = row_dst(y) * out_stride;
+                    let dst = &mut out[d..d + out_stride];
+                    for (x, px) in dst.chunks_exact_mut(4).enumerate() {
+                        let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as usize;
+                        px.copy_from_slice(&lut[v * 4..v * 4 + 4]);
+                    }
+                }
+            } else {
+                for y in 0..height {
+                    let row = &pixels[y * stride..y * stride + width * 2];
+                    let d = row_dst(y) * out_stride;
+                    let dst = &mut out[d..d + out_stride];
+                    for (x, px) in dst.chunks_exact_mut(4).enumerate() {
+                        let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as u32;
+                        px[0] = expand(((v & mr) >> rs) as u8, rn);
+                        px[1] = expand(((v & mg) >> gs) as u8, gn);
+                        px[2] = expand(((v & mb) >> bs) as u8, bn);
+                        px[3] = if an > 0 {
+                            expand(((v & ma) >> as_) as u8, an)
+                        } else {
+                            0xFF
+                        };
+                    }
+                }
             }
         }
         24 => {
             for y in 0..height {
                 let row = &pixels[y * stride..y * stride + width * 3];
-                let mut out = Vec::with_capacity(width * 4);
-                for x in 0..width {
-                    let b = row[x * 3];
-                    let g = row[x * 3 + 1];
-                    let r = row[x * 3 + 2];
-                    out.extend_from_slice(&[r, g, b, 0xFF]);
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(3)) {
+                    px[0] = src[2];
+                    px[1] = src[1];
+                    px[2] = src[0];
+                    px[3] = 0xFF;
                 }
-                rows.push(out);
             }
         }
         32 => {
@@ -1028,38 +1096,31 @@ fn decode_pixels(
                 let (as_, an) = shift_len(ma);
                 for y in 0..height {
                     let row = &pixels[y * stride..y * stride + width * 4];
-                    let mut out = Vec::with_capacity(width * 4);
-                    for x in 0..width {
-                        let v = u32::from_le_bytes([
-                            row[x * 4],
-                            row[x * 4 + 1],
-                            row[x * 4 + 2],
-                            row[x * 4 + 3],
-                        ]);
-                        let r = expand(((v & mr) >> rs) as u8, rn);
-                        let g = expand(((v & mg) >> gs) as u8, gn);
-                        let b = expand(((v & mb) >> bs) as u8, bn);
-                        let a = if an > 0 {
+                    let d = row_dst(y) * out_stride;
+                    let dst = &mut out[d..d + out_stride];
+                    for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                        let v = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
+                        px[0] = expand(((v & mr) >> rs) as u8, rn);
+                        px[1] = expand(((v & mg) >> gs) as u8, gn);
+                        px[2] = expand(((v & mb) >> bs) as u8, bn);
+                        px[3] = if an > 0 {
                             expand(((v & ma) >> as_) as u8, an)
                         } else {
                             0xFF
                         };
-                        out.extend_from_slice(&[r, g, b, a]);
                     }
-                    rows.push(out);
                 }
             } else {
                 for y in 0..height {
                     let row = &pixels[y * stride..y * stride + width * 4];
-                    let mut out = Vec::with_capacity(width * 4);
-                    for x in 0..width {
-                        let b = row[x * 4];
-                        let g = row[x * 4 + 1];
-                        let r = row[x * 4 + 2];
-                        let a = row[x * 4 + 3];
-                        out.extend_from_slice(&[r, g, b, a]);
+                    let d = row_dst(y) * out_stride;
+                    let dst = &mut out[d..d + out_stride];
+                    for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                        px[0] = src[2];
+                        px[1] = src[1];
+                        px[2] = src[0];
+                        px[3] = src[3];
                     }
-                    rows.push(out);
                 }
             }
         }
@@ -1069,7 +1130,7 @@ fn decode_pixels(
             )))
         }
     }
-    Ok(rows)
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
