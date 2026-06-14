@@ -251,6 +251,27 @@ decoder never auto-loads the linked file. Supported pixel formats
 (`Rgba` / `Rgb24` / `Rgb565` / `Indexed8` / `Indexed4` / `Indexed1`),
 `top_down`, and `minimal_palette` handling match the embedded path.
 
+`encode_bmp_with_calibrated_rgb` is the V4 colour-space counterpart to
+those V5 + ICC paths: instead of pointing at an embedded or linked ICC
+profile it emits a 108-byte `BITMAPV4HEADER` with
+`bV4CSType = LCS_CALIBRATED_RGB` and bakes the caller-supplied CIE
+endpoints (`[i32; 9]` `CIEXYZTRIPLE`, packed
+R.x R.y R.z G.x G.y G.z B.x B.y B.z) and per-channel gamma triple
+(`[u32; 3]`, unsigned 16.16 fixed point) directly into the header's
+endpoint / gamma fields. The decoder round-trips it:
+`decode_bmp_with_metadata` reports `BmpColorSpace::Calibrated` and
+returns the same `endpoints` + `gamma_rgb` the encoder was given (V4
+carries no rendering intent, so `rendering_intent` stays `None`).
+Supported pixel formats and option handling match the ICC paths:
+`Rgba` (32-bit BGRA `BI_RGB`), `Rgb24` (24-bit BGR `BI_RGB`),
+`Rgb565` (16-bit `BI_BITFIELDS` 5-6-5 with the canonical masks in the
+V4 four-mask region), and the indexed `Indexed8` / `Indexed4` /
+`Indexed1` (uncompressed `BI_RGB`, colour table between the header and
+the pixel array). RLE is never chosen so the header shape is
+deterministic; `top_down` and `minimal_palette` are honoured on every
+arm. A caller that only wants to *tag* a bitmap as calibrated without
+asserting specific primaries may pass all-zero endpoints + gamma.
+
 `Rgb565` input on either V5 + ICC path emits a 124-byte V5 header
 with `biCompression = BI_BITFIELDS`; the canonical R=0xF800 /
 G=0x07E0 / B=0x001F masks ride in the header's four-mask region at

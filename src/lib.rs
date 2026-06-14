@@ -49,9 +49,9 @@ pub use decoder::{decode_bmp, decode_bmp_with_metadata, decode_dib, decode_dib_w
 #[cfg(feature = "registry")]
 pub use decoder::{decode_bmp_videoframe, decode_dib_videoframe};
 pub use encoder::{
-    encode_bmp, encode_bmp_plane, encode_bmp_plane_with_options, encode_bmp_with_icc_profile,
-    encode_bmp_with_linked_icc_profile, encode_bmp_with_options, BmpEncodeOptions,
-    EncodedBmpFormat,
+    encode_bmp, encode_bmp_plane, encode_bmp_plane_with_options, encode_bmp_with_calibrated_rgb,
+    encode_bmp_with_icc_profile, encode_bmp_with_linked_icc_profile, encode_bmp_with_options,
+    BmpEncodeOptions, EncodedBmpFormat,
 };
 #[cfg(feature = "registry")]
 pub use encoder::{encode_bmp_videoframe, encode_dib_videoframe};
@@ -2686,5 +2686,233 @@ mod tests {
         assert_eq!(md.colors_important, Some(3));
         assert_eq!(md.dpi_x(), Some(96));
         assert_eq!(md.dpi_y(), Some(96));
+    }
+
+    // -----------------------------------------------------------------------
+    // V4 calibrated-RGB encode (bV4CSType = LCS_CALIBRATED_RGB)
+    // -----------------------------------------------------------------------
+
+    // sRGB-ish CIE endpoints (FXPT2DOT30) and gamma triple, picked as
+    // distinctive non-zero values so the roundtrip is meaningful.
+    const CAL_ENDPOINTS: [i32; 9] = [
+        0x0002_8511,
+        0x0001_5476,
+        0x0000_0000, // red x/y/z
+        0x0001_2A68,
+        0x0002_6666,
+        0x0000_570A, // green x/y/z
+        0x0000_6332,
+        0x0000_6666,
+        0x0001_E51E, // blue x/y/z
+    ];
+    const CAL_GAMMA: [u32; 3] = [0x0002_3333, 0x0002_3333, 0x0002_3333]; // ~2.2 in 16.16
+
+    #[test]
+    fn v4_calibrated_rgba_roundtrips() {
+        let (src, w, h) = rgba_checker(4, 4);
+        let bytes = encode_bmp_with_calibrated_rgb(
+            &src,
+            CAL_ENDPOINTS,
+            CAL_GAMMA,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V4 calibrated encode must succeed");
+        // On-disk header is V4 (108 B) with bV4CSType = LCS_CALIBRATED_RGB.
+        let header_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(header_size, BITMAPV4HEADER_SIZE);
+        let cs_type = u32::from_le_bytes([
+            bytes[14 + 56],
+            bytes[14 + 57],
+            bytes[14 + 58],
+            bytes[14 + 59],
+        ]);
+        assert_eq!(cs_type, LCS_CALIBRATED_RGB);
+
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("V4 calibrated must decode");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(img.planes[0].data, src.planes[0].data);
+        assert_eq!(md.header_size, BITMAPV4HEADER_SIZE);
+        assert_eq!(md.color_space, Some(BmpColorSpace::Calibrated));
+        assert_eq!(md.endpoints, Some(CAL_ENDPOINTS));
+        assert_eq!(md.gamma_rgb, Some(CAL_GAMMA));
+        // V4 carries no rendering intent / ICC.
+        assert!(md.rendering_intent.is_none());
+        assert!(md.icc_profile.is_none());
+    }
+
+    #[test]
+    fn v4_calibrated_rgb24_path() {
+        let src = rgb24_checker(4, 2);
+        let bytes = encode_bmp_with_calibrated_rgb(
+            &src,
+            CAL_ENDPOINTS,
+            CAL_GAMMA,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V4 calibrated RGB24 encode");
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode");
+        assert_eq!((img.width, img.height), (4, 2));
+        assert_eq!(md.color_space, Some(BmpColorSpace::Calibrated));
+        assert_eq!(md.endpoints, Some(CAL_ENDPOINTS));
+        assert_eq!(md.gamma_rgb, Some(CAL_GAMMA));
+        // Pixel (0,0) is red per `rgb24_checker`.
+        assert_eq!(&img.planes[0].data[..4], &[255u8, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v4_calibrated_rgb565_carries_masks_in_header() {
+        // 16-bit input → BI_BITFIELDS with the canonical 5-6-5 masks
+        // living in the V4 four-mask region; calibrated endpoints + gamma
+        // still survive the roundtrip.
+        let src = BmpImage {
+            width: 1,
+            height: 1,
+            pixel_format: BmpPixelFormat::Rgb565,
+            planes: vec![BmpPlane {
+                stride: 2,
+                data: vec![0xE0, 0x07], // green
+            }],
+            palette: None,
+            pts: None,
+        };
+        let bytes = encode_bmp_with_calibrated_rgb(
+            &src,
+            CAL_ENDPOINTS,
+            CAL_GAMMA,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V4 calibrated 5-6-5 encode");
+        // biCompression at DIB offset 16 (file offset 30) must be BI_BITFIELDS.
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_BITFIELDS);
+        // R mask at DIB offset 40 (file offset 54) must be 0xF800.
+        let r_mask = u32::from_le_bytes([bytes[54], bytes[55], bytes[56], bytes[57]]);
+        assert_eq!(r_mask, 0xF800);
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("decode 5-6-5");
+        assert_eq!(md.color_space, Some(BmpColorSpace::Calibrated));
+        assert_eq!(md.endpoints, Some(CAL_ENDPOINTS));
+        assert_eq!(md.gamma_rgb, Some(CAL_GAMMA));
+    }
+
+    #[test]
+    fn v4_calibrated_top_down_negative_height() {
+        let (src, _, h) = rgba_checker(2, 2);
+        let bytes = encode_bmp_with_calibrated_rgb(
+            &src,
+            CAL_ENDPOINTS,
+            CAL_GAMMA,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .expect("V4 calibrated top-down encode");
+        // biHeight at file offset 22 should be negative.
+        let bi_height = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(bi_height, -(h as i32));
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode top-down");
+        // Decode is always top-down Rgba, so the plane matches the source.
+        assert_eq!(img.planes[0].data, src.planes[0].data);
+        assert_eq!(md.color_space, Some(BmpColorSpace::Calibrated));
+    }
+
+    #[test]
+    fn v4_calibrated_indexed8_roundtrips() {
+        let (idx, stride) = indexed_checker(4, 4);
+        let src = BmpImage {
+            width: 4,
+            height: 4,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data: idx }],
+            palette: Some(four_color_palette()),
+            pts: None,
+        };
+        let bytes = encode_bmp_with_calibrated_rgb(
+            &src,
+            CAL_ENDPOINTS,
+            CAL_GAMMA,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V4 calibrated indexed8 encode");
+        // Header is V4; biCompression is BI_RGB (indexed never RLE here).
+        let header_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(header_size, BITMAPV4HEADER_SIZE);
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_RGB);
+        // bfOffBits = 14 + 108 + 256*4 (full table by default).
+        let off_bits = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(off_bits, 14 + 108 + 256 * 4);
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode indexed8");
+        assert_eq!((img.width, img.height), (4, 4));
+        // index 0 → red, per four_color_palette.
+        assert_eq!(&img.planes[0].data[..4], &[255u8, 0, 0, 255]);
+        assert_eq!(md.color_space, Some(BmpColorSpace::Calibrated));
+        assert_eq!(md.endpoints, Some(CAL_ENDPOINTS));
+    }
+
+    #[test]
+    fn v4_calibrated_indexed8_minimal_palette() {
+        let (idx, stride) = indexed_checker(4, 4);
+        let src = BmpImage {
+            width: 4,
+            height: 4,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data: idx }],
+            palette: Some(four_color_palette()),
+            pts: None,
+        };
+        let bytes = encode_bmp_with_calibrated_rgb(
+            &src,
+            CAL_ENDPOINTS,
+            CAL_GAMMA,
+            BmpEncodeOptions {
+                minimal_palette: true,
+                ..Default::default()
+            },
+        )
+        .expect("V4 calibrated indexed8 minimal-palette encode");
+        // Only the 4 supplied entries are written; bfOffBits trims.
+        let off_bits = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(off_bits, 14 + 108 + 4 * 4);
+        // biClrUsed at DIB offset 32 (file offset 46) records the count.
+        let clr_used = u32::from_le_bytes([bytes[46], bytes[47], bytes[48], bytes[49]]);
+        assert_eq!(clr_used, 4);
+        let (img, _) = decode_bmp_with_metadata(&bytes).expect("decode minimal-palette");
+        assert_eq!(&img.planes[0].data[..4], &[255u8, 0, 0, 255]);
+    }
+
+    #[test]
+    fn v4_calibrated_indexed_without_palette_errors() {
+        let (idx, stride) = indexed_checker(2, 2);
+        let src = BmpImage {
+            width: 2,
+            height: 2,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data: idx }],
+            palette: None,
+            pts: None,
+        };
+        let err = encode_bmp_with_calibrated_rgb(
+            &src,
+            CAL_ENDPOINTS,
+            CAL_GAMMA,
+            BmpEncodeOptions::default(),
+        )
+        .unwrap_err();
+        let _ = err;
+    }
+
+    #[test]
+    fn v4_calibrated_zero_endpoints_still_tags_calibrated() {
+        // A caller that only wants the LCS_CALIBRATED_RGB tag without
+        // asserting primaries passes all-zero endpoints + gamma.
+        let (src, _, _) = rgba_checker(2, 2);
+        let bytes =
+            encode_bmp_with_calibrated_rgb(&src, [0; 9], [0; 3], BmpEncodeOptions::default())
+                .expect("zero-endpoint calibrated encode");
+        let (_, md) = decode_bmp_with_metadata(&bytes).expect("decode");
+        assert_eq!(md.color_space, Some(BmpColorSpace::Calibrated));
+        assert_eq!(md.endpoints, Some([0; 9]));
+        assert_eq!(md.gamma_rgb, Some([0; 3]));
     }
 }

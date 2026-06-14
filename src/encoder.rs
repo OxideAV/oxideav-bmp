@@ -527,6 +527,180 @@ pub fn encode_bmp_with_linked_icc_profile(
     Ok(out)
 }
 
+/// Encode a [`BmpImage`] into a complete BMP file carrying a 108-byte
+/// `BITMAPV4HEADER` with `bV4CSType = LCS_CALIBRATED_RGB` and the
+/// caller-supplied CIE endpoints + per-channel gamma.
+///
+/// `LCS_CALIBRATED_RGB` (value `0`) is the V4 colour-space mode in
+/// which the endpoint + gamma fields — rather than a named colour
+/// space (`LCS_sRGB`, …) or an embedded/linked ICC profile — define
+/// the bitmap's colour. Per the `BITMAPV4HEADER` documentation the
+/// `bV4Endpoints` `CIEXYZTRIPLE` carries the x / y / z coordinates of
+/// the red, green, and blue endpoints (nine `FXPT2DOT30` `LONG`s,
+/// packed R.x R.y R.z G.x G.y G.z B.x B.y B.z) and each of
+/// `bV4GammaRed` / `bV4GammaGreen` / `bV4GammaBlue` is the tone-
+/// response curve in unsigned 16.16 fixed point (upper 16 bits
+/// integer, lower 16 bits fraction). Both are ignored by a reader
+/// unless `bV4CSType == LCS_CALIBRATED_RGB`; this entry point always
+/// writes that tag.
+///
+/// `endpoints` is the nine-`i32` `CIEXYZTRIPLE` in the same packing
+/// the decoder surfaces as [`BmpMetadata::endpoints`](crate::BmpMetadata::endpoints);
+/// `gamma_rgb` is the `[GammaRed, GammaGreen, GammaBlue]` triple the
+/// decoder surfaces as [`BmpMetadata::gamma_rgb`](crate::BmpMetadata::gamma_rgb).
+/// A caller that only wants to *tag* the bitmap as calibrated without
+/// asserting specific primaries may pass all-zero endpoints + gamma.
+///
+/// Supported pixel formats: [`BmpPixelFormat::Rgba`] (32-bit BGRA
+/// `BI_RGB`), [`BmpPixelFormat::Rgb24`] (24-bit BGR `BI_RGB`),
+/// [`BmpPixelFormat::Rgb565`] (16-bit `BI_BITFIELDS` 5-6-5, masks in
+/// the V4 four-mask region), and the indexed
+/// [`BmpPixelFormat::Indexed8`] / `Indexed4` / `Indexed1` (uncompressed
+/// `BI_RGB` with the colour table sitting between the V4 header and the
+/// pixel array). RLE is never chosen — like the V5 + ICC paths, the
+/// V4-calibrated path keeps the pixel array uncompressed so the header
+/// shape is deterministic. [`BmpEncodeOptions::top_down`] and
+/// [`BmpEncodeOptions::minimal_palette`] have the same meaning as on
+/// every other encode path.
+///
+/// The decoder round-trips this header: `decode_bmp_with_metadata`
+/// reports [`BmpColorSpace::Calibrated`](crate::BmpColorSpace::Calibrated)
+/// and returns the same endpoints + gamma the encoder was given.
+pub fn encode_bmp_with_calibrated_rgb(
+    image: &BmpImage,
+    endpoints: [i32; 9],
+    gamma_rgb: [u32; 3],
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    if image.planes.is_empty() {
+        return Err(Error::invalid("BMP encoder: empty frame plane"));
+    }
+    if image.pixel_format.is_indexed() {
+        return encode_bmp_v4_indexed_calibrated(image, endpoints, gamma_rgb, options);
+    }
+    let plane = &image.planes[0];
+    let width = image.width;
+    let height = image.height;
+    let (pixels, bpp, compression, masks) = match image.pixel_format {
+        BmpPixelFormat::Rgba => {
+            let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
+            (p, 32u16, BI_RGB, [0u32; 4])
+        }
+        BmpPixelFormat::Rgb24 => {
+            let (p, _) = pack_rgb24(plane, width, height, options)?;
+            (p, 24u16, BI_RGB, [0u32; 4])
+        }
+        BmpPixelFormat::Rgb565 => {
+            let (p, _) = pack_rgb565(plane, width, height, options)?;
+            (p, 16u16, BI_BITFIELDS, RGB565_MASKS_V5)
+        }
+        other => {
+            return Err(Error::unsupported(format!(
+                "BMP encoder: V4 calibrated-RGB not supported for {other:?}",
+            )))
+        }
+    };
+    // Layout: [BITMAPFILEHEADER 14 B][BITMAPV4HEADER 108 B][pixel array].
+    // The 16-bpp BI_BITFIELDS arm carries the canonical 5-6-5 masks in
+    // the V4 four-mask region (offsets 40..56), so no separate 12-byte
+    // mask tail sits before the pixel array.
+    let pixel_bytes = pixels.len() as u32;
+    let file_size = BITMAPFILEHEADER_SIZE + BITMAPV4HEADER_SIZE + pixel_bytes;
+    let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV4HEADER_SIZE;
+
+    let mut out = Vec::with_capacity(file_size as usize);
+    write_file_header(&mut out, file_size, pixel_offset);
+    write_dib_header_v4_calibrated(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        bpp,
+        pixel_bytes,
+        compression,
+        masks,
+        0, // clr_used — direct-colour has no colour table
+        endpoints,
+        gamma_rgb,
+    );
+    out.extend_from_slice(&pixels);
+    Ok(out)
+}
+
+/// Indexed arm of [`encode_bmp_with_calibrated_rgb`]
+/// ([`BmpPixelFormat::Indexed8`] / `Indexed4` / `Indexed1`).
+///
+/// Layout (file-byte offsets):
+/// * 0..14 `BITMAPFILEHEADER`
+/// * 14..122 `BITMAPV4HEADER` (108 B; `bV4CSType = LCS_CALIBRATED_RGB`,
+///   four-mask region zeroed, `biClrUsed` reflects the on-disk table)
+/// * 122..122+pal `RGBQUAD` colour table (`pal = entries × 4`)
+/// * 122+pal..end Packed indexed pixel bytes (uncompressed `BI_RGB`)
+///
+/// `bfOffBits` is `14 + 108 + pal`. RLE is never used (same rationale
+/// as the V5 + ICC indexed path: a deterministic header shape).
+fn encode_bmp_v4_indexed_calibrated(
+    image: &BmpImage,
+    endpoints: [i32; 9],
+    gamma_rgb: [u32; 3],
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    let plane = &image.planes[0];
+    let width = image.width;
+    let height = image.height;
+    let bpp: u16 = match image.pixel_format {
+        BmpPixelFormat::Indexed8 => 8,
+        BmpPixelFormat::Indexed4 => 4,
+        BmpPixelFormat::Indexed1 => 1,
+        _ => {
+            return Err(Error::invalid(
+                "encode_bmp_v4_indexed_calibrated: not an indexed format",
+            ));
+        }
+    };
+    let palette = image.palette.as_ref().ok_or_else(|| {
+        Error::invalid("BMP encoder: V4 calibrated-RGB indexed input requires a palette")
+    })?;
+    let entries = written_palette_entries(bpp, palette, options);
+    let full = palette_entry_count(bpp);
+    let clr_used = if entries >= full { 0 } else { entries as u32 };
+
+    let (pixels, _) = pack_indexed(plane, bpp as usize, width, height, options)?;
+
+    let palette_bytes = (entries * 4) as u32;
+    let pixel_bytes = pixels.len() as u32;
+    let dib_size = BITMAPV4HEADER_SIZE + palette_bytes + pixel_bytes;
+    let file_size = BITMAPFILEHEADER_SIZE + dib_size;
+    let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV4HEADER_SIZE + palette_bytes;
+
+    let mut out = Vec::with_capacity(file_size as usize);
+    write_file_header(&mut out, file_size, pixel_offset);
+    write_dib_header_v4_calibrated(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        bpp,
+        pixel_bytes,
+        BI_RGB,
+        [0u32; 4],
+        clr_used,
+        endpoints,
+        gamma_rgb,
+    );
+    // Colour table (B, G, R, 0x00) right after the V4 header.
+    for i in 0..entries {
+        if let Some(rgb) = palette.entries.get(i) {
+            out.push(rgb[2]); // B
+            out.push(rgb[1]); // G
+            out.push(rgb[0]); // R
+            out.push(0x00);
+        } else {
+            out.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        }
+    }
+    out.extend_from_slice(&pixels);
+    Ok(out)
+}
+
 /// Shared V5 + profile-blob assembler for the indexed encode paths
 /// ([`BmpPixelFormat::Indexed8`] / `Indexed4` / `Indexed1`). Both the
 /// embedded (`PROFILE_EMBEDDED`) and linked (`PROFILE_LINKED`) public
@@ -1460,6 +1634,69 @@ fn write_dib_header_v4_bitfields(out: &mut Vec<u8>, w: u32, stored_height: i32) 
     // GammaRed, GammaGreen, GammaBlue (3 × u32 = 12 bytes) — zero
     out.extend_from_slice(&[0u8; 12]);
     // Total so far: 40 + 4*4 + 4 + 36 + 12 = 40+16+4+36+12 = 108 ✓
+}
+
+/// Write a 108-byte `BITMAPV4HEADER` with
+/// `bV4CSType = LCS_CALIBRATED_RGB` and caller-supplied CIE endpoints +
+/// per-channel gamma. Used by [`encode_bmp_with_calibrated_rgb`] and its
+/// indexed helper.
+///
+/// Layout (offsets relative to the start of the DIB header):
+/// * 0..40   classic `BITMAPINFOHEADER` fields (`biClrUsed` = `clr_used`)
+/// * 40..56  R / G / B / A masks (`masks`; zeroed for `BI_RGB`,
+///   canonical 5-6-5 for the 16-bpp `BI_BITFIELDS` arm)
+/// * 56..60  `bV4CSType` = [`LCS_CALIBRATED_RGB`]
+/// * 60..96  `bV4Endpoints` CIEXYZTRIPLE (9 × `i32`, packed
+///   R.x R.y R.z G.x G.y G.z B.x B.y B.z)
+/// * 96..108 `bV4GammaRed` / `bV4GammaGreen` / `bV4GammaBlue`
+///   (3 × `u32`, unsigned 16.16 fixed point)
+///
+/// `image_size` is the byte length of the pixel array (written to the
+/// `biSizeImage` slot at offset 20); `compression` and `masks`
+/// parameterise the V3-prefix `biCompression` field and the four-mask
+/// region the same way [`write_dib_header_v5_with_profile`] does.
+/// `stored_height` is signed: negative for a top-down DIB.
+#[allow(clippy::too_many_arguments)]
+fn write_dib_header_v4_calibrated(
+    out: &mut Vec<u8>,
+    w: u32,
+    stored_height: i32,
+    bpp: u16,
+    image_size: u32,
+    compression: u32,
+    masks: [u32; 4],
+    clr_used: u32,
+    endpoints: [i32; 9],
+    gamma_rgb: [u32; 3],
+) {
+    // Classic V3 prefix (40 B).
+    out.extend_from_slice(&BITMAPV4HEADER_SIZE.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&stored_height.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&bpp.to_le_bytes());
+    out.extend_from_slice(&compression.to_le_bytes());
+    out.extend_from_slice(&image_size.to_le_bytes());
+    out.extend_from_slice(&2835i32.to_le_bytes()); // x_pels/m ≈ 72 DPI
+    out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
+    out.extend_from_slice(&clr_used.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
+                                                // V4 tail: R/G/B/A masks (offsets 40..56).
+    out.extend_from_slice(&masks[0].to_le_bytes()); // R
+    out.extend_from_slice(&masks[1].to_le_bytes()); // G
+    out.extend_from_slice(&masks[2].to_le_bytes()); // B
+    out.extend_from_slice(&masks[3].to_le_bytes()); // A
+                                                    // bV4CSType — calibrated RGB: endpoints + gamma are authoritative.
+    out.extend_from_slice(&LCS_CALIBRATED_RGB.to_le_bytes());
+    // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes).
+    for v in endpoints {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    // Gamma R / G / B (3 × u32 = 12 bytes), unsigned 16.16 fixed point.
+    for g in gamma_rgb {
+        out.extend_from_slice(&g.to_le_bytes());
+    }
+    // Total: 40 + 16 + 4 + 36 + 12 = 108 ✓
 }
 
 /// Write a 124-byte `BITMAPV5HEADER` with `bV5CSType = PROFILE_EMBEDDED`.

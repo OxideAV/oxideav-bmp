@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`encode_bmp_with_calibrated_rgb` — V4 calibrated-RGB encode**
+  (round 294): a new public entry point that emits a 108-byte
+  `BITMAPV4HEADER` with `bV4CSType = LCS_CALIBRATED_RGB` plus
+  caller-supplied CIE endpoints (`[i32; 9]` `CIEXYZTRIPLE`, packed
+  R.x R.y R.z G.x G.y G.z B.x B.y B.z) and a per-channel gamma triple
+  (`[u32; 3]`, unsigned 16.16 fixed point). This is the colour-space
+  counterpart to the existing `encode_bmp_with_icc_profile` /
+  `encode_bmp_with_linked_icc_profile` V5 paths: where those declare
+  an embedded or linked ICC profile, the calibrated path bakes the
+  endpoint + gamma fields directly into the V4 header. Supported pixel
+  formats: `Rgba` (32-bit BGRA `BI_RGB`), `Rgb24` (24-bit BGR
+  `BI_RGB`), `Rgb565` (16-bit `BI_BITFIELDS` 5-6-5, masks in the V4
+  four-mask region), and the indexed `Indexed8` / `Indexed4` /
+  `Indexed1` (uncompressed `BI_RGB`, colour table between the header
+  and the pixel array). RLE is never chosen so the header shape stays
+  deterministic; `BmpEncodeOptions::top_down` (negative `biHeight`)
+  and `minimal_palette` are honoured on every arm. The decoder
+  round-trips the header: `decode_bmp_with_metadata` reports
+  `BmpColorSpace::Calibrated` and returns the same `endpoints` +
+  `gamma_rgb` the encoder was given. Eight new roundtrip tests cover
+  the direct-colour, 5-6-5 masks-in-header, top-down, indexed (full +
+  minimal palette), missing-palette error, and zero-endpoint
+  tag-only cases.
+
 ### Performance
 
 - **Single-allocation flat-buffer uncompressed decode** (round 286,
