@@ -60,6 +60,50 @@ pub const BITMAPCOREHEADER_SIZE: u32 = 12;
 /// decoded by the dedicated truncated-OS22X path.
 pub const OS22XBITMAPHEADER_SIZE: u32 = 64;
 
+// ---------------------------------------------------------------------------
+// OS/2 2.x `OS22XBITMAPHEADER` trailing-field semantics
+// ---------------------------------------------------------------------------
+//
+// The full 64-byte form appends 24 bytes after the 40-byte
+// `BITMAPINFOHEADER` prefix. Field layout (DIB-relative offsets; the
+// Wikipedia table lists them as file offsets 54.. which equals these
+// plus the 14-byte BITMAPFILEHEADER):
+//
+//   off 40  u16  Units            (resolution units; 0 = pixels per metre)
+//   off 42  u16  Reserved/padding (ignored; should be zero)
+//   off 44  u16  Recording        (fill direction; 0 = lower-left origin,
+//                                   left-to-right then bottom-to-top)
+//   off 46  u16  Rendering        (halftoning algorithm)
+//   off 48  u32  Size1            (halftoning parameter 1)
+//   off 52  u32  Size2            (halftoning parameter 2)
+//   off 56  u32  ColorEncoding    (colour-table encoding; 0 = RGB)
+//   off 60  u32  Identifier       (application-defined; unused for render)
+
+/// OS/2 2.x `usUnits` value: the only defined value, meaning the
+/// horizontal/vertical resolution fields are in pixels per metre.
+pub const OS2_UNITS_PELS_PER_METER: u16 = 0;
+/// OS/2 2.x `usRecording` value: the only defined value, meaning the
+/// origin is the lower-left corner and bits fill left-to-right then
+/// bottom-to-top (a Windows-style upper-left origin is instead expressed
+/// by a negative `biHeight`).
+pub const OS2_RECORDING_BOTTOM_UP: u16 = 0;
+/// OS/2 2.x `usColorEncoding` value: the only defined value, meaning each
+/// colour-table entry is RGB.
+pub const OS2_COLOR_ENCODING_RGB: u32 = 0;
+
+/// OS/2 2.x `usRendering` (halftoning algorithm): no halftoning.
+pub const OS2_HALFTONE_NONE: u16 = 0;
+/// OS/2 2.x `usRendering`: error-diffusion halftoning. `Size1` is the
+/// percentage of error damping (100 = no damping, 0 = errors not diffused).
+pub const OS2_HALFTONE_ERROR_DIFFUSION: u16 = 1;
+/// OS/2 2.x `usRendering`: PANDA (Processing Algorithm for Noncoded
+/// Document Acquisition). `Size1` / `Size2` are the X / Y dimensions, in
+/// pixels, of the halftoning pattern.
+pub const OS2_HALFTONE_PANDA: u16 = 2;
+/// OS/2 2.x `usRendering`: super-circle halftoning. `Size1` / `Size2`
+/// are the X / Y dimensions, in pixels, of the halftoning pattern.
+pub const OS2_HALFTONE_SUPER_CIRCLE: u16 = 3;
+
 /// Smallest legal truncated `OS22XBITMAPHEADER`: the 4-byte `biSize`,
 /// 4-byte width, 4-byte height, 2-byte planes and 2-byte bit-count
 /// (offsets 0..16). The spec permits writers to stop the header at 16
@@ -192,6 +236,40 @@ pub struct DibHeader {
     /// pointed at by [`profile_data_offset`](Self::profile_data_offset).
     /// `None` for V3 / V4 / OS/2.
     pub profile_size: Option<u32>,
+    /// Raw OS/2 2.x `OS22XBITMAPHEADER` trailing-field block, present
+    /// only when `header_size == 64` (the full IBM header). `None` for
+    /// every Windows header generation and for the truncated OS/2 2.x
+    /// forms (`biSize < 40`), which have no room for these fields.
+    pub os2_header2: Option<Os2Header2Raw>,
+}
+
+/// Raw decode of the 24 trailing bytes of a full 64-byte OS/2 2.x
+/// `OS22XBITMAPHEADER` (offsets 40..64 of the DIB header).
+///
+/// Every value is passed through verbatim so callers can distinguish the
+/// documented sentinels (`0`) from explicit non-zero writes. The padding
+/// `WORD` at offset 42 is intentionally not retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Os2Header2Raw {
+    /// `usUnits` (offset 40): resolution units. See
+    /// [`OS2_UNITS_PELS_PER_METER`].
+    pub units: u16,
+    /// `usRecording` (offset 44): fill direction. See
+    /// [`OS2_RECORDING_BOTTOM_UP`].
+    pub recording: u16,
+    /// `usRendering` (offset 46): halftoning algorithm. See the
+    /// `OS2_HALFTONE_*` constants.
+    pub rendering: u16,
+    /// `cSize1` (offset 48): halftoning parameter 1.
+    pub size1: u32,
+    /// `cSize2` (offset 52): halftoning parameter 2.
+    pub size2: u32,
+    /// `ulColorEncoding` (offset 56): colour-table encoding. See
+    /// [`OS2_COLOR_ENCODING_RGB`].
+    pub color_encoding: u32,
+    /// `ulIdentifier` (offset 60): application-defined identifier; not
+    /// used for image rendering.
+    pub identifier: u32,
 }
 
 impl DibHeader {

@@ -496,6 +496,31 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
         (None, None, None)
     };
 
+    // ---- OS/2 2.x full 64-byte OS22XBITMAPHEADER trailing block --------
+    //
+    // The full IBM header appends 24 bytes after the 40-byte
+    // BITMAPINFOHEADER prefix. It is identified solely by `biSize == 64`
+    // (the Windows V4 / V5 headers are 108 / 124 and never collide).
+    // We read it only at exactly that size: a 64-byte V4-prefix would be
+    // ambiguous, but no Windows generation declares biSize 64, so 64 is
+    // unambiguously the OS/2 2.x form. The masks / cs_type tail above is
+    // gated on >= 108, so a 64-byte header never reaches that path and
+    // the colour-space fields stay `None` as expected.
+    let os2_header2 = if header_size == OS22XBITMAPHEADER_SIZE {
+        Some(Os2Header2Raw {
+            units: read_u16_le(input, 40),
+            // offset 42 is documented padding (ignored).
+            recording: read_u16_le(input, 44),
+            rendering: read_u16_le(input, 46),
+            size1: read_u32_le(input, 48),
+            size2: read_u32_le(input, 52),
+            color_encoding: read_u32_le(input, 56),
+            identifier: read_u32_le(input, 60),
+        })
+    } else {
+        None
+    };
+
     Ok((
         DibHeader {
             header_size,
@@ -519,6 +544,7 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
             intent,
             profile_data_offset,
             profile_size,
+            os2_header2,
         },
         header_size as usize,
     ))
@@ -578,6 +604,7 @@ fn parse_bitmapcoreheader(input: &[u8]) -> Result<(DibHeader, usize)> {
             intent: None,
             profile_data_offset: None,
             profile_size: None,
+            os2_header2: None,
         },
         BITMAPCOREHEADER_SIZE as usize,
     ))
@@ -689,6 +716,7 @@ fn parse_truncated_os22x_header(input: &[u8], header_size: u32) -> Result<(DibHe
             intent: None,
             profile_data_offset: None,
             profile_size: None,
+            os2_header2: None,
         },
         hs,
     ))

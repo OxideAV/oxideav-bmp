@@ -16,9 +16,10 @@
 //! so the metadata path stays additive to the existing API surface.
 
 use crate::types::{
-    DibHeader, BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE, LCS_CALIBRATED_RGB,
+    DibHeader, Os2Header2Raw, BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE, LCS_CALIBRATED_RGB,
     LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS, LCS_GM_GRAPHICS, LCS_GM_IMAGES, LCS_S_RGB,
-    LCS_WINDOWS_COLOR_SPACE, PROFILE_EMBEDDED, PROFILE_LINKED,
+    LCS_WINDOWS_COLOR_SPACE, OS2_HALFTONE_ERROR_DIFFUSION, OS2_HALFTONE_NONE, OS2_HALFTONE_PANDA,
+    OS2_HALFTONE_SUPER_CIRCLE, PROFILE_EMBEDDED, PROFILE_LINKED,
 };
 
 /// Colour-space declaration carried by a V4 / V5 BMP header.
@@ -157,6 +158,117 @@ pub enum BmpIccProfileRef<'a> {
     },
 }
 
+/// OS/2 2.x halftoning algorithm (`usRendering`, offset 46 of a full
+/// 64-byte `OS22XBITMAPHEADER`).
+///
+/// Maps the four documented values; any other on-disk value is surfaced
+/// as [`Unknown`](Self::Unknown) so a caller can tell "decoder didn't
+/// recognise the algorithm" apart from "header declared no halftoning".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BmpOs2Halftone {
+    /// `0`: no halftoning (the most common value).
+    None,
+    /// `1`: error diffusion. The halftoning `size1` parameter is the
+    /// percentage of error damping (100 = no damping, 0 = errors not
+    /// diffused).
+    ErrorDiffusion,
+    /// `2`: PANDA (Processing Algorithm for Noncoded Document
+    /// Acquisition). `size1` / `size2` are the X / Y dimensions, in
+    /// pixels, of the halftoning pattern.
+    Panda,
+    /// `3`: super-circle. `size1` / `size2` are the X / Y dimensions, in
+    /// pixels, of the halftoning pattern.
+    SuperCircle,
+    /// A `usRendering` value the OS/2 2.x header documentation doesn't
+    /// define; passed through verbatim.
+    Unknown(u16),
+}
+
+impl BmpOs2Halftone {
+    /// Map a raw `usRendering` value to a [`BmpOs2Halftone`].
+    pub fn from_raw(value: u16) -> Self {
+        match value {
+            OS2_HALFTONE_NONE => BmpOs2Halftone::None,
+            OS2_HALFTONE_ERROR_DIFFUSION => BmpOs2Halftone::ErrorDiffusion,
+            OS2_HALFTONE_PANDA => BmpOs2Halftone::Panda,
+            OS2_HALFTONE_SUPER_CIRCLE => BmpOs2Halftone::SuperCircle,
+            other => BmpOs2Halftone::Unknown(other),
+        }
+    }
+}
+
+/// Typed view of the trailing 24 bytes of a full 64-byte OS/2 2.x
+/// `OS22XBITMAPHEADER` (`BITMAPINFOHEADER2` in IBM's documentation).
+///
+/// Present on [`BmpMetadata::os2_header2`] only when the decoded DIB
+/// header is exactly 64 bytes — the full IBM form. The truncated OS/2
+/// 2.x forms (`biSize` 16..40) and every Windows header generation have
+/// no room for these fields, so `os2_header2` is `None` for them. The
+/// only documented value for `units` / `recording` / `color_encoding`
+/// is `0`; the raw values are surfaced via the dedicated accessors so a
+/// non-standard write is distinguishable from the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BmpOs2Header2 {
+    /// `usUnits` (offset 40): resolution units for the
+    /// pixels-per-X-axis fields. The only documented value is `0`,
+    /// meaning pixels per metre.
+    pub units: u16,
+    /// `usRecording` (offset 44): the direction in which bits fill the
+    /// bitmap. The only documented value is `0`, meaning a lower-left
+    /// origin (left-to-right, then bottom-to-top). A Windows-style
+    /// upper-left origin is instead expressed by a negative `biHeight`.
+    pub recording: u16,
+    /// `usRendering` (offset 46): the halftoning algorithm, mapped to a
+    /// [`BmpOs2Halftone`].
+    pub halftone: BmpOs2Halftone,
+    /// `cSize1` (offset 48): halftoning parameter 1. Its meaning depends
+    /// on [`halftone`](Self::halftone) — error-damping percentage for
+    /// error diffusion, or the pattern X dimension for PANDA /
+    /// super-circle.
+    pub halftone_size1: u32,
+    /// `cSize2` (offset 52): halftoning parameter 2 — the pattern Y
+    /// dimension for PANDA / super-circle; unused for the other
+    /// algorithms.
+    pub halftone_size2: u32,
+    /// `ulColorEncoding` (offset 56): the colour encoding of each
+    /// colour-table entry. The only documented value is `0`, meaning RGB.
+    pub color_encoding: u32,
+    /// `ulIdentifier` (offset 60): an application-defined identifier.
+    /// Not used for image rendering; surfaced verbatim.
+    pub identifier: u32,
+}
+
+impl BmpOs2Header2 {
+    fn from_raw(raw: Os2Header2Raw) -> Self {
+        Self {
+            units: raw.units,
+            recording: raw.recording,
+            halftone: BmpOs2Halftone::from_raw(raw.rendering),
+            halftone_size1: raw.size1,
+            halftone_size2: raw.size2,
+            color_encoding: raw.color_encoding,
+            identifier: raw.identifier,
+        }
+    }
+
+    /// `true` when `units` is the documented default (`0`, pixels per
+    /// metre).
+    pub fn units_is_pels_per_meter(&self) -> bool {
+        self.units == crate::types::OS2_UNITS_PELS_PER_METER
+    }
+
+    /// `true` when `recording` is the documented default (`0`, lower-left
+    /// origin / bottom-up fill).
+    pub fn is_bottom_up(&self) -> bool {
+        self.recording == crate::types::OS2_RECORDING_BOTTOM_UP
+    }
+
+    /// `true` when `color_encoding` is the documented default (`0`, RGB).
+    pub fn color_encoding_is_rgb(&self) -> bool {
+        self.color_encoding == crate::types::OS2_COLOR_ENCODING_RGB
+    }
+}
+
 /// Header-derived colour-space metadata for a decoded BMP.
 ///
 /// V3 / OS/2 headers don't carry any of this; the decoder fills every
@@ -258,6 +370,14 @@ pub struct BmpMetadata {
     /// sentinel from explicit values. `None` for OS/2
     /// `BITMAPCOREHEADER` bitmaps.
     pub colors_important: Option<u32>,
+    /// The trailing 24-byte block of a full 64-byte OS/2 2.x
+    /// `OS22XBITMAPHEADER` (units / recording / halftoning /
+    /// colour-encoding / app-id). `Some` only when the decoded DIB
+    /// header was exactly 64 bytes — the full IBM form. `None` for every
+    /// Windows header generation, the 12-byte OS/2 1.x
+    /// `BITMAPCOREHEADER`, and the truncated OS/2 2.x forms (`biSize`
+    /// 16..40) which have no room for these fields.
+    pub os2_header2: Option<BmpOs2Header2>,
 }
 
 impl BmpMetadata {
@@ -320,6 +440,7 @@ impl BmpMetadata {
             } else {
                 None
             },
+            os2_header2: header.os2_header2.map(BmpOs2Header2::from_raw),
         }
     }
 

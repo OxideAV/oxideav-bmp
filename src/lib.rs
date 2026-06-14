@@ -58,13 +58,17 @@ pub use encoder::{encode_bmp_videoframe, encode_dib_videoframe};
 pub use encoder::{encode_dib, encode_dib_plane};
 pub use error::{BmpError, Result};
 pub use image::{BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
-pub use metadata::{BmpColorSpace, BmpIccProfileRef, BmpMetadata, BmpRenderingIntent};
+pub use metadata::{
+    BmpColorSpace, BmpIccProfileRef, BmpMetadata, BmpOs2Halftone, BmpOs2Header2, BmpRenderingIntent,
+};
 pub use types::{
     row_stride, BitmapFileHeader, BitmapInfoHeader, DibHeader, DibHeaderKind,
     BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE, BITMAPV2INFOHEADER_SIZE,
     BITMAPV3INFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_ALPHABITFIELDS,
     BI_BITFIELDS, BI_RGB, BMP_MAGIC, LCS_CALIBRATED_RGB, LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS,
-    LCS_GM_GRAPHICS, LCS_GM_IMAGES, LCS_S_RGB, LCS_WINDOWS_COLOR_SPACE, PROFILE_EMBEDDED,
+    LCS_GM_GRAPHICS, LCS_GM_IMAGES, LCS_S_RGB, LCS_WINDOWS_COLOR_SPACE, OS22XBITMAPHEADER_SIZE,
+    OS2_COLOR_ENCODING_RGB, OS2_HALFTONE_ERROR_DIFFUSION, OS2_HALFTONE_NONE, OS2_HALFTONE_PANDA,
+    OS2_HALFTONE_SUPER_CIRCLE, OS2_RECORDING_BOTTOM_UP, OS2_UNITS_PELS_PER_METER, PROFILE_EMBEDDED,
     PROFILE_LINKED,
 };
 
@@ -844,6 +848,228 @@ mod tests {
         // header (header byte offset 16).
         bytes[30..34].copy_from_slice(&3u32.to_le_bytes());
         assert!(decode_bmp(&bytes).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Full 64-byte OS/2 2.x OS22XBITMAPHEADER trailing-field metadata
+    // -----------------------------------------------------------------------
+
+    /// Build an 8-bpp BMP carrying a full 64-byte OS/2 2.x
+    /// `OS22XBITMAPHEADER`: the 40-byte BITMAPINFOHEADER prefix plus the
+    /// 24 trailing bytes (units / padding / recording / rendering /
+    /// size1 / size2 / colour-encoding / identifier) at offsets 40..64.
+    #[allow(clippy::too_many_arguments)]
+    fn build_os22x_full_8bpp(
+        w: u32,
+        h: u32,
+        indices_top_down: &[u8],
+        palette: &[[u8; 3]],
+        units: u16,
+        recording: u16,
+        rendering: u16,
+        size1: u32,
+        size2: u32,
+        color_encoding: u32,
+        identifier: u32,
+    ) -> Vec<u8> {
+        let row_stride = (w as usize).div_ceil(4) * 4;
+        let mut pixel_array = vec![0u8; row_stride * h as usize];
+        for y in 0..h as usize {
+            let src_y = h as usize - 1 - y;
+            let row = &mut pixel_array[y * row_stride..];
+            for x in 0..w as usize {
+                row[x] = indices_top_down[src_y * w as usize + x];
+            }
+        }
+        let palette_entries = 256usize;
+        let palette_bytes = (palette_entries * 4) as u32;
+        let header_size = 64u32;
+        let pixel_offset = 14 + header_size + palette_bytes;
+        let file_size = pixel_offset + pixel_array.len() as u32;
+        let mut out = Vec::with_capacity(file_size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&pixel_offset.to_le_bytes());
+        // 40-byte BITMAPINFOHEADER prefix.
+        out.extend_from_slice(&header_size.to_le_bytes()); // biSize @0
+        out.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth @4
+        out.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight @8
+        out.extend_from_slice(&1u16.to_le_bytes()); // biPlanes @12
+        out.extend_from_slice(&8u16.to_le_bytes()); // biBitCount @14
+        out.extend_from_slice(&0u32.to_le_bytes()); // biCompression @16
+        out.extend_from_slice(&0u32.to_le_bytes()); // biSizeImage @20
+        out.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerM @24
+        out.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerM @28
+        out.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed @32
+        out.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant @36
+                                                    // 24-byte OS/2 2.x trailing block.
+        out.extend_from_slice(&units.to_le_bytes()); // usUnits @40
+        out.extend_from_slice(&0u16.to_le_bytes()); // padding @42
+        out.extend_from_slice(&recording.to_le_bytes()); // usRecording @44
+        out.extend_from_slice(&rendering.to_le_bytes()); // usRendering @46
+        out.extend_from_slice(&size1.to_le_bytes()); // cSize1 @48
+        out.extend_from_slice(&size2.to_le_bytes()); // cSize2 @52
+        out.extend_from_slice(&color_encoding.to_le_bytes()); // ulColorEncoding @56
+        out.extend_from_slice(&identifier.to_le_bytes()); // ulIdentifier @60
+                                                          // Colour table: 256 RGBQUAD (B, G, R, 0) entries.
+        for i in 0..palette_entries {
+            if let Some(rgb) = palette.get(i) {
+                out.push(rgb[2]);
+                out.push(rgb[1]);
+                out.push(rgb[0]);
+                out.push(0);
+            } else {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        out.extend_from_slice(&pixel_array);
+        out
+    }
+
+    #[test]
+    fn os22x_full_64byte_header_decodes_pixels() {
+        // A 64-byte OS/2 2.x header decodes the same pixels as the other
+        // header generations; the trailing block must not perturb the
+        // colour table / pixel offsets.
+        let w = 2u32;
+        let h = 2u32;
+        let indices = [0u8, 1, 1, 0];
+        let palette: &[[u8; 3]] = &[[10, 20, 30], [200, 100, 50]];
+        let bytes = build_os22x_full_8bpp(w, h, &indices, palette, 0, 0, 0, 0, 0, 0, 0);
+        let img = decode_bmp(&bytes).unwrap();
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(&img.planes[0].data[..4], &[10, 20, 30, 255]);
+        assert_eq!(&img.planes[0].data[4..8], &[200, 100, 50, 255]);
+    }
+
+    #[test]
+    fn os22x_full_64byte_header_default_trailing_fields() {
+        // All-zero trailing fields = the documented defaults.
+        let bytes = build_os22x_full_8bpp(
+            2,
+            2,
+            &[0, 1, 1, 0],
+            &[[10, 20, 30], [200, 100, 50]],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        let (_img, md) = decode_bmp_with_metadata(&bytes).unwrap();
+        assert_eq!(md.header_size, 64);
+        let h2 = md.os2_header2.expect("64-byte header carries os2_header2");
+        assert_eq!(h2.units, 0);
+        assert!(h2.units_is_pels_per_meter());
+        assert_eq!(h2.recording, 0);
+        assert!(h2.is_bottom_up());
+        assert_eq!(h2.halftone, BmpOs2Halftone::None);
+        assert_eq!(h2.halftone_size1, 0);
+        assert_eq!(h2.halftone_size2, 0);
+        assert_eq!(h2.color_encoding, 0);
+        assert!(h2.color_encoding_is_rgb());
+        assert_eq!(h2.identifier, 0);
+        // The colour-space tail stays None — a 64-byte header is below the
+        // 108-byte V4 threshold.
+        assert_eq!(md.color_space, None);
+        assert_eq!(md.rendering_intent, None);
+    }
+
+    #[test]
+    fn os22x_full_64byte_header_error_diffusion_halftone() {
+        // usRendering = 1 (error diffusion); size1 = 75% error damping.
+        let bytes = build_os22x_full_8bpp(
+            2,
+            2,
+            &[0, 1, 1, 0],
+            &[[10, 20, 30], [200, 100, 50]],
+            0,
+            0,
+            1,
+            75,
+            0,
+            0,
+            0xDEAD_BEEF,
+        );
+        let (_img, md) = decode_bmp_with_metadata(&bytes).unwrap();
+        let h2 = md.os2_header2.unwrap();
+        assert_eq!(h2.halftone, BmpOs2Halftone::ErrorDiffusion);
+        assert_eq!(h2.halftone_size1, 75);
+        assert_eq!(h2.identifier, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn os22x_full_64byte_header_panda_and_supercircle_halftone() {
+        for (rendering, expected) in [
+            (2u16, BmpOs2Halftone::Panda),
+            (3u16, BmpOs2Halftone::SuperCircle),
+        ] {
+            let bytes = build_os22x_full_8bpp(
+                2,
+                2,
+                &[0, 1, 1, 0],
+                &[[10, 20, 30], [200, 100, 50]],
+                0,
+                0,
+                rendering,
+                16,
+                32,
+                0,
+                0,
+            );
+            let (_img, md) = decode_bmp_with_metadata(&bytes).unwrap();
+            let h2 = md.os2_header2.unwrap();
+            assert_eq!(h2.halftone, expected, "rendering={rendering}");
+            assert_eq!(h2.halftone_size1, 16);
+            assert_eq!(h2.halftone_size2, 32);
+        }
+    }
+
+    #[test]
+    fn os22x_full_64byte_header_nonstandard_values_passthrough() {
+        // Non-zero units / recording / colour-encoding / unknown halftone
+        // are surfaced verbatim, and the convenience predicates report the
+        // value differs from the documented default.
+        let bytes = build_os22x_full_8bpp(
+            2,
+            2,
+            &[0, 1, 1, 0],
+            &[[10, 20, 30], [200, 100, 50]],
+            7,
+            9,
+            42,
+            0,
+            0,
+            5,
+            0,
+        );
+        let (_img, md) = decode_bmp_with_metadata(&bytes).unwrap();
+        let h2 = md.os2_header2.unwrap();
+        assert_eq!(h2.units, 7);
+        assert!(!h2.units_is_pels_per_meter());
+        assert_eq!(h2.recording, 9);
+        assert!(!h2.is_bottom_up());
+        assert_eq!(h2.halftone, BmpOs2Halftone::Unknown(42));
+        assert_eq!(h2.color_encoding, 5);
+        assert!(!h2.color_encoding_is_rgb());
+    }
+
+    #[test]
+    fn non_os22x_headers_have_no_os2_header2() {
+        // The 12-byte CORE header, the truncated OS/2 2.x form, and a
+        // plain V3 header all report `os2_header2 = None`.
+        let core = build_os2_24bpp_bmp(2, 1, &[(1, 2, 3), (4, 5, 6)]);
+        assert_eq!(decode_bmp_with_metadata(&core).unwrap().1.os2_header2, None);
+
+        let trunc = build_truncated_os22x_8bpp(16, 2, 2, &[0, 1, 1, 0], &[[1, 2, 3], [4, 5, 6]]);
+        assert_eq!(
+            decode_bmp_with_metadata(&trunc).unwrap().1.os2_header2,
+            None
+        );
     }
 
     // -----------------------------------------------------------------------

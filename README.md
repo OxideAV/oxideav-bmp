@@ -54,6 +54,45 @@ block, so `BI_BITFIELDS` (the OS/2 `Huffman 1D` alias) and `BI_JPEG`
 (the OS/2 `RLE-24` alias) are rejected on these sizes — only plain
 `BI_RGB` / `BI_RLE8` / `BI_RLE4` streams decode.
 
+### Full 64-byte OS/2 2.x `OS22XBITMAPHEADER` trailing fields
+
+When the DIB header is the *full* 64-byte form, the 24 bytes that sit
+past the 40-byte `BITMAPINFOHEADER` prefix carry IBM's extra
+print-oriented descriptors: a resolution-units `WORD` (offset 40, only
+defined value `0` = pixels per metre), a recording / fill-direction
+`WORD` (offset 44, only defined value `0` = lower-left origin), a
+halftoning-algorithm `WORD` (offset 46) with two `DWORD` parameters
+(offsets 48 / 52), a colour-table-encoding `DWORD` (offset 56, only
+defined value `0` = RGB), and an application-defined identifier `DWORD`
+(offset 60). The `WORD` at offset 42 is documented padding. These are
+surfaced through `BmpMetadata::os2_header2: Option<BmpOs2Header2>`,
+populated only for an exactly-64-byte header (every Windows generation
+and the truncated OS/2 2.x forms report `None`):
+
+```rust
+use oxideav_bmp::{BmpOs2Halftone, decode_bmp_with_metadata};
+let (_image, md) = decode_bmp_with_metadata(bytes)?;
+if let Some(h2) = md.os2_header2 {
+    h2.units_is_pels_per_meter();   // units == 0
+    h2.is_bottom_up();              // recording == 0 (lower-left origin)
+    h2.color_encoding_is_rgb();     // color_encoding == 0
+    match h2.halftone {
+        BmpOs2Halftone::None            => {}            // 0
+        BmpOs2Halftone::ErrorDiffusion  => {}            // 1: size1 = % damping
+        BmpOs2Halftone::Panda           => {}            // 2: size1/size2 = pattern X/Y
+        BmpOs2Halftone::SuperCircle     => {}            // 3: size1/size2 = pattern X/Y
+        BmpOs2Halftone::Unknown(v)      => { let _ = v; } // verbatim passthrough
+    }
+    let _ = (h2.halftone_size1, h2.halftone_size2, h2.identifier);
+}
+```
+
+Every raw field is passed through verbatim so a non-standard write is
+distinguishable from the documented default; the colour-space tail
+stays `None` because a 64-byte header is below the 108-byte V4
+threshold. Pixel decode is unchanged — the trailing block is metadata
+only.
+
 ### Typed `BitmapFileHeader` view
 
 The 14-byte `BITMAPFILEHEADER` prefix is also surfaced as a typed

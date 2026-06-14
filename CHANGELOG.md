@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Full 64-byte OS/2 2.x `OS22XBITMAPHEADER` trailing-field metadata**
+  (round 306): the 24 bytes that the full IBM header appends after the
+  40-byte `BITMAPINFOHEADER` prefix — `usUnits` (offset 40),
+  `usRecording` / fill-direction (offset 44), `usRendering` / halftoning
+  algorithm (offset 46), the two halftoning parameters `cSize1` /
+  `cSize2` (offsets 48 / 52), `ulColorEncoding` (offset 56) and the
+  application `ulIdentifier` (offset 60) — are now surfaced through a new
+  `BmpMetadata::os2_header2: Option<BmpOs2Header2>` field. It is `Some`
+  only when the decoded DIB header is exactly 64 bytes (every Windows
+  generation, the 12-byte OS/2 1.x `BITMAPCOREHEADER`, and the truncated
+  OS/2 2.x forms report `None`). The halftoning algorithm is mapped to a
+  new `BmpOs2Halftone` enum (`None` / `ErrorDiffusion` / `Panda` /
+  `SuperCircle` / `Unknown(u16)` passthrough); convenience predicates
+  `units_is_pels_per_meter()` / `is_bottom_up()` /
+  `color_encoding_is_rgb()` test each `0`-valued documented default while
+  the raw values stay readable so a non-standard write is distinguishable
+  from the default. Pixel decode is unchanged — the trailing block is
+  metadata only and a 64-byte header stays below the 108-byte V4
+  colour-space threshold (so `color_space` / `rendering_intent` remain
+  `None`). New named constants `OS2_UNITS_PELS_PER_METER` /
+  `OS2_RECORDING_BOTTOM_UP` / `OS2_COLOR_ENCODING_RGB` /
+  `OS2_HALFTONE_{NONE,ERROR_DIFFUSION,PANDA,SUPER_CIRCLE}` and the
+  `OS22XBITMAPHEADER_SIZE` size constant are now re-exported. Six new
+  tests cover pixel decode, the all-zero defaults, each halftoning
+  algorithm, non-standard passthrough values, and the `None` result for
+  CORE / truncated headers.
+
 - **`metadata` fuzz target** (round 300, depth round): a fourth
   `cargo-fuzz` harness in `fuzz/` that feeds arbitrary bytes to the
   `decode_bmp_with_metadata` / `decode_dib_with_metadata` entry points.
