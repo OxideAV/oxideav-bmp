@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`metadata` fuzz target** (round 300, depth round): a fourth
+  `cargo-fuzz` harness in `fuzz/` that feeds arbitrary bytes to the
+  `decode_bmp_with_metadata` / `decode_dib_with_metadata` entry points.
+  These are independent public surfaces with their own
+  attacker-controlled offset / slicing maths that the pixel-only
+  `decode` target never reaches: the V4 colour-space tail (`bV4CSType`,
+  the nine-`i32` `CIEXYZTRIPLE` endpoints, the three-`u32` gamma
+  triple), the V5 colour-management tail (`bV5Intent` /
+  `bV5ProfileData` / `bV5ProfileSize`), and the trailing ICC /
+  linked-path blob slice `input[base + bV5ProfileData ..][.. size]`
+  where both the offset and the size are fuzzer-controlled `u32`
+  fields. Both DIB framings (plain + doubled-height XOR+AND) are fuzzed
+  so the slice base (14 for a BMP file, 0 for a header-less DIB)
+  varies. Five seed inputs (plain V3, V4 calibrated-RGB, V5 embedded
+  ICC on direct-colour and indexed images, V5 linked ICC) live in
+  `fuzz/corpus/metadata/`. A 60-second local run lands ~1.08 M inputs
+  with zero crashes; the harness builds against the framework-free
+  standalone path (`default-features = false`) and shares the same
+  panic-free contract as the other three targets.
+
 - **`encode_bmp_with_calibrated_rgb` — V4 calibrated-RGB encode**
   (round 294): a new public entry point that emits a 108-byte
   `BITMAPV4HEADER` with `bV4CSType = LCS_CALIBRATED_RGB` plus

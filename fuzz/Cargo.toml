@@ -74,3 +74,18 @@ name = "encode_roundtrip"
 path = "fuzz_targets/encode_roundtrip.rs"
 test = false
 doc = false
+
+# Metadata target — feeds arbitrary bytes to the `decode_*_with_metadata`
+# entry points, which parse the V4/V5 colour-space tail (bV4CSType, CIE
+# endpoints, gamma triple, bV5Intent) and slice the trailing ICC /
+# linked-path blob out of `input[base + bV5ProfileData ..][.. size]` with
+# attacker-controlled offset + size u32 fields. That slicing maths and
+# tail parsing are not reached by the pixel-only `decode` target. Both
+# DIB framings (plain + doubled-height XOR+AND) are fuzzed so the base
+# offset (14 for a BMP file, 0 for a header-less DIB) varies. Same
+# panic-free contract as `decode`.
+[[bin]]
+name = "metadata"
+path = "fuzz_targets/metadata.rs"
+test = false
+doc = false

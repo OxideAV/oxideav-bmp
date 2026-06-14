@@ -390,7 +390,7 @@ same as the fuzz harness: every malformed input must return `Err`
 tolerance, return safely with the XOR alpha preserved) — never panic,
 index out of bounds, or OOM-abort.
 
-Three `cargo-fuzz` targets live in `fuzz/`:
+Four `cargo-fuzz` targets live in `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `decode_bmp` and to `decode_dib`
   (both the plain and the doubled-height XOR+AND-mask modes). The
@@ -419,8 +419,21 @@ Three `cargo-fuzz` targets live in `fuzz/`:
   only since the decoder materialises `Rgba` and a 1 B/px → 4 B/px
   comparison would be apples-to-oranges. Six seed inputs (one per
   format) live in `fuzz/corpus/encode_roundtrip/`.
+* `metadata` (round 300) — fuzzes the `decode_bmp_with_metadata` /
+  `decode_dib_with_metadata` entry points, which are independent public
+  surfaces with their own attacker-controlled offset / slicing maths
+  that the pixel-only `decode` target never reaches: the V4 colour-space
+  tail (`bV4CSType`, the nine-`i32` `CIEXYZTRIPLE` endpoints, the
+  three-`u32` gamma triple), the V5 colour-management tail
+  (`bV5Intent` / `bV5ProfileData` / `bV5ProfileSize`), and the trailing
+  ICC / linked-path blob slice `input[base + bV5ProfileData ..][.. size]`
+  where both offset and size are fuzzer-controlled `u32` fields. Both
+  DIB framings (plain + doubled-height XOR+AND) are fuzzed so the slice
+  base (14 for a BMP file, 0 for a header-less DIB) varies. Five seed
+  inputs (plain V3, V4 calibrated-RGB, V5 embedded ICC on direct-colour
+  and indexed images, V5 linked ICC) live in `fuzz/corpus/metadata/`.
 
-All three targets share the same panic-free contract — every input
+All four targets share the same panic-free contract — every input
 returns a `Result` rather than panicking, indexing out of bounds, or
 OOM-aborting — and build against the framework-free standalone path
 (`default-features = false`).
@@ -429,6 +442,7 @@ OOM-aborting — and build against the framework-free standalone path
 cargo +nightly fuzz run decode
 cargo +nightly fuzz run rle_stream
 cargo +nightly fuzz run encode_roundtrip
+cargo +nightly fuzz run metadata
 ```
 
 The `decode` harness shook out and fixed several header-driven
@@ -437,8 +451,9 @@ see `CHANGELOG.md`. A local 20-second `rle_stream` run lands ~1.5 M
 inputs (~72 k execs/sec) with zero crashes. A 60-second
 `encode_roundtrip` run lands ~1.33 M inputs (~21.8 k execs/sec, peak
 RSS ~480 MB) with zero crashes — every direct-colour input survived
-the encode→decode pair byte-for-byte. A daily
-`.github/workflows/fuzz.yml` job runs all three targets on a shared
+the encode→decode pair byte-for-byte. A 60-second `metadata` run lands
+~1.08 M inputs with zero crashes. A daily
+`.github/workflows/fuzz.yml` job runs all four targets on a shared
 30-minute budget via the org reusable workflow's `[[bin]]`
 auto-discovery.
 
