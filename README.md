@@ -320,7 +320,7 @@ tail is written before the pixel array. The ICC blob
 the trailing slot exactly as for the `Rgba` / `Rgb24` arms.
 
 `Indexed8` / `Indexed4` / `Indexed1` input is also accepted on both
-V5 + ICC paths (round 231): the encoder emits a 124-byte V5 header
+V5 + ICC paths: the encoder emits a 124-byte V5 header
 with `biCompression = BI_RGB`, writes the colour table between the
 header and the pixel array (so `bfOffBits = 14 + 124 + entries × 4`),
 sets `biClrUsed` from the supplied palette (honouring
@@ -396,8 +396,8 @@ in `biClrUsed` — a 2-colour 8-bit image sheds 254 unused entries
 (1016 bytes); a 1-entry `Indexed1` table sheds 4 bytes. The count is
 clamped to `[1, 2^bpp]`; a palette that already fills the space keeps
 the `biClrUsed = 0` sentinel. Composable with `top_down`. The
-decoder's `biClrUsed`-aware palette reader (and the `magick` black-box
-validator) consume the trimmed table transparently.
+decoder's `biClrUsed`-aware palette reader consumes the trimmed table
+transparently.
 
 ### Top-down DIB output
 
@@ -446,14 +446,14 @@ Four `cargo-fuzz` targets live in `fuzz/`:
   seed corpus carries one valid BMP per header / depth / compression
   variant (32/24/16/8/4/1-bpp, RLE4/RLE8, top-down, minimal-palette,
   V4 bitfields header) plus a couple of degenerate framings.
-* `rle_stream` (round 162) — narrows the input so libfuzzer spends its
+* `rle_stream` — narrows the input so libfuzzer spends its
   iteration budget on the BI_RLE8 / BI_RLE4 state machines instead of
   re-discovering valid 14-byte BITMAPFILEHEADERs. The first three
   fuzz bytes pick the RLE flavour (8 vs 4-bpp), width (1..=255) and
   height (1..=255); the harness wraps the remainder as the pixel
   payload of a synthetic BMP carrying a maximal colour table. Seed
   corpus is two real RLE pixel streams lifted from the `decode` seeds.
-* `encode_roundtrip` (round 198) — closes the symmetry by exercising
+* `encode_roundtrip` — closes the symmetry by exercising
   the **encoder** with fuzzer-controlled pixels / palette / encode
   options, then decoding the output back. The first four input bytes
   pick the pixel format (`Rgba` / `Rgb24` / `Rgb565` / `Indexed8` /
@@ -468,7 +468,7 @@ Four `cargo-fuzz` targets live in `fuzz/`:
   only since the decoder materialises `Rgba` and a 1 B/px → 4 B/px
   comparison would be apples-to-oranges. Six seed inputs (one per
   format) live in `fuzz/corpus/encode_roundtrip/`.
-* `metadata` (round 300) — fuzzes the `decode_bmp_with_metadata` /
+* `metadata` — fuzzes the `decode_bmp_with_metadata` /
   `decode_dib_with_metadata` entry points, which are independent public
   surfaces with their own attacker-controlled offset / slicing maths
   that the pixel-only `decode` target never reaches: the V4 colour-space
@@ -519,7 +519,7 @@ cargo bench -p oxideav-bmp --bench encode
 cargo bench -p oxideav-bmp --bench roundtrip
 ```
 
-Round 129 headline numbers (Apple M-series, `--quick`):
+Indicative throughput (Apple M-series, `--quick`):
 
 | Bench                                         | Throughput     |
 | --------------------------------------------- | -------------- |
@@ -533,29 +533,10 @@ Round 129 headline numbers (Apple M-series, `--quick`):
 | `roundtrip_rgba_320x240`                      | ~3.95 GiB/s    |
 | `roundtrip_dib_ico_rgba_64x64`                | ~1.7 GiB/s     |
 
-### Round 286 — single-allocation flat-buffer decode
-
-The uncompressed pixel-unpack path (`decode_pixels`, every bit depth)
-was profiled and rewritten to fill one flat top-down RGBA plane in a
-single pass instead of building a `Vec<Vec<u8>>` (one allocation per
-scanline) and then reversing + concatenating it. Pixels are written
-through a `chunks_exact_mut(4)` cursor — no per-pixel capacity checks,
-no second copy — and the bottom-up flip is resolved by an index map.
-For 16 bpp `BI_BITFIELDS` at ≥ 2^18 pixels a 65 536-entry value→RGBA
-lookup table replaces the four per-pixel mask expansions. Decoded
-bytes are bit-identical (FNV-1a-verified before/after across 32/24/16
-bpp + 8/4-bit indexed). Best-of-5 wall-clock decode, Apple M-series:
-
-| Case (decode)        | Before  | After   | Speedup |
-| -------------------- | ------- | ------- | ------- |
-| 32 bpp BGRA 320×240  | 56.1 µs | 9.6 µs  | ≈5.9×   |
-| 24 bpp BGR 640×480   | 253 µs  | 32 µs   | ≈8.0×   |
-| 8-bit indexed 320×240| 57.7 µs | 27.8 µs | ≈2.1×   |
-| 4-bit indexed 320×240| 68.4 µs | 48.4 µs | ≈1.4×   |
-| 16 bpp 5-6-5 320×240 | 141 µs  | 113 µs  | ≈1.25×  |
-
-Uncompressed-corpus sum ≈710 µs → ≈380 µs (≈1.86×). RLE paths
-unchanged.
+The uncompressed pixel-unpack path fills one flat top-down RGBA plane
+in a single pass (a `chunks_exact_mut(4)` cursor, no per-scanline
+allocation); for 16 bpp `BI_BITFIELDS` at large sizes a 65 536-entry
+value→RGBA lookup table replaces the four per-pixel mask expansions.
 
 ## Registration
 
