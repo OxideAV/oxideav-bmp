@@ -262,8 +262,8 @@ its ICC offset / size (slice falls past EOF) leaves
 metadata path can never make decode fail on its own.
 
 `encode_bmp_with_icc_profile` is the matching encode side: pass an
-`Rgba`, `Rgb24`, `Rgb565`, `Indexed8`, `Indexed4`, or `Indexed1`
-`BmpImage` plus an ICC blob plus an intent constant (0 for
+`Rgba`, `Rgb24`, `Rgb555`, `Rgb565`, `Indexed8`, `Indexed4`, or
+`Indexed1` `BmpImage` plus an ICC blob plus an intent constant (0 for
 unspecified, or one of `LCS_GM_BUSINESS` / `LCS_GM_GRAPHICS` /
 `LCS_GM_IMAGES` / `LCS_GM_ABS_COLORIMETRIC`) and the encoder emits a
 124-byte `BITMAPV5HEADER` with `bV5CSType = PROFILE_EMBEDDED` followed
@@ -287,8 +287,9 @@ pass whatever blob they choose. Decoder side: `decode_bmp_with_metadata`
 sets `BmpColorSpace::ProfileLinked` and exposes `profile_data_offset` /
 `profile_size` so callers can resolve the path themselves — the
 decoder never auto-loads the linked file. Supported pixel formats
-(`Rgba` / `Rgb24` / `Rgb565` / `Indexed8` / `Indexed4` / `Indexed1`),
-`top_down`, and `minimal_palette` handling match the embedded path.
+(`Rgba` / `Rgb24` / `Rgb555` / `Rgb565` / `Indexed8` / `Indexed4` /
+`Indexed1`), `top_down`, and `minimal_palette` handling match the
+embedded path.
 
 `encode_bmp_with_calibrated_rgb` is the V4 colour-space counterpart to
 those V5 + ICC paths: instead of pointing at an embedded or linked ICC
@@ -303,6 +304,7 @@ returns the same `endpoints` + `gamma_rgb` the encoder was given (V4
 carries no rendering intent, so `rendering_intent` stays `None`).
 Supported pixel formats and option handling match the ICC paths:
 `Rgba` (32-bit BGRA `BI_RGB`), `Rgb24` (24-bit BGR `BI_RGB`),
+`Rgb555` (16-bit `BI_RGB` 5-5-5, high bit reserved, no mask block),
 `Rgb565` (16-bit `BI_BITFIELDS` 5-6-5 with the canonical masks in the
 V4 four-mask region), and the indexed `Indexed8` / `Indexed4` /
 `Indexed1` (uncompressed `BI_RGB`, colour table between the header and
@@ -318,6 +320,14 @@ offsets 40..56 (the V4 / V5 mask slot) so no separate 12-byte mask
 tail is written before the pixel array. The ICC blob
 (`PROFILE_EMBEDDED`) or path-string blob (`PROFILE_LINKED`) sits in
 the trailing slot exactly as for the `Rgba` / `Rgb24` arms.
+
+`Rgb555` input on either V5 + ICC path (and on the V4-calibrated path)
+emits the 16-bit pixels as plain `BI_RGB` 5-5-5 — the high bit is
+reserved and R/G/B occupy bits 14..10 / 9..5 / 4..0, so **no** mask
+block is written and the header's four-mask region stays zero (the
+encode counterpart of the decoder's 16-bit `BI_RGB` 5-5-5 path). The
+trailing ICC / path / endpoint-gamma colour-management payload is
+unaffected.
 
 `Indexed8` / `Indexed4` / `Indexed1` input is also accepted on both
 V5 + ICC paths: the encoder emits a 124-byte V5 header

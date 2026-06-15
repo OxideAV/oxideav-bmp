@@ -326,7 +326,9 @@ pub fn encode_bmp_plane_with_options(
 /// Supported pixel formats:
 ///
 /// * Direct-colour: [`BmpPixelFormat::Rgba`] (32-bit BGRA),
-///   [`BmpPixelFormat::Rgb24`] (24-bit BGR), [`BmpPixelFormat::Rgb565`]
+///   [`BmpPixelFormat::Rgb24`] (24-bit BGR), [`BmpPixelFormat::Rgb555`]
+///   (16-bit `BI_RGB` 5-5-5 — high bit reserved, no mask block; the V5
+///   header's four-mask region stays zero), and [`BmpPixelFormat::Rgb565`]
 ///   (16-bit `BI_BITFIELDS` 5-6-5 — the V5 header's four-mask region at
 ///   offsets 40..56 carries the canonical R=0xF800 / G=0x07E0 / B=0x001F
 ///   quadruple so no separate 12-byte mask tail is written before the
@@ -378,6 +380,10 @@ pub fn encode_bmp_with_icc_profile(
         BmpPixelFormat::Rgb24 => {
             let (p, _) = pack_rgb24(plane, width, height, options)?;
             (p, 24u16, BI_RGB, [0u32; 4])
+        }
+        BmpPixelFormat::Rgb555 => {
+            let (p, _) = pack_rgb555(plane, width, height, options)?;
+            (p, 16u16, BI_RGB, [0u32; 4])
         }
         BmpPixelFormat::Rgb565 => {
             let (p, _) = pack_rgb565(plane, width, height, options)?;
@@ -453,7 +459,8 @@ pub fn encode_bmp_with_icc_profile(
 ///
 /// Supported pixel formats: every format accepted by
 /// [`encode_bmp_with_icc_profile`] — [`BmpPixelFormat::Rgba`],
-/// [`BmpPixelFormat::Rgb24`], [`BmpPixelFormat::Rgb565`], plus
+/// [`BmpPixelFormat::Rgb24`], [`BmpPixelFormat::Rgb555`] (16-bit
+/// `BI_RGB` 5-5-5), [`BmpPixelFormat::Rgb565`], plus
 /// [`BmpPixelFormat::Indexed8`] / [`BmpPixelFormat::Indexed4`] /
 /// [`BmpPixelFormat::Indexed1`] (always written as uncompressed
 /// `BI_RGB`, with the colour table sitting between the V5 header and
@@ -492,6 +499,10 @@ pub fn encode_bmp_with_linked_icc_profile(
         BmpPixelFormat::Rgb24 => {
             let (p, _) = pack_rgb24(plane, width, height, options)?;
             (p, 24u16, BI_RGB, [0u32; 4])
+        }
+        BmpPixelFormat::Rgb555 => {
+            let (p, _) = pack_rgb555(plane, width, height, options)?;
+            (p, 16u16, BI_RGB, [0u32; 4])
         }
         BmpPixelFormat::Rgb565 => {
             let (p, _) = pack_rgb565(plane, width, height, options)?;
@@ -561,8 +572,9 @@ pub fn encode_bmp_with_linked_icc_profile(
 ///
 /// Supported pixel formats: [`BmpPixelFormat::Rgba`] (32-bit BGRA
 /// `BI_RGB`), [`BmpPixelFormat::Rgb24`] (24-bit BGR `BI_RGB`),
-/// [`BmpPixelFormat::Rgb565`] (16-bit `BI_BITFIELDS` 5-6-5, masks in
-/// the V4 four-mask region), and the indexed
+/// [`BmpPixelFormat::Rgb555`] (16-bit `BI_RGB` 5-5-5, high bit reserved,
+/// no mask block), [`BmpPixelFormat::Rgb565`] (16-bit `BI_BITFIELDS`
+/// 5-6-5, masks in the V4 four-mask region), and the indexed
 /// [`BmpPixelFormat::Indexed8`] / `Indexed4` / `Indexed1` (uncompressed
 /// `BI_RGB` with the colour table sitting between the V4 header and the
 /// pixel array). RLE is never chosen — like the V5 + ICC paths, the
@@ -597,6 +609,10 @@ pub fn encode_bmp_with_calibrated_rgb(
         BmpPixelFormat::Rgb24 => {
             let (p, _) = pack_rgb24(plane, width, height, options)?;
             (p, 24u16, BI_RGB, [0u32; 4])
+        }
+        BmpPixelFormat::Rgb555 => {
+            let (p, _) = pack_rgb555(plane, width, height, options)?;
+            (p, 16u16, BI_RGB, [0u32; 4])
         }
         BmpPixelFormat::Rgb565 => {
             let (p, _) = pack_rgb565(plane, width, height, options)?;

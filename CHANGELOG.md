@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(encode)* colour-managed encode paths now accept `Rgb555` (16-bit
+  `BI_RGB` 5-5-5): `encode_bmp_with_icc_profile` (V5 PROFILE_EMBEDDED),
+  `encode_bmp_with_linked_icc_profile` (V5 PROFILE_LINKED), and
+  `encode_bmp_with_calibrated_rgb` (V4 LCS_CALIBRATED_RGB) — emitted as
+  plain `BI_RGB` with no bitfields mask block (high bit reserved)
+
 ## [0.1.6](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.5...v0.1.6) - 2026-06-15
 
 ### Added

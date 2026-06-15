@@ -2258,6 +2258,97 @@ mod tests {
     }
 
     #[test]
+    fn v5_embedded_icc_rgb555_uses_plain_bi_rgb() {
+        // PROFILE_EMBEDDED + Rgb555: the encoder writes a 124-byte V5
+        // header with plain `BI_RGB` 5-5-5 (no bitfields mask block; the
+        // four-mask region stays zero) and parks the ICC blob in the
+        // trailing slot. The decoder reads 16-bit BI_RGB as 5-5-5.
+        let w = 2u32;
+        let h = 2u32;
+        // 0x7C00 = pure red, 0x03E0 = pure green in 5-5-5.
+        let mut data = Vec::with_capacity((w * h * 2) as usize);
+        for y in 0..h {
+            let pixel = if y == 0 { 0x7C00u16 } else { 0x03E0u16 };
+            for _ in 0..w {
+                data.extend_from_slice(&pixel.to_le_bytes());
+            }
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Rgb555,
+            planes: vec![BmpPlane {
+                stride: w as usize * 2,
+                data,
+            }],
+            palette: None,
+            pts: None,
+        };
+        let icc = b"icc:rgb555-test".to_vec();
+        let bytes =
+            encode_bmp_with_icc_profile(&src, &icc, LCS_GM_IMAGES, BmpEncodeOptions::default())
+                .expect("V5 + RGB555 ICC encode");
+        let hdr_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(hdr_size, BITMAPV5HEADER_SIZE);
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert_eq!(bpp, 16);
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_RGB, "Rgb555 → plain BI_RGB, not bitfields");
+        // Four-mask region (file offsets 54..70) is all zero for BI_RGB.
+        let masks = u128::from_le_bytes(bytes[54..70].try_into().unwrap());
+        assert_eq!(masks, 0);
+        let cs_type = u32::from_le_bytes([bytes[70], bytes[71], bytes[72], bytes[73]]);
+        assert_eq!(cs_type, PROFILE_EMBEDDED);
+
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("V5 + ICC 5-5-5 must decode");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileEmbedded));
+        assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Perceptual));
+        assert_eq!(md.icc_profile.as_deref(), Some(icc.as_slice()));
+        // Top row red, second row green. 5-5-5 → 8-bit: 0x7C00 → (255,0,0),
+        // 0x03E0 → (0,255,0).
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
+        let stride = img.planes[0].stride;
+        assert_eq!(&img.planes[0].data[stride..stride + 4], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn v5_linked_icc_rgb555_path() {
+        // PROFILE_LINKED + Rgb555: 124-byte V5 header, plain BI_RGB 5-5-5,
+        // path blob in the trailing slot. The decoder surfaces
+        // `ProfileLinked` and the profile pointer without auto-loading.
+        let w = 2u32;
+        let h = 1u32;
+        let mut data = Vec::with_capacity((w * h * 2) as usize);
+        for _ in 0..(w as usize * h as usize) {
+            data.extend_from_slice(&0x001Fu16.to_le_bytes()); // pure blue 5-5-5
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Rgb555,
+            planes: vec![BmpPlane {
+                stride: w as usize * 2,
+                data,
+            }],
+            palette: None,
+            pts: None,
+        };
+        let path = b"/profiles/disp.icc";
+        let bytes = encode_bmp_with_linked_icc_profile(&src, path, 0, BmpEncodeOptions::default())
+            .expect("V5 + RGB555 linked ICC encode");
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_RGB);
+        let cs_type = u32::from_le_bytes([bytes[70], bytes[71], bytes[72], bytes[73]]);
+        assert_eq!(cs_type, PROFILE_LINKED);
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode V5 linked 5-5-5");
+        assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(md.color_space, Some(BmpColorSpace::ProfileLinked));
+        // 0x001F = pure blue: B=31 → 8-bit (0,0,255).
+        assert_eq!(&img.planes[0].data[..4], &[0, 0, 255, 255]);
+    }
+
+    #[test]
     fn v5_linked_icc_rgb565_path() {
         // PROFILE_LINKED + Rgb565: encoder writes a 124-byte V5 header
         // with `biCompression = BI_BITFIELDS`, 5-6-5 mask quadruple in
@@ -3166,6 +3257,48 @@ mod tests {
         let r_mask = u32::from_le_bytes([bytes[54], bytes[55], bytes[56], bytes[57]]);
         assert_eq!(r_mask, 0xF800);
         let (_, md) = decode_bmp_with_metadata(&bytes).expect("decode 5-6-5");
+        assert_eq!(md.color_space, Some(BmpColorSpace::Calibrated));
+        assert_eq!(md.endpoints, Some(CAL_ENDPOINTS));
+        assert_eq!(md.gamma_rgb, Some(CAL_GAMMA));
+    }
+
+    #[test]
+    fn v4_calibrated_rgb555_uses_plain_bi_rgb() {
+        // 16-bit `Rgb555` input → plain `BI_RGB` 5-5-5 (high bit reserved,
+        // NO bitfields mask block); the V4 four-mask region stays zero.
+        // Calibrated endpoints + gamma still round-trip. Pixel 0xF800 is
+        // pure red in 5-5-5 (R in bits 14..10): R=31 → 8-bit 255.
+        let src = BmpImage {
+            width: 1,
+            height: 1,
+            pixel_format: BmpPixelFormat::Rgb555,
+            planes: vec![BmpPlane {
+                stride: 2,
+                data: vec![0x00, 0x7C], // 0x7C00 = pure red 5-5-5
+            }],
+            palette: None,
+            pts: None,
+        };
+        let bytes = encode_bmp_with_calibrated_rgb(
+            &src,
+            CAL_ENDPOINTS,
+            CAL_GAMMA,
+            BmpEncodeOptions::default(),
+        )
+        .expect("V4 calibrated 5-5-5 encode");
+        // Header is V4; biCompression is plain BI_RGB (no bitfields).
+        let header_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(header_size, BITMAPV4HEADER_SIZE);
+        let bpp = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert_eq!(bpp, 16);
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_RGB);
+        // The four-mask region (file offsets 54..70) is all zero for BI_RGB.
+        let masks = u128::from_le_bytes(bytes[54..70].try_into().unwrap());
+        assert_eq!(masks, 0, "BI_RGB 5-5-5 writes no mask quadruple");
+        let (img, md) = decode_bmp_with_metadata(&bytes).expect("decode 5-5-5");
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(&img.planes[0].data[..4], &[255, 0, 0, 255]);
         assert_eq!(md.color_space, Some(BmpColorSpace::Calibrated));
         assert_eq!(md.endpoints, Some(CAL_ENDPOINTS));
         assert_eq!(md.gamma_rgb, Some(CAL_GAMMA));
