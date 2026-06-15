@@ -15,6 +15,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `encode_bmp_with_calibrated_rgb` (V4 LCS_CALIBRATED_RGB) — emitted as
   plain `BI_RGB` with no bitfields mask block (high bit reserved)
 
+### Fixed
+
+- *(decode)* **32-bit `BI_RGB` alpha on V4 / V5 headers** (round 318):
+  the BMP spec treats the 32-bit alpha sample as valid "whenever the
+  alpha mask is present in the DIB header" — the R / G / B masks are
+  valid only under `BI_BITFIELDS`, but the alpha mask in the V4 / V5
+  in-header four-mask block applies even under `BI_RGB`. The decoder now
+  honours a V4 / V5 in-header alpha mask on a 32-bit `BI_RGB` bitmap:
+  a non-zero mask extracts the alpha sample through the mask (so a
+  non-canonical alpha-mask position decodes correctly, not just the
+  high-byte ARGB layout), while a zero alpha mask yields opaque output
+  (the same zero-mask → opaque convention `BI_ALPHABITFIELDS` and the
+  V3 alpha path already use). This fixes the otherwise-transparent
+  decode of a V4 / V5 `BI_RGB` bitmap whose reserved high bytes are
+  zero. The plain 40-byte `BITMAPINFOHEADER` (V3) `BI_RGB` path is
+  deliberately unchanged — it has no in-header alpha-mask slot, so it
+  keeps reading the reserved high byte as alpha (the behaviour the
+  crate's own 32-bit BGRA encoder relies on for a lossless RGBA
+  round-trip).
+
+### Changed
+
+- *(encode)* the V4 / V5 colour-managed encode paths
+  (`encode_bmp_with_icc_profile`, `encode_bmp_with_linked_icc_profile`,
+  `encode_bmp_with_calibrated_rgb`) now write the canonical
+  `0xFF000000` alpha mask into the header's four-mask region for
+  32-bit `Rgba` input (the format stays `BI_RGB`; R / G / B keep the
+  default BGRA byte order with their masks zero). Previously the alpha
+  was written into the reserved high byte with a zero alpha mask, which
+  a strict reader would discard; the emitted file is now a
+  spec-correct alpha-carrying V4 / V5 bitmap whose alpha the decoder
+  (this crate's and others') recovers through the mask. The on-disk
+  R / G / B bytes are unchanged.
+
 ## [0.1.6](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.5...v0.1.6) - 2026-06-15
 
 ### Added

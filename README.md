@@ -18,7 +18,8 @@ sub-images.
 | 16        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
 | 16        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
 | 24        | `BI_RGB`       | `Rgba` (BGR→RGB, α=0xFF) |
-| 32        | `BI_RGB`       | `Rgba` (BGRA→RGBA) |
+| 32        | `BI_RGB` (V3)  | `Rgba` (BGRA→RGBA, reserved byte = α) |
+| 32        | `BI_RGB` (V4/V5) | `Rgba` (BGR + in-header alpha mask; α=0xFF if mask=0) |
 | 32        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
 | 32        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
 
@@ -354,6 +355,35 @@ On V4/V5 headers the masks already live in the header body, so
 mask tails are rejected at the parser boundary; an explicit
 `alpha mask = 0` falls back to opaque output to match the
 `BI_BITFIELDS` convention.
+
+### 32-bit `BI_RGB` alpha on V4 / V5 headers
+
+The BMP spec is precise about which channels are valid for an
+uncompressed 32-bit bitmap: under `BI_RGB` the R / G / B samples occupy
+the default BGRA byte order and the per-channel R / G / B masks are
+*not* read (they are valid only under `BI_BITFIELDS`), but **the alpha
+mask is valid whenever it is present in the DIB header**. V4 / V5
+headers always reserve the four-mask block at offsets 40..56 inside the
+header body, so a V4 / V5 `BI_RGB` 32-bit bitmap can legitimately carry
+an alpha mask there. The decoder honours it: a non-zero in-header alpha
+mask makes the alpha sample valid and is extracted *through the mask*
+(so an alpha mask parked anywhere — not just the canonical high-byte
+`0xFF000000` ARGB layout — decodes correctly), while a zero alpha mask
+yields opaque output (the same zero-mask → opaque convention the
+`BI_ALPHABITFIELDS` and V3 alpha paths use). This fixes the
+otherwise-fully-transparent decode of a V4 / V5 `BI_RGB` bitmap whose
+reserved high bytes happen to be zero.
+
+The plain 40-byte `BITMAPINFOHEADER` (V3) `BI_RGB` path is deliberately
+*unchanged*: it has no in-header alpha-mask slot, so it keeps reading
+the reserved high byte directly as alpha — the behaviour this crate's
+own 32-bit BGRA encoder (`encode_bmp` → V3 `BI_RGB`) relies on for a
+lossless `Rgba` round-trip. The colour-managed V4 / V5 encode paths
+(`encode_bmp_with_icc_profile` / `_linked_icc_profile` /
+`_calibrated_rgb`) now write the canonical `0xFF000000` alpha mask for
+32-bit `Rgba` input so the file they emit is a spec-correct
+alpha-carrying bitmap rather than one that hides opacity in the
+reserved byte.
 
 ## Encode
 

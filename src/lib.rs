@@ -2003,8 +2003,13 @@ mod tests {
         let (img, md) = decode_bmp_with_metadata(&bytes).expect("V5 sRGB must decode");
         assert_eq!((img.width, img.height), (1, 1));
         // 0x80FF0011 LE on disk = [0x11, 0x00, 0xFF, 0x80] = BGRA →
-        // B=0x11, G=0x00, R=0xFF, A=0x80, surfaced as RGBA.
-        assert_eq!(&img.planes[0].data[..4], &[0xFF, 0x00, 0x11, 0x80]);
+        // B=0x11, G=0x00, R=0xFF. The high byte is 0x80, but this V5 header
+        // declares BI_RGB with a *zero* in-header alpha mask, so the alpha
+        // sample is not valid (the high byte is the reserved DWORD slot per
+        // the BI_RGB definition) and the pixel decodes opaque (A=0xFF), not
+        // A=0x80. A V5 BI_RGB bitmap that genuinely wants alpha sets a
+        // non-zero bV5AlphaMask (covered by `v5_bi_rgb_nonzero_alpha_mask_*`).
+        assert_eq!(&img.planes[0].data[..4], &[0xFF, 0x00, 0x11, 0xFF]);
         assert_eq!(md.header_size, BITMAPV5HEADER_SIZE);
         assert_eq!(md.color_space, Some(BmpColorSpace::SRgb));
         assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Unspecified));
@@ -2021,6 +2026,76 @@ mod tests {
         let bytes = build_v5_srgb_32bpp(0x00FF00FF, LCS_GM_IMAGES);
         let (_, md) = decode_bmp_with_metadata(&bytes).expect("V5 must decode");
         assert_eq!(md.rendering_intent, Some(BmpRenderingIntent::Perceptual));
+    }
+
+    /// Take a `build_v5_srgb_32bpp` byte buffer and overwrite the four
+    /// in-header R/G/B/A masks (offsets 40..56 in the DIB body, i.e. file
+    /// offsets 54..70) with the given quadruple. Used to exercise the
+    /// V5 BI_RGB in-header alpha-mask path.
+    fn with_v5_masks(mut bytes: Vec<u8>, masks_rgba: [u32; 4]) -> Vec<u8> {
+        // file header (14) + DIB body offset 40 = 54.
+        let base = 14 + 40;
+        for (i, m) in masks_rgba.iter().enumerate() {
+            bytes[base + i * 4..base + i * 4 + 4].copy_from_slice(&m.to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn v5_bi_rgb_zero_alpha_mask_is_opaque() {
+        // A V5 header declaring BI_RGB with an all-zero in-header alpha mask
+        // has no valid alpha sample: the high byte is the reserved DWORD
+        // slot, so even a non-zero high byte decodes opaque. This is the
+        // documented zero-alpha-mask → opaque convention applied to the
+        // V4/V5 BI_RGB layout (matching BI_ALPHABITFIELDS / V3-zero-alpha).
+        let bytes = build_v5_srgb_32bpp(0x00FF0011, 0); // high byte 0x00
+        let img = decode_bmp(&bytes).expect("V5 BI_RGB must decode");
+        assert_eq!(&img.planes[0].data[..4], &[0xFF, 0x00, 0x11, 0xFF]);
+        // A non-zero reserved byte must ALSO decode opaque under a zero mask.
+        let bytes = build_v5_srgb_32bpp(0x7FFF0011, 0); // high byte 0x7F
+        let img = decode_bmp(&bytes).expect("V5 BI_RGB must decode");
+        assert_eq!(&img.planes[0].data[..4], &[0xFF, 0x00, 0x11, 0xFF]);
+    }
+
+    #[test]
+    fn v5_bi_rgb_canonical_alpha_mask_honoured() {
+        // V5 BI_RGB with the canonical ARGB high-byte alpha mask
+        // (0xFF000000): the alpha sample is valid and the high byte carries
+        // opacity. R/G/B keep the default BGRA byte order (the R/G/B masks
+        // are not valid under BI_RGB, only the alpha mask is).
+        let bytes = with_v5_masks(build_v5_srgb_32bpp(0x80FF0011, 0), [0, 0, 0, 0xFF00_0000]);
+        // 0x80FF0011 LE = [0x11, 0x00, 0xFF, 0x80]: B=0x11 G=0x00 R=0xFF,
+        // alpha from the high byte via the 0xFF000000 mask = 0x80.
+        let img = decode_bmp(&bytes).expect("V5 BI_RGB alpha-mask must decode");
+        assert_eq!(&img.planes[0].data[..4], &[0xFF, 0x00, 0x11, 0x80]);
+    }
+
+    #[test]
+    fn v5_bi_rgb_noncanonical_alpha_mask_honoured() {
+        // The alpha mask need not sit in the high byte: a writer may park
+        // alpha in the low byte (0x000000FF) while R/G/B still occupy the
+        // BGRA byte order. The decoder must extract alpha through the mask,
+        // not from a fixed byte position.
+        let bytes = with_v5_masks(build_v5_srgb_32bpp(0x0011_2233, 0), [0, 0, 0, 0x0000_00FF]);
+        // 0x00112233 LE = [0x33, 0x22, 0x11, 0x00]. With the low-byte alpha
+        // mask, alpha = 0x33; B=src[0]=0x33, G=src[1]=0x22, R=src[2]=0x11.
+        let img = decode_bmp(&bytes).expect("V5 BI_RGB low-byte alpha must decode");
+        assert_eq!(&img.planes[0].data[..4], &[0x11, 0x22, 0x33, 0x33]);
+    }
+
+    #[test]
+    fn v3_bi_rgb_32bpp_still_reads_reserved_byte_as_alpha() {
+        // Guard the deliberate asymmetry: a plain 40-byte BITMAPINFOHEADER
+        // (V3) has no in-header alpha-mask slot, so the decoder keeps its
+        // historical "high byte = alpha" behaviour there (this is what the
+        // crate's own 32-bit BGRA encoder relies on for a lossless RGBA
+        // round-trip). The opaque-fallback correction is scoped to V4/V5,
+        // which carry an explicit alpha-mask slot to disambiguate.
+        let (src, _, _) = rgba_checker(4, 4); // includes a quadrant with A=128
+        let (bytes, fmt) = encode_bmp(&src).unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Rgb32);
+        let back = decode_bmp(&bytes).expect("V3 BI_RGB must decode");
+        assert_eq!(back.planes[0].data, src.planes[0].data);
     }
 
     #[test]

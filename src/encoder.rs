@@ -375,7 +375,7 @@ pub fn encode_bmp_with_icc_profile(
     let (pixels, bpp, compression, masks) = match image.pixel_format {
         BmpPixelFormat::Rgba => {
             let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
-            (p, 32u16, BI_RGB, [0u32; 4])
+            (p, 32u16, BI_RGB, RGBA32_ALPHA_MASK_V4_V5)
         }
         BmpPixelFormat::Rgb24 => {
             let (p, _) = pack_rgb24(plane, width, height, options)?;
@@ -494,7 +494,7 @@ pub fn encode_bmp_with_linked_icc_profile(
     let (pixels, bpp, compression, masks) = match image.pixel_format {
         BmpPixelFormat::Rgba => {
             let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
-            (p, 32u16, BI_RGB, [0u32; 4])
+            (p, 32u16, BI_RGB, RGBA32_ALPHA_MASK_V4_V5)
         }
         BmpPixelFormat::Rgb24 => {
             let (p, _) = pack_rgb24(plane, width, height, options)?;
@@ -604,7 +604,7 @@ pub fn encode_bmp_with_calibrated_rgb(
     let (pixels, bpp, compression, masks) = match image.pixel_format {
         BmpPixelFormat::Rgba => {
             let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
-            (p, 32u16, BI_RGB, [0u32; 4])
+            (p, 32u16, BI_RGB, RGBA32_ALPHA_MASK_V4_V5)
         }
         BmpPixelFormat::Rgb24 => {
             let (p, _) = pack_rgb24(plane, width, height, options)?;
@@ -1880,6 +1880,19 @@ fn write_dib_header_v5_with_profile(
 /// 16-bpp BI_BITFIELDS encode path so its mask region matches the V4
 /// 16-bpp encoder and the decoder's `BI_BITFIELDS` reader.
 const RGB565_MASKS_V5: [u32; 4] = [0xF800, 0x07E0, 0x001F, 0x0000];
+
+/// Canonical 32-bit alpha mask quadruple `(R=0, G=0, B=0, A=0xFF000000)`
+/// for the V4 / V5 `BmpPixelFormat::Rgba` encode paths. The format stays
+/// `BI_RGB` (so R / G / B keep the default BGRA byte order and their masks
+/// are left zero, since the R / G / B masks are only valid under
+/// `BI_BITFIELDS`), but the in-header alpha-mask slot at offset 52 is set
+/// to the canonical high-byte mask. The BMP spec treats the alpha sample
+/// as valid "whenever the alpha mask is present in the DIB header", so this
+/// makes the emitted V4 / V5 32-bit file a spec-correct alpha-carrying
+/// bitmap whose alpha the decoder recovers through the mask — rather than a
+/// `BI_RGB` file that hides opacity in the reserved DWORD byte where a
+/// strict reader would discard it.
+const RGBA32_ALPHA_MASK_V4_V5: [u32; 4] = [0, 0, 0, 0xFF00_0000];
 
 /// V5 header writer for the indexed encode paths. Layout is identical
 /// to [`write_dib_header_v5_with_profile`] except that `biCompression`

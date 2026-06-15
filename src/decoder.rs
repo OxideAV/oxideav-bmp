@@ -459,6 +459,20 @@ fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
                     ma,
                 )
             }
+        } else if compression == BI_RGB && header_size >= BITMAPV4HEADER_SIZE {
+            // V4 / V5 always reserve the four-mask block at offsets 40..56
+            // inside the header body. The BMP spec is explicit that the
+            // R / G / B masks are valid *only* under BI_BITFIELDS, but the
+            // alpha mask "is valid whenever it is present in the DIB
+            // header" (Wikipedia §"the BITFIELDS mechanism", which the
+            // BITMAPV4HEADER doc's ARGB32 example corroborates). So under
+            // BI_RGB we leave R / G / B at the default BGRA byte order
+            // (`None` → the per-bpp arm uses the fixed positions) but read
+            // the in-header alpha mask at offset 52: a non-zero value means
+            // the writer genuinely populated the high byte with alpha, and
+            // a zero value means "no alpha" → the documented opaque
+            // fall-back the BI_ALPHABITFIELDS / V3-alpha paths already use.
+            (None, None, None, Some(read_u32_le(input, 52)))
         } else {
             (None, None, None, None)
         };
@@ -1132,6 +1146,34 @@ fn decode_pixels(
                         px[1] = expand(((v & mg) >> gs) as u8, gn);
                         px[2] = expand(((v & mb) >> bs) as u8, bn);
                         px[3] = if an > 0 {
+                            expand(((v & ma) >> as_) as u8, an)
+                        } else {
+                            0xFF
+                        };
+                    }
+                }
+            } else if h.compression == BI_RGB && h.mask_a.is_some() {
+                // V4 / V5 BI_RGB carries the alpha mask in the header body.
+                // R / G / B stay at the default BGRA byte positions (the
+                // R/G/B masks are *not* valid under BI_RGB per spec), but a
+                // non-zero in-header alpha mask makes the alpha sample valid
+                // — extract it through the mask. A zero alpha mask means "no
+                // alpha", so the pixel is opaque (the same convention the
+                // BI_ALPHABITFIELDS / V3-zero-alpha paths use), which also
+                // fixes the otherwise-transparent decode of a V4 / V5
+                // BI_RGB bitmap whose reserved high bytes are all zero.
+                let ma = h.mask_a.unwrap_or(0);
+                let (as_, an) = shift_len(ma);
+                for y in 0..height {
+                    let row = &pixels[y * stride..y * stride + width * 4];
+                    let d = row_dst(y) * out_stride;
+                    let dst = &mut out[d..d + out_stride];
+                    for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                        px[0] = src[2];
+                        px[1] = src[1];
+                        px[2] = src[0];
+                        px[3] = if an > 0 {
+                            let v = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
                             expand(((v & ma) >> as_) as u8, an)
                         } else {
                             0xFF
