@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.5...v0.2.0) - 2026-06-15
+
+### Added
+
+- *(encode)* 16-bit BI_RGB 5-5-5 encode (BmpPixelFormat::Rgb555)
+- surface full 64-byte OS/2 2.x OS22XBITMAPHEADER trailing fields
+
+### Other
+
+- add `metadata` target over decode_*_with_metadata (round 300)
+- V4 calibrated-RGB path (encode_bmp_with_calibrated_rgb)
+- single-allocation flat-buffer uncompressed decode (r286 profile-opt)
+- truncated OS/2 2.x OS22XBITMAPHEADER decode (biSize 16..40) (r275)
+- typed BitmapInfoHeader parser + DibHeaderKind biSize discrimination (r268)
+- typed BitmapFileHeader parser + accessors + roundtrip (r265)
+- BITMAPV2INFOHEADER (52 B) + BITMAPV3INFOHEADER (56 B) (r261)
+- surface V3+ device-resolution + palette-count fields
+- drop release-plz.toml — use release-plz defaults across the workspace
+- typed BmpIccProfileRef accessor on V5 + linked-path field (r237)
+- V5 + ICC profile encode now accepts indexed input (r231)
+- V5 + ICC profile encode now accepts Rgb565 (BI_BITFIELDS) (r225)
+- V5 PROFILE_LINKED encode side (encode_bmp_with_linked_icc_profile) (r210)
+- V4/V5 colour-space + embedded ICC profile decode/encode (r205)
+
 ### Added
 
 - **16-bit `BI_RGB` 5-5-5 encode (`BmpPixelFormat::Rgb555`)** (round 310):
