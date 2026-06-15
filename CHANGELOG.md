@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **16-bit `BI_RGB` 5-5-5 encode (`BmpPixelFormat::Rgb555`)** (round 310):
+  a new encode-only pixel format that closes the encode/decode symmetry
+  for the canonical 16-bpp BMP form. The decoder has always read 16-bit
+  `BI_RGB` as RGB 5-5-5 (high bit reserved, R in bits 14..10, G in bits
+  9..5, B in bits 4..0); per the documented rule "for 16-bpp bitmaps, if
+  `biCompression` equals `BI_RGB`, the format is always RGB 555," that
+  layout is unambiguous and needs no `BI_BITFIELDS` mask block. The
+  encoder now emits it with a plain 40-byte `BITMAPINFOHEADER`
+  (`biBitCount = 16`, `biCompression = BI_RGB`, `bfOffBits = 14 + 40` —
+  no colour table, no mask tail). Input is one little-endian 5-5-5 `u16`
+  per pixel (the same packed wire shape `Rgb565` already accepts); the
+  packer only re-strides to the 4-byte-aligned on-disk row pitch.
+  `BmpEncodeOptions::top_down` (negative `biHeight`) is honoured, and the
+  headerless DIB helpers (`encode_dib` / `encode_dib_plane`) accept the
+  new format too (no ICO AND-mask, since a 5-5-5 word carries no alpha).
+  A new `EncodedBmpFormat::Rgb16Rgb` token is returned. The V4/V5 + ICC /
+  calibrated-RGB encode paths continue to route 16-bit colour through the
+  `Rgb565` `BI_BITFIELDS` arm (those headers carry their masks in the
+  body), so `Rgb555` there returns `Unsupported` as before for any other
+  format. Four new lib tests cover the V3 header shape + opaque-red
+  roundtrip, the top-down vertical-gradient row order, the
+  truncated-plane error, and the headerless DIB roundtrip (lib total 137).
+
 - **Full 64-byte OS/2 2.x `OS22XBITMAPHEADER` trailing-field metadata**
   (round 306): the 24 bytes that the full IBM header appends after the
   40-byte `BITMAPINFOHEADER` prefix — `usUnits` (offset 40),

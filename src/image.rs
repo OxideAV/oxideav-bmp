@@ -18,6 +18,7 @@
 /// (alpha defaulted to `0xFF`).
 ///
 /// Additional encode-only formats:
+/// * [`Rgb555`](Self::Rgb555) — 16-bit RGB 5-5-5, emit as `BI_RGB` V3.
 /// * [`Rgb565`](Self::Rgb565) — 16-bit RGB 5-6-5, emit as BI_BITFIELDS V4.
 /// * [`Indexed8`](Self::Indexed8) — 8-bit palette index; the caller must
 ///   supply a [`BmpPalette`] alongside the plane.
@@ -31,6 +32,14 @@ pub enum BmpPixelFormat {
     Rgba,
     /// 8-bit packed RGB, 3 bytes per pixel (encode input only).
     Rgb24,
+    /// 16-bit RGB 5-5-5, 2 bytes per pixel (encode input only).
+    /// Each pixel is a little-endian `u16` carrying the high bit
+    /// reserved (`0`), then R in bits 14..10, G in bits 9..5, B in bits
+    /// 4..0. Emitted with a plain `BI_RGB` `BITMAPINFOHEADER` (40 B) —
+    /// for a 16-bpp `BI_RGB` bitmap the documented layout is always
+    /// RGB 555, so no `BI_BITFIELDS` mask block is written. This is the
+    /// encode counterpart of the decoder's 16-bit `BI_RGB` 5-5-5 path.
+    Rgb555,
     /// 16-bit RGB 5-6-5, 2 bytes per pixel (encode input only).
     /// Emitted with a `BI_BITFIELDS` BITMAPV4HEADER and canonical masks
     /// R=0xF800, G=0x07E0, B=0x001F.

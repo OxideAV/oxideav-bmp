@@ -272,6 +272,157 @@ mod tests {
         assert_eq!(back.planes[0].data[3], 255); // A (opaque, no alpha in 5-6-5)
     }
 
+    #[test]
+    fn roundtrip_16bpp_rgb555() {
+        let w = 8u32;
+        let h = 6u32;
+        // 5-5-5: high bit reserved, R bits 14..10, G bits 9..5, B bits 4..0.
+        // 0x7C00 = pure red (R=0b11111, G=0, B=0).
+        let pixel = 0x7C00u16.to_le_bytes();
+        let stride = w as usize * 2;
+        let mut data = Vec::with_capacity(stride * h as usize);
+        for _ in 0..(h as usize * w as usize) {
+            data.extend_from_slice(&pixel);
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Rgb555,
+            planes: vec![BmpPlane { stride, data }],
+            palette: None,
+            pts: None,
+        };
+        let (bytes, fmt) = encode_bmp(&src).unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Rgb16Rgb);
+        assert_eq!(&bytes[..2], b"BM");
+
+        // A 16-bpp BI_RGB bitmap needs only the plain 40-byte
+        // BITMAPINFOHEADER (no BI_BITFIELDS mask block).
+        let hdr_size = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
+        assert_eq!(hdr_size, 40);
+
+        // bit-count at offset 28 = 16.
+        let bit_count = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert_eq!(bit_count, 16);
+
+        // compression at offset 30 = BI_RGB (0).
+        let compression = u32::from_le_bytes([bytes[30], bytes[31], bytes[32], bytes[33]]);
+        assert_eq!(compression, BI_RGB);
+
+        // bfOffBits at offset 10 = 14 + 40 (no colour table, no masks).
+        let off_bits = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
+        assert_eq!(off_bits, 14 + 40);
+
+        // Decode it back — each pixel should be opaque red.
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.width, w);
+        assert_eq!(back.height, h);
+        assert_eq!(back.planes[0].data[0], 255); // R
+        assert_eq!(back.planes[0].data[1], 0); // G
+        assert_eq!(back.planes[0].data[2], 0); // B
+        assert_eq!(back.planes[0].data[3], 255); // A (opaque, no alpha in 5-5-5)
+    }
+
+    #[test]
+    fn rgb555_top_down_roundtrips() {
+        // A vertical gradient so a row-order bug would surface: row y has
+        // green level y in the 5-5-5 green field (bits 9..5).
+        let w = 4u32;
+        let h = 5u32;
+        let stride = w as usize * 2;
+        let mut data = Vec::with_capacity(stride * h as usize);
+        for y in 0..h as u16 {
+            let word: u16 = (y & 0x1F) << 5; // green only
+            for _ in 0..w {
+                data.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Rgb555,
+            planes: vec![BmpPlane {
+                stride,
+                data: data.clone(),
+            }],
+            palette: None,
+            pts: None,
+        };
+        let (bytes, fmt) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fmt, EncodedBmpFormat::Rgb16Rgb);
+
+        // biHeight at offset 22 must be negative (top-down).
+        let stored_h = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+        assert_eq!(stored_h, -(h as i32));
+
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!((back.width, back.height), (w, h));
+        // Row 0 (top) carries green level 0; the green channel rises with y.
+        // expand(0,5)=0, expand(1,5) = 0b00001 → repeated to 0x08, etc.
+        // Just assert monotonic non-decreasing green down the rows and a
+        // zero top row, which a flipped order would violate.
+        let g_at = |y: usize| -> u8 {
+            let row = &back.planes[0].data[y * w as usize * 4..];
+            row[1]
+        };
+        assert_eq!(g_at(0), 0);
+        for y in 1..h as usize {
+            assert!(g_at(y) >= g_at(y - 1), "green must rise down the rows");
+        }
+        assert!(g_at(h as usize - 1) > 0);
+    }
+
+    #[test]
+    fn rgb555_truncated_plane_errors() {
+        // Plane shorter than width*height*2 must be rejected, not panic.
+        let w = 8u32;
+        let h = 8u32;
+        let stride = w as usize * 2;
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Rgb555,
+            planes: vec![BmpPlane {
+                stride,
+                data: vec![0u8; stride * (h as usize - 2)], // too short
+            }],
+            palette: None,
+            pts: None,
+        };
+        assert!(encode_bmp(&src).is_err());
+    }
+
+    #[test]
+    fn rgb555_dib_roundtrips() {
+        // Headerless DIB path (the .ico consumer surface) accepts Rgb555.
+        let w = 4u32;
+        let h = 4u32;
+        let stride = w as usize * 2;
+        let word = 0x001Fu16.to_le_bytes(); // pure blue in 5-5-5
+        let mut data = Vec::with_capacity(stride * h as usize);
+        for _ in 0..(h as usize * w as usize) {
+            data.extend_from_slice(&word);
+        }
+        let plane = BmpPlane { stride, data };
+        let dib = encode_dib_plane(&plane, BmpPixelFormat::Rgb555, None, w, h, false).unwrap();
+        // Headerless: first DWORD is the 40-byte header size.
+        let hdr_size = u32::from_le_bytes([dib[0], dib[1], dib[2], dib[3]]);
+        assert_eq!(hdr_size, 40);
+        let back = decode_dib(&dib, false).unwrap();
+        assert_eq!((back.width, back.height), (w, h));
+        assert_eq!(back.planes[0].data[0], 0); // R
+        assert_eq!(back.planes[0].data[1], 0); // G
+        assert_eq!(back.planes[0].data[2], 255); // B
+        assert_eq!(back.planes[0].data[3], 255); // A
+    }
+
     // -----------------------------------------------------------------------
     // 8-bit indexed uncompressed roundtrip
     // -----------------------------------------------------------------------

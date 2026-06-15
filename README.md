@@ -351,13 +351,23 @@ mask tails are rejected at the parser boundary; an explicit
 | ------------------- | ----------------------------- | ------ |
 | `Rgba` (4 B/px)     | 32-bit BGRA `BI_RGB`          | V3     |
 | `Rgb24` (3 B/px)    | 24-bit BGR `BI_RGB`           | V3     |
+| `Rgb555` (2 B/px)   | 16-bit `BI_RGB` 5-5-5         | V3     |
 | `Rgb565` (2 B/px)   | 16-bit `BI_BITFIELDS` 5-6-5   | V4     |
 | `Indexed8` (1 B/px) | 8-bit indexed `BI_RGB` or `BI_RLE8` (auto) | V3 |
 | `Indexed4` (1 B/px) | 4-bit indexed `BI_RGB` or `BI_RLE4` (auto) | V3 |
 | `Indexed1` (1 B/px) | 1-bit indexed `BI_RGB` (monochrome) | V3 |
 
-For `Rgb565` the V4 header carries canonical masks R=0xF800, G=0x07E0,
-B=0x001F. For 8/4-bit indexed formats the encoder tries RLE compression
+For a 16-bpp `BI_RGB` bitmap the on-disk layout is always RGB 5-5-5
+(high bit reserved, then R in bits 14..10, G in bits 9..5, B in bits
+4..0), so `Rgb555` input is emitted with a plain 40-byte
+`BITMAPINFOHEADER` and **no** `BI_BITFIELDS` mask block — the encode
+counterpart of the decoder's 16-bit `BI_RGB` 5-5-5 path. Input is one
+little-endian 5-5-5 `u16` per pixel (the same packed wire shape
+`Rgb565` accepts). `top_down` is honoured (negative `biHeight`); the
+headerless DIB helper (`encode_dib` / `encode_dib_plane`) also accepts
+`Rgb555`. For `Rgb565` the V4 header carries canonical masks R=0xF800,
+G=0x07E0, B=0x001F. For 8/4-bit indexed formats the encoder tries RLE
+compression
 first and falls back to uncompressed when RLE does not shrink the
 output. BMP has no RLE flavour at 1 bpp so `Indexed1` is always
 emitted as uncompressed `BI_RGB`.

@@ -6,6 +6,7 @@
 //! | --------------------- | ------------ | ------ |
 //! | 32-bit BGRA           | `BI_RGB`     | V3     |
 //! | 24-bit BGR            | `BI_RGB`     | V3     |
+//! | 16-bit RGB 5-5-5      | `BI_RGB`     | V3     |
 //! | 16-bit RGB 5-6-5      | `BI_BITFIELDS` | V4   |
 //! | 8-bit indexed         | `BI_RGB`     | V3     |
 //! | 4-bit indexed         | `BI_RGB`     | V3     |
@@ -20,6 +21,7 @@
 //!
 //! Input [`BmpPixelFormat::Rgba`] is accepted directly;
 //! [`BmpPixelFormat::Rgb24`] is written as 24-bit BGR.
+//! [`BmpPixelFormat::Rgb555`] is written as 16-bit BI_RGB 5-5-5 (V3 header).
 //! [`BmpPixelFormat::Rgb565`] is written as 16-bit BI_BITFIELDS (V4 header).
 //! [`BmpPixelFormat::Indexed8`] / [`BmpPixelFormat::Indexed4`] /
 //! [`BmpPixelFormat::Indexed1`] require a [`BmpPalette`] in the
@@ -82,6 +84,8 @@ pub enum EncodedBmpFormat {
     Rgb32,
     /// 24-bit BGR `BI_RGB`.
     Rgb24,
+    /// 16-bit `BI_RGB` RGB 5-5-5.
+    Rgb16Rgb,
     /// 16-bit `BI_BITFIELDS` RGB 5-6-5.
     Rgb16Bitfields,
     /// 8-bit uncompressed indexed `BI_RGB`.
@@ -278,6 +282,10 @@ pub fn encode_bmp_plane_with_options(
         BmpPixelFormat::Rgb24 => {
             let bytes = encode_direct(plane, format, width, height, BI_RGB, None, options)?;
             Ok((bytes, EncodedBmpFormat::Rgb24))
+        }
+        BmpPixelFormat::Rgb555 => {
+            let bytes = encode_rgb555(plane, width, height, options)?;
+            Ok((bytes, EncodedBmpFormat::Rgb16Rgb))
         }
         BmpPixelFormat::Rgb565 => {
             let bytes = encode_rgb565(plane, width, height, options)?;
@@ -938,6 +946,21 @@ pub fn encode_dib_plane(
             }
             Ok(out)
         }
+        BmpPixelFormat::Rgb555 => {
+            // 16-bit DIB — no ICO mask support for 16-bit (alpha is
+            // meaningless in 5-5-5 anyway). A 16-bpp `BI_RGB` DIB is
+            // unambiguously RGB 555 so a plain 40-byte header suffices.
+            let (pixels, _) = pack_rgb555(plane, width, height, opts)?;
+            let mut out = Vec::new();
+            let stored_h = if double_height_for_ico_mask {
+                (height * 2) as i32
+            } else {
+                height as i32
+            };
+            write_dib_header_v3(&mut out, width, stored_h, 16, BI_RGB, 0);
+            out.extend_from_slice(&pixels);
+            Ok(out)
+        }
         BmpPixelFormat::Rgb565 => {
             // 16-bit DIB — no ICO mask support for 16-bit (alpha is
             // meaningless in 5-6-5 anyway).
@@ -1050,6 +1073,41 @@ fn encode_direct(
         signed_stored_height(height, options),
         bpp,
         compression,
+        0,
+    );
+    out.extend_from_slice(&pixels);
+    Ok(out)
+}
+
+/// Encode 16-bit RGB 5-5-5 `BI_RGB` (V3 header) BMP.
+///
+/// For a 16-bpp bitmap whose `biCompression` is `BI_RGB` the documented
+/// pixel layout is always RGB 555 — the high bit reserved, then R in
+/// bits 14..10, G in bits 9..5, B in bits 4..0. No `BI_BITFIELDS` mask
+/// block is required (those only appear when the file declares its own
+/// non-default masks), so a plain 40-byte `BITMAPINFOHEADER` suffices:
+/// header → pixel array, with the pixel offset at `14 + 40`. The input
+/// plane carries the 555 words already packed little-endian, two bytes
+/// per pixel, so the packer only re-strides them to the 4-byte-aligned
+/// on-disk row pitch.
+fn encode_rgb555(
+    plane: &BmpPlane,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    let (pixels, _) = pack_rgb555(plane, width, height, options)?;
+    let pixel_bytes = pixels.len() as u32;
+    let file_size = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE + pixel_bytes;
+    let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE;
+    let mut out = Vec::with_capacity(file_size as usize);
+    write_file_header(&mut out, file_size, pixel_offset);
+    write_dib_header_v3(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        16,
+        BI_RGB,
         0,
     );
     out.extend_from_slice(&pixels);
@@ -1270,6 +1328,35 @@ fn pack_rgb24(
 /// Pack 16-bit RGB565 input (2 bytes/px, little-endian) to row-padded
 /// output rows. Row order honours `options.top_down`. Passes through
 /// the 16-bit pixels verbatim.
+fn pack_rgb555(
+    plane: &BmpPlane,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<(Vec<u8>, usize)> {
+    let w = width as usize;
+    let h = height as usize;
+    let in_stride = plane.stride;
+    if plane.data.len() < in_stride * h {
+        return Err(Error::invalid(
+            "BMP encoder: frame plane truncated (rgb555)",
+        ));
+    }
+    // The input already carries packed little-endian 5-5-5 words (the
+    // high bit reserved), two bytes per pixel — identical wire shape to
+    // the 5-6-5 packer. We only re-stride to the 4-byte-aligned on-disk
+    // row pitch and apply the bottom-up / top-down row order.
+    let out_stride = row_stride(w, 16);
+    let mut out = vec![0u8; out_stride * h];
+    for y in 0..h {
+        let src_y = source_row(y, h, options);
+        let src = &plane.data[src_y * in_stride..src_y * in_stride + w * 2];
+        let dst = &mut out[y * out_stride..y * out_stride + w * 2];
+        dst.copy_from_slice(src);
+    }
+    Ok((out, out_stride))
+}
+
 fn pack_rgb565(
     plane: &BmpPlane,
     width: u32,
@@ -1845,7 +1932,7 @@ fn build_and_mask_from_alpha(
     let in_stride = plane.stride;
     let bpp = match format {
         BmpPixelFormat::Rgba => 4,
-        BmpPixelFormat::Rgb24 | BmpPixelFormat::Rgb565 => {
+        BmpPixelFormat::Rgb24 | BmpPixelFormat::Rgb555 | BmpPixelFormat::Rgb565 => {
             // No alpha → fully opaque → all-zero AND mask. Short-circuit.
             return Ok(mask);
         }
