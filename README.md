@@ -35,6 +35,23 @@ Bottom-up and top-down row orders are auto-detected from the sign of
 `biHeight`; output is always top-down `Rgba`. `BI_JPEG` and `BI_PNG`
 are rejected at the boundary.
 
+### CMYK family (`BI_CMYK` / `BI_CMYKRLE8` / `BI_CMYKRLE4`)
+
+Compression values `11` / `12` / `13` are the "only Windows Metafile
+CMYK" family: an uncompressed CMYK pixel array (`BI_CMYK`, 11) and the
+same CMYK samples carried in the `BI_RLE8` (`BI_CMYKRLE8`, 12) and
+`BI_RLE4` (`BI_CMYKRLE4`, 13) run-length framings. The CMYK channel
+layout and the CMYK→RGB conversion are defined by the Windows Metafile
+(WMF) specification, not the BMP file-format material this crate works
+from, so these three are **recognised by name and rejected at the decode
+boundary** with a distinct error (`BMP: CMYK (BI_CMYK) not supported`,
+etc.) rather than the generic `unknown compression {n}` path — a CMYK
+bitmap is reported as a known-but-unsupported format instead of looking
+like a corrupt header. The `BI_CMYK` / `BI_CMYKRLE8` / `BI_CMYKRLE4`
+constants are public so callers can pre-screen. Full CMYK decode is
+blocked on a WMF-CMYK channel-order + conversion trace in
+`docs/image/bmp/`.
+
 ### Truncated OS/2 2.x `OS22XBITMAPHEADER` (16…39 B)
 
 The OS/2 2.x header (`BITMAPINFOHEADER2` in IBM's documentation) shares

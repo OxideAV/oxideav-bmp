@@ -129,6 +129,22 @@ pub const BI_PNG: u32 = 5;
 /// header body, so for those header sizes this is treated identically
 /// to `BI_BITFIELDS`.
 pub const BI_ALPHABITFIELDS: u32 = 6;
+/// `BI_CMYK` — an uncompressed CMYK pixel array ("only Windows Metafile
+/// CMYK"). The compression value is `11`. The CMYK channel layout and the
+/// CMYK→RGB conversion are defined by the Windows Metafile (WMF)
+/// specification rather than the BMP file-format material in this crate's
+/// `docs/`, so this family is recognised by name and rejected with a
+/// distinct, documented error at the decode boundary (as for `BI_JPEG` /
+/// `BI_PNG`) rather than decoded.
+pub const BI_CMYK: u32 = 11;
+/// `BI_CMYKRLE8` — a CMYK pixel array carried in the `BI_RLE8` run-length
+/// framing. The compression value is `12` ("only Windows Metafile CMYK").
+/// Recognised by name and rejected at the decode boundary (see [`BI_CMYK`]).
+pub const BI_CMYKRLE8: u32 = 12;
+/// `BI_CMYKRLE4` — a CMYK pixel array carried in the `BI_RLE4` run-length
+/// framing. The compression value is `13` ("only Windows Metafile CMYK").
+/// Recognised by name and rejected at the decode boundary (see [`BI_CMYK`]).
+pub const BI_CMYKRLE4: u32 = 13;
 
 // ---------------------------------------------------------------------------
 // V4 / V5 colour-space (`bV4CSType` / `bV5CSType`) constants

@@ -65,11 +65,11 @@ pub use types::{
     row_stride, BitmapFileHeader, BitmapInfoHeader, DibHeader, DibHeaderKind,
     BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE, BITMAPV2INFOHEADER_SIZE,
     BITMAPV3INFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_ALPHABITFIELDS,
-    BI_BITFIELDS, BI_RGB, BMP_MAGIC, LCS_CALIBRATED_RGB, LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS,
-    LCS_GM_GRAPHICS, LCS_GM_IMAGES, LCS_S_RGB, LCS_WINDOWS_COLOR_SPACE, OS22XBITMAPHEADER_SIZE,
-    OS2_COLOR_ENCODING_RGB, OS2_HALFTONE_ERROR_DIFFUSION, OS2_HALFTONE_NONE, OS2_HALFTONE_PANDA,
-    OS2_HALFTONE_SUPER_CIRCLE, OS2_RECORDING_BOTTOM_UP, OS2_UNITS_PELS_PER_METER, PROFILE_EMBEDDED,
-    PROFILE_LINKED,
+    BI_BITFIELDS, BI_CMYK, BI_CMYKRLE4, BI_CMYKRLE8, BI_RGB, BMP_MAGIC, LCS_CALIBRATED_RGB,
+    LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS, LCS_GM_GRAPHICS, LCS_GM_IMAGES, LCS_S_RGB,
+    LCS_WINDOWS_COLOR_SPACE, OS22XBITMAPHEADER_SIZE, OS2_COLOR_ENCODING_RGB,
+    OS2_HALFTONE_ERROR_DIFFUSION, OS2_HALFTONE_NONE, OS2_HALFTONE_PANDA, OS2_HALFTONE_SUPER_CIRCLE,
+    OS2_RECORDING_BOTTOM_UP, OS2_UNITS_PELS_PER_METER, PROFILE_EMBEDDED, PROFILE_LINKED,
 };
 
 #[cfg(feature = "registry")]
@@ -1505,6 +1505,70 @@ mod tests {
         // vector → OOM-abort. bpp is now validated up front.
         let input = raw_bmp(4, 134_283_268, 0, BI_RGB, 66, 3, &[0u8; 64]);
         assert!(decode_bmp(&input).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // CMYK family (BI_CMYK / BI_CMYKRLE8 / BI_CMYKRLE4) — recognised but
+    // unsupported. The WMF-defined CMYK→RGB conversion is outside this
+    // crate's BMP docs, so a CMYK bitmap is rejected with a distinct,
+    // named error rather than the generic "unknown compression" path.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cmyk_compression_constants_match_spec() {
+        // The Wikipedia BMP compression-ID table: 11 / 12 / 13.
+        assert_eq!(BI_CMYK, 11);
+        assert_eq!(BI_CMYKRLE8, 12);
+        assert_eq!(BI_CMYKRLE4, 13);
+    }
+
+    #[test]
+    fn bi_cmyk_rejected_with_named_error() {
+        // 32-bpp uncompressed CMYK body — enough bytes for a 1×1 grid.
+        let input = raw_bmp(1, 1, 32, BI_CMYK, 54, 0, &[0u8; 4]);
+        let err = decode_bmp(&input).expect_err("BI_CMYK must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("CMYK") && msg.contains("BI_CMYK"),
+            "error should name the CMYK family: {msg}"
+        );
+    }
+
+    #[test]
+    fn bi_cmykrle8_rejected_with_named_error() {
+        let input = raw_bmp(1, 1, 8, BI_CMYKRLE8, 1078, 256, &[0u8; 8]);
+        let err = decode_bmp(&input).expect_err("BI_CMYKRLE8 must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("CMYK") && msg.contains("BI_CMYKRLE8"),
+            "error should name BI_CMYKRLE8: {msg}"
+        );
+    }
+
+    #[test]
+    fn bi_cmykrle4_rejected_with_named_error() {
+        let input = raw_bmp(1, 1, 4, BI_CMYKRLE4, 1078, 16, &[0u8; 8]);
+        let err = decode_bmp(&input).expect_err("BI_CMYKRLE4 must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("CMYK") && msg.contains("BI_CMYKRLE4"),
+            "error should name BI_CMYKRLE4: {msg}"
+        );
+    }
+
+    #[test]
+    fn cmyk_family_never_panics_on_truncated_body() {
+        // Regression-style: a CMYK declaration with an empty / short body
+        // must still error cleanly (no panic, no OOM) rather than reaching
+        // a pixel decode path that doesn't exist for this family.
+        for comp in [BI_CMYK, BI_CMYKRLE8, BI_CMYKRLE4] {
+            let bpp = if comp == BI_CMYKRLE4 { 4 } else { 8 };
+            let input = raw_bmp(64, 64, bpp, comp, 54, 0, &[]);
+            assert!(
+                decode_bmp(&input).is_err(),
+                "CMYK compression {comp} must error, not decode"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

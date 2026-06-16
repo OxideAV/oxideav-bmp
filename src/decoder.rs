@@ -742,6 +742,24 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
         BI_RGB | BI_BITFIELDS | BI_ALPHABITFIELDS | BI_RLE4 | BI_RLE8 => {}
         BI_JPEG => return Err(Error::invalid("BMP: embedded JPEG not supported")),
         BI_PNG => return Err(Error::invalid("BMP: embedded PNG not supported")),
+        // The CMYK family (compression 11 / 12 / 13, "only Windows Metafile
+        // CMYK") stores CMYK samples whose channel layout and CMYK→RGB
+        // conversion are defined by the WMF spec, not the BMP file-format
+        // material available to this crate. Recognise them by name and reject
+        // with a distinct message rather than the generic "unknown
+        // compression" path, so a CMYK bitmap is reported as a known-but-
+        // unsupported format instead of looking like a corrupt header.
+        BI_CMYK => return Err(Error::invalid("BMP: CMYK (BI_CMYK) not supported")),
+        BI_CMYKRLE8 => {
+            return Err(Error::invalid(
+                "BMP: CMYK RLE-8 (BI_CMYKRLE8) not supported",
+            ))
+        }
+        BI_CMYKRLE4 => {
+            return Err(Error::invalid(
+                "BMP: CMYK RLE-4 (BI_CMYKRLE4) not supported",
+            ))
+        }
         c => return Err(Error::invalid(format!("BMP: unknown compression {c}"))),
     }
 

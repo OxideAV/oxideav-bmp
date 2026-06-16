@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(decode)* **CMYK compression family recognised by name** (round 322):
+  the `BI_CMYK` (11), `BI_CMYKRLE8` (12), and `BI_CMYKRLE4` (13)
+  "Windows Metafile CMYK" compression values now have public constants
+  and are rejected at the decode boundary with a distinct, named error
+  (`BMP: CMYK (BI_CMYK) not supported`, etc.) instead of the generic
+  `unknown compression {n}` path. The WMF-defined CMYK channel layout
+  and CMYK→RGB conversion are outside this crate's BMP docs, so full
+  decode stays blocked; a CMYK bitmap is now reported as a
+  known-but-unsupported format rather than looking like a corrupt header.
 - *(encode)* colour-managed encode paths now accept `Rgb555` (16-bit
   `BI_RGB` 5-5-5): `encode_bmp_with_icc_profile` (V5 PROFILE_EMBEDDED),
   `encode_bmp_with_linked_icc_profile` (V5 PROFILE_LINKED), and
