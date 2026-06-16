@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(decode)* **`bfOffBits` recovery for minimal / corrupt writers**
+  (round 327): when the `BITMAPFILEHEADER` `bfOffBits` field is `0`
+  (left unset by minimal encoders) or points implausibly early — inside
+  the DIB header or colour table — the decoder now recovers the
+  canonical pixel-array offset (file header → DIB header → bit-field mask
+  block → colour table → pixels, per the spec's *Bitmap Storage* layout)
+  instead of reading header / palette bytes as pixels or failing the
+  truncation check. A `bfOffBits` at or past the canonical position is
+  still honoured verbatim, so a writer's deliberate gap between the
+  colour table and the pixels survives. Both `decode_bmp` and
+  `decode_bmp_with_metadata` share the resolution; the
+  header→masks→colour-table offset maths is now a single
+  `canonical_dib_pixel_offset` helper (previously duplicated across the
+  three `decode_dib*` entry points).
 - *(decode)* **CMYK compression family recognised by name** (round 322):
   the `BI_CMYK` (11), `BI_CMYKRLE8` (12), and `BI_CMYKRLE4` (13)
   "Windows Metafile CMYK" compression values now have public constants

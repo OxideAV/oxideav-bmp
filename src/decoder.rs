@@ -113,9 +113,13 @@ pub fn decode_bmp(input: &[u8]) -> Result<BmpImage> {
         return Err(Error::invalid("BMP: input shorter than header"));
     }
     let file_header = BitmapFileHeader::parse(input)?;
-    let pixel_offset = file_header.pixel_offset as usize;
     let dib = &input[BITMAPFILEHEADER_SIZE as usize..];
-    decode_dib_with_offset(dib, input, pixel_offset)
+    let (header, _) = parse_dib_header(dib)?;
+    // Honour `bfOffBits` when it lands at/after the canonical pixel
+    // position (so a writer's deliberate gap survives); recover the
+    // canonical offset when it is 0 or points implausibly early.
+    let pixel_offset = resolve_file_pixel_offset(file_header.pixel_offset as usize, &header);
+    decode_dib_payload(&header, input, pixel_offset)
 }
 
 /// Decode a headerless DIB (`BITMAPINFOHEADER` + pixels, no
@@ -131,35 +135,9 @@ pub fn decode_bmp(input: &[u8]) -> Result<BmpImage> {
 pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<BmpImage> {
     let (header, _header_bytes) = parse_dib_header(input)?;
     // For a "pure" DIB, pixel data starts right after the header (plus
-    // any bitfields masks and color table). Compute the offset the same
-    // way `decode_bmp` does via `pixel_offset` so the two paths share
-    // the pixel-decode. OS/2 BITMAPCOREHEADER uses 3-byte palette
-    // entries (RGBTRIPLE), every other variant uses 4-byte RGBQUAD.
-    //
-    // `palette_entries()` is bounded only by the attacker-supplied
-    // `clr_used` (up to `u32::MAX`), so this product must be done in
-    // `usize` — the old `as u32` multiply overflowed (`clr_used =
-    // 0xFFFF_FFFF` * 4 wraps) and aborted the process. `read_palette`
-    // re-validates the entry count against the actual byte count, so a
-    // wildly-large `pixel_start` simply fails the bounds checks there.
-    let entry_size = palette_entry_bytes(&header);
-    let color_table_bytes = header.palette_entries().saturating_mul(entry_size);
-    // V3 (40-byte) BI_BITFIELDS appends 12 bytes (R/G/B) of masks after
-    // the header; V3 BI_ALPHABITFIELDS appends 16 bytes (R/G/B/A). V4/V5
-    // headers carry the masks inside the header body so contribute no
-    // extra appended bytes.
-    let masks_bytes = if header.header_size == BITMAPINFOHEADER_SIZE {
-        match header.compression {
-            BI_BITFIELDS => 12usize,
-            BI_ALPHABITFIELDS => 16usize,
-            _ => 0usize,
-        }
-    } else {
-        0usize
-    };
-    let pixel_start = (header.header_size as usize)
-        .saturating_add(masks_bytes)
-        .saturating_add(color_table_bytes);
+    // any bit-field masks and colour table) — the canonical layout
+    // `canonical_dib_pixel_offset` computes, shared with the file path.
+    let pixel_start = canonical_dib_pixel_offset(&header);
     if dib_height_is_doubled_for_mask {
         decode_dib_with_mask(&header, input, pixel_start)
     } else {
@@ -193,9 +171,9 @@ pub fn decode_bmp_with_metadata(input: &[u8]) -> Result<(BmpImage, BmpMetadata)>
         return Err(Error::invalid("BMP: input shorter than header"));
     }
     let file_header = BitmapFileHeader::parse(input)?;
-    let pixel_offset = file_header.pixel_offset as usize;
     let dib = &input[BITMAPFILEHEADER_SIZE as usize..];
     let (header, _) = parse_dib_header(dib)?;
+    let pixel_offset = resolve_file_pixel_offset(file_header.pixel_offset as usize, &header);
     let image = decode_dib_payload(&header, input, pixel_offset)?;
     let mut metadata = BmpMetadata::from_header(&header);
     // Embedded ICC blobs sit after the pixel array. The offset is given
@@ -234,20 +212,7 @@ pub fn decode_dib_with_metadata(
     dib_height_is_doubled_for_mask: bool,
 ) -> Result<(BmpImage, BmpMetadata)> {
     let (header, _header_bytes) = parse_dib_header(input)?;
-    let entry_size = palette_entry_bytes(&header);
-    let color_table_bytes = header.palette_entries().saturating_mul(entry_size);
-    let masks_bytes = if header.header_size == BITMAPINFOHEADER_SIZE {
-        match header.compression {
-            BI_BITFIELDS => 12usize,
-            BI_ALPHABITFIELDS => 16usize,
-            _ => 0usize,
-        }
-    } else {
-        0usize
-    };
-    let pixel_start = (header.header_size as usize)
-        .saturating_add(masks_bytes)
-        .saturating_add(color_table_bytes);
+    let pixel_start = canonical_dib_pixel_offset(&header);
     let image = if dib_height_is_doubled_for_mask {
         decode_dib_with_mask(&header, input, pixel_start)?
     } else {
@@ -338,11 +303,6 @@ pub fn decode_dib_videoframe(
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
-
-fn decode_dib_with_offset(dib: &[u8], whole_file: &[u8], pixel_offset: usize) -> Result<BmpImage> {
-    let (header, _) = parse_dib_header(dib)?;
-    decode_dib_payload(&header, whole_file, pixel_offset)
-}
 
 fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
     if input.len() < 4 {
@@ -912,6 +872,70 @@ fn palette_entry_bytes(h: &DibHeader) -> usize {
         3
     } else {
         4
+    }
+}
+
+/// Canonical DIB-relative offset of the pixel array: the DIB header,
+/// followed by the appended bit-field mask block (V3 `BI_BITFIELDS` /
+/// `BI_ALPHABITFIELDS` only — V4/V5 carry the masks inside the header
+/// body), followed by the colour table. This is the byte position the
+/// pixel bits occupy in the standard, gap-free BMP layout the spec's
+/// "Bitmap Storage" section describes (header → masks → colour table →
+/// pixels). It is measured from the start of the DIB header, so a
+/// headerless DIB uses it directly and a BMP file adds the 14-byte
+/// `BITMAPFILEHEADER` (see [`canonical_file_pixel_offset`]).
+///
+/// All arithmetic saturates because the colour-table size is bounded
+/// only by the attacker-controlled `biClrUsed` (up to `u32::MAX`); the
+/// downstream pixel/palette bounds checks reject an implausibly large
+/// result.
+fn canonical_dib_pixel_offset(h: &DibHeader) -> usize {
+    let entry_size = palette_entry_bytes(h);
+    let color_table_bytes = h.palette_entries().saturating_mul(entry_size);
+    // The appended mask block exists only on the 40-byte V3 header; the
+    // intermediate Adobe V2 (52 B) / V3 (56 B) and the V4 / V5 headers
+    // all carry their masks inside the header body.
+    let masks_bytes = if h.header_size == BITMAPINFOHEADER_SIZE {
+        match h.compression {
+            BI_BITFIELDS => 12usize,
+            BI_ALPHABITFIELDS => 16usize,
+            _ => 0usize,
+        }
+    } else {
+        0usize
+    };
+    (h.header_size as usize)
+        .saturating_add(masks_bytes)
+        .saturating_add(color_table_bytes)
+}
+
+/// Canonical file-relative pixel-array offset: the 14-byte
+/// `BITMAPFILEHEADER` plus [`canonical_dib_pixel_offset`].
+fn canonical_file_pixel_offset(h: &DibHeader) -> usize {
+    (BITMAPFILEHEADER_SIZE as usize).saturating_add(canonical_dib_pixel_offset(h))
+}
+
+/// Resolve the pixel-array offset for a BMP *file* given the stored
+/// `bfOffBits` and the parsed DIB header.
+///
+/// `bfOffBits` is the spec-blessed source of truth (it lets a writer
+/// leave a gap between the colour table and the pixels), so a value that
+/// lands at or past the canonical position is honoured verbatim. But a
+/// non-trivial population of in-the-wild minimal encoders write
+/// `bfOffBits = 0` (the field is simply left unset), and a corrupt or
+/// lazy writer can leave a value that points *inside* the header /
+/// colour table. Either way the stored offset cannot be where the pixels
+/// actually start, so we fall back to the canonical layout the
+/// "Bitmap Storage" section defines (file header → DIB header → masks →
+/// colour table → pixels). This only ever moves the read forward to the
+/// earliest byte the pixels could legally occupy; a larger, valid
+/// `bfOffBits` is left untouched so legitimate gaps still work.
+fn resolve_file_pixel_offset(stored: usize, h: &DibHeader) -> usize {
+    let canonical = canonical_file_pixel_offset(h);
+    if stored >= canonical {
+        stored
+    } else {
+        canonical
     }
 }
 

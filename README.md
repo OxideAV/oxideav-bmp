@@ -137,6 +137,26 @@ let _ = h.reserved_is_clean();        // bfReserved1/2 zero per the spec
 header parse through this struct, so the "shorter than header" and
 "missing 'BM' signature" error messages come from a single source.
 
+### `bfOffBits` recovery (zero / implausibly-early offset)
+
+`bfOffBits` is the spec's source of truth for where the pixel array
+starts — a writer may leave a gap between the colour table and the
+pixels, and the decoder honours any value that lands at or past the
+canonical position. But minimal encoders frequently leave the field
+unset (`bfOffBits = 0`), and a corrupt or lazy writer can point it
+*inside* the DIB header or colour table; in either case the stored
+offset cannot be where the pixels actually begin. The decoder now
+recovers the canonical pixel-array offset — file header → DIB header →
+bit-field mask block (V3 `BI_BITFIELDS` / `BI_ALPHABITFIELDS` only) →
+colour table → pixels, the layout the *Bitmap Storage* material
+describes — instead of reading header / palette bytes as pixels or
+tripping the "pixel array truncated" check. The recovery only ever
+moves the read *forward* to the earliest byte the pixels could legally
+occupy, so a larger, valid `bfOffBits` (a deliberate gap) is left
+untouched. `decode_bmp` and `decode_bmp_with_metadata` share the
+resolution; the headerless `decode_dib` path already used the canonical
+layout and is unchanged.
+
 ### Typed `BitmapInfoHeader` view + `DibHeaderKind`
 
 The 40-byte `BITMAPINFOHEADER` that opens every V3-and-later DIB is

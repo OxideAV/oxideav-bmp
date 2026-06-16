@@ -3564,4 +3564,121 @@ mod tests {
         assert_eq!(md.endpoints, Some([0; 9]));
         assert_eq!(md.gamma_rgb, Some([0; 3]));
     }
+
+    // ---- bfOffBits recovery -------------------------------------------
+    //
+    // `bfOffBits` is the spec source of truth for where the pixel array
+    // begins, but minimal/corrupt writers leave it zero (or point it
+    // inside the header / colour table). The decoder recovers the
+    // canonical layout (file header → DIB header → masks → colour table
+    // → pixels) when the stored value cannot be where the pixels start.
+
+    /// Overwrite the 4-byte little-endian `bfOffBits` field (file bytes
+    /// 10..14) of an encoded BMP.
+    fn set_off_bits(bytes: &mut [u8], value: u32) {
+        bytes[10..14].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn read_off_bits(bytes: &[u8]) -> u32 {
+        u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]])
+    }
+
+    #[test]
+    fn zero_off_bits_recovers_pixels_32bpp() {
+        let (src, _, _) = rgba_checker(7, 5);
+        let (mut bytes, _) = encode_bmp(&src).unwrap();
+        // Reference decode with the writer's correct bfOffBits.
+        let want = decode_bmp(&bytes).unwrap();
+        // A minimal writer that left bfOffBits unset (0) must still decode.
+        set_off_bits(&mut bytes, 0);
+        let got = decode_bmp(&bytes).expect("zero bfOffBits recovers");
+        assert_eq!(got.planes[0].data, want.planes[0].data);
+    }
+
+    #[test]
+    fn zero_off_bits_recovers_pixels_indexed8() {
+        // Indexed paths carry a colour table between the header and the
+        // pixels, so the recovered offset must skip both the header and
+        // the full RGBQUAD table.
+        let palette = BmpPalette {
+            entries: (0..=255u32)
+                .map(|i| [i as u8, (255 - i) as u8, (i.wrapping_mul(3)) as u8])
+                .collect(),
+        };
+        let w = 9u32;
+        let h = 6u32;
+        let stride = w as usize;
+        let mut idx = vec![0u8; stride * h as usize];
+        for (n, b) in idx.iter_mut().enumerate() {
+            *b = (n % 256) as u8;
+        }
+        let src = BmpImage {
+            width: w,
+            height: h,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data: idx }],
+            palette: Some(palette),
+            pts: None,
+        };
+        // Force the uncompressed path so the on-disk layout is the
+        // canonical header → 256-entry colour table → pixels.
+        let (mut bytes, _) = encode_bmp_with_options(
+            &src,
+            BmpEncodeOptions {
+                top_down: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let want = decode_bmp(&bytes).unwrap();
+        set_off_bits(&mut bytes, 0);
+        let got = decode_bmp(&bytes).expect("zero bfOffBits recovers (indexed8)");
+        assert_eq!(got.planes[0].data, want.planes[0].data);
+    }
+
+    #[test]
+    fn off_bits_pointing_into_header_is_recovered() {
+        // A value that lands inside the DIB header / colour table cannot
+        // be the pixel start; recovery moves it forward to the canonical
+        // position rather than reading header bytes as pixels.
+        let (src, _, _) = rgba_checker(4, 4);
+        let (mut bytes, _) = encode_bmp(&src).unwrap();
+        let want = decode_bmp(&bytes).unwrap();
+        // 20 points 6 bytes into the 40-byte DIB header.
+        set_off_bits(&mut bytes, 20);
+        let got = decode_bmp(&bytes).expect("early bfOffBits recovers");
+        assert_eq!(got.planes[0].data, want.planes[0].data);
+    }
+
+    #[test]
+    fn larger_off_bits_gap_is_honoured() {
+        // A writer is allowed to leave a gap between the colour table and
+        // the pixel array; a `bfOffBits` at or past the canonical offset
+        // must be honoured verbatim (not clamped back to canonical).
+        let (src, _, _) = rgba_checker(4, 4);
+        let (orig, _) = encode_bmp(&src).unwrap();
+        let canonical = read_off_bits(&orig) as usize;
+        let want = decode_bmp(&orig).unwrap();
+        // Insert an 8-byte gap right before the pixel array and bump
+        // bfOffBits to match.
+        let mut bytes = Vec::with_capacity(orig.len() + 8);
+        bytes.extend_from_slice(&orig[..canonical]);
+        bytes.extend_from_slice(&[0u8; 8]);
+        bytes.extend_from_slice(&orig[canonical..]);
+        set_off_bits(&mut bytes, (canonical + 8) as u32);
+        let got = decode_bmp(&bytes).expect("gap honoured");
+        assert_eq!(got.planes[0].data, want.planes[0].data);
+    }
+
+    #[test]
+    fn zero_off_bits_recovers_metadata_path() {
+        // The `_with_metadata` entry point shares the same offset
+        // resolution, so it recovers too.
+        let (src, _, _) = rgba_checker(5, 3);
+        let (mut bytes, _) = encode_bmp(&src).unwrap();
+        let (want, _) = decode_bmp_with_metadata(&bytes).unwrap();
+        set_off_bits(&mut bytes, 0);
+        let (got, _) = decode_bmp_with_metadata(&bytes).expect("metadata path recovers");
+        assert_eq!(got.planes[0].data, want.planes[0].data);
+    }
 }
