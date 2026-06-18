@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(encode)* **Windows CE 2-bit/pixel indexed output** (round 334): the
+  new `BmpPixelFormat::Indexed2` encode format is the symmetric
+  counterpart of the round-330 2-bpp decoder. Input is one byte per
+  pixel carrying a 0..=3 index (only the low two bits are read); the
+  encoder packs four pixels per byte with the left-most pixel in the
+  two most-significant bits and emits a plain 40-byte V3 `BI_RGB`
+  header with a 4-entry colour table (BMP defines no RLE flavour at
+  2 bpp, so the output is always uncompressed). `top_down` (negative
+  `biHeight`) and `minimal_palette` (trim the on-disk table, clamped to
+  `[1, 4]`, with the exact `biClrUsed`) are honoured, matching the
+  `Indexed1` / `Indexed4` / `Indexed8` arms; the headerless `encode_dib`
+  path and the V4-calibrated / V5 + ICC colour-managed indexed encoders
+  accept it too. A new `EncodedBmpFormat::Indexed2` variant reports the
+  chosen on-disk shape. The 2-bpp pixels round-trip bit-exact through
+  `decode_bmp`.
 - *(decode)* **Windows CE 2-bit/pixel indexed depth** (round 330): the
   `2` bpp pixel format documented for Windows CE is now decoded — four
   pixels pack per byte with the left-most pixel in the two

@@ -436,6 +436,7 @@ reserved byte.
 | `Rgb565` (2 B/px)   | 16-bit `BI_BITFIELDS` 5-6-5   | V4     |
 | `Indexed8` (1 B/px) | 8-bit indexed `BI_RGB` or `BI_RLE8` (auto) | V3 |
 | `Indexed4` (1 B/px) | 4-bit indexed `BI_RGB` or `BI_RLE4` (auto) | V3 |
+| `Indexed2` (1 B/px) | 2-bit indexed `BI_RGB` (Windows CE, 4-entry palette) | V3 |
 | `Indexed1` (1 B/px) | 1-bit indexed `BI_RGB` (monochrome) | V3 |
 
 For a 16-bpp `BI_RGB` bitmap the on-disk layout is always RGB 5-5-5
@@ -450,14 +451,23 @@ headerless DIB helper (`encode_dib` / `encode_dib_plane`) also accepts
 G=0x07E0, B=0x001F. For 8/4-bit indexed formats the encoder tries RLE
 compression
 first and falls back to uncompressed when RLE does not shrink the
-output. BMP has no RLE flavour at 1 bpp so `Indexed1` is always
-emitted as uncompressed `BI_RGB`.
+output. BMP has no RLE flavour at 2 bpp or 1 bpp, so `Indexed2` and
+`Indexed1` are always emitted as uncompressed `BI_RGB`.
 
-`Indexed8`, `Indexed4`, and `Indexed1` all require a `BmpPalette`
-alongside the image: up to 256 (8-bit), 16 (4-bit), or 2 (1-bit)
-entries. Pixel-byte inputs carry `idx & 0xFF` / `idx & 0x0F` /
-`idx & 1` respectively; the encoder packs them MSB-first per the BMP
-spec. Unused entries are zero-padded in the on-disk colour table; set
+`Indexed2` is the encode counterpart of the decoder's Windows CE
+2-bit/pixel path: four pixels pack per byte with the left-most pixel
+in the two most-significant bits, each a 2-bit index into a 4-entry
+colour table. Input is one byte per pixel (`idx & 0x03`), emitted with
+a plain 40-byte `BITMAPINFOHEADER` (V3 `BI_RGB`). `top_down`,
+`minimal_palette`, and the headerless DIB helper all apply exactly as
+they do for the other indexed depths.
+
+`Indexed8`, `Indexed4`, `Indexed2`, and `Indexed1` all require a
+`BmpPalette` alongside the image: up to 256 (8-bit), 16 (4-bit), 4
+(2-bit), or 2 (1-bit) entries. Pixel-byte inputs carry
+`idx & 0xFF` / `idx & 0x0F` / `idx & 0x03` / `idx & 1` respectively;
+the encoder packs them MSB-first per the BMP spec. Unused entries are
+zero-padded in the on-disk colour table; set
 `minimal_palette = true` to record only the entries actually supplied.
 
 ### Minimal colour table (`biClrUsed`)

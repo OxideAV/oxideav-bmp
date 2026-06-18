@@ -24,6 +24,9 @@
 ///   supply a [`BmpPalette`] alongside the plane.
 /// * [`Indexed4`](Self::Indexed4) — 4-bit palette index (hi-nibble = left
 ///   pixel); caller must supply a [`BmpPalette`] of up to 16 entries.
+/// * [`Indexed2`](Self::Indexed2) — 2-bit palette index (left-most pixel in
+///   the two most-significant bits); caller must supply a [`BmpPalette`] of
+///   up to 4 entries.
 /// * [`Indexed1`](Self::Indexed1) — 1-bit palette index (MSB = leftmost
 ///   pixel); caller must supply a [`BmpPalette`] of up to 2 entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +53,14 @@ pub enum BmpPixelFormat {
     /// 4-bit palette index, hi-nibble = left pixel (encode input only).
     /// Must be paired with a [`BmpPalette`] of up to 16 entries.
     Indexed4,
+    /// 2-bit palette index, left-most pixel in the two most-significant
+    /// bits (encode input only). Four pixels pack per byte. Input is one
+    /// byte per pixel carrying values 0..=3 (only the low two bits are
+    /// read); the encoder packs them into the on-disk 2-bpp layout used
+    /// by Windows CE indexed bitmaps. Must be paired with a [`BmpPalette`]
+    /// of up to 4 entries. Always emitted uncompressed `BI_RGB` (BMP
+    /// defines no RLE flavour at 2 bpp).
+    Indexed2,
     /// 1-bit palette index, MSB = leftmost pixel (encode input only).
     /// Input is 1 byte per pixel carrying values 0 or 1; the encoder
     /// packs the byte stream into the on-disk 1-bpp layout. Must be
@@ -67,7 +78,10 @@ impl BmpPixelFormat {
     pub fn is_indexed(self) -> bool {
         matches!(
             self,
-            BmpPixelFormat::Indexed8 | BmpPixelFormat::Indexed4 | BmpPixelFormat::Indexed1
+            BmpPixelFormat::Indexed8
+                | BmpPixelFormat::Indexed4
+                | BmpPixelFormat::Indexed2
+                | BmpPixelFormat::Indexed1
         )
     }
 }
@@ -75,8 +89,9 @@ impl BmpPixelFormat {
 /// A colour palette for use with indexed BMP formats.
 ///
 /// Each entry is `[R, G, B]` (24-bit sRGB). Up to 256 entries for 8-bit
-/// mode; up to 16 for 4-bit mode; up to 2 for 1-bit mode. The encoder
-/// writes the entries in the BMP on-disk order (B, G, R, 0x00).
+/// mode; up to 16 for 4-bit mode; up to 4 for 2-bit mode; up to 2 for
+/// 1-bit mode. The encoder writes the entries in the BMP on-disk order
+/// (B, G, R, 0x00).
 #[derive(Debug, Clone, Default)]
 pub struct BmpPalette {
     /// Colour entries in `[R, G, B]` order.

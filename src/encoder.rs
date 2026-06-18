@@ -92,6 +92,8 @@ pub enum EncodedBmpFormat {
     Indexed8,
     /// 4-bit uncompressed indexed `BI_RGB`.
     Indexed4,
+    /// 2-bit uncompressed indexed `BI_RGB` (Windows CE 4-colour).
+    Indexed2,
     /// 8-bit RLE-compressed indexed `BI_RLE8`.
     Rle8,
     /// 4-bit RLE-compressed indexed `BI_RLE4`.
@@ -300,6 +302,13 @@ pub fn encode_bmp_plane_with_options(
             let pal = palette
                 .ok_or_else(|| Error::invalid("BMP encoder: Indexed4 requires a palette"))?;
             encode_indexed4_auto(plane, pal, width, height, options)
+        }
+        BmpPixelFormat::Indexed2 => {
+            let pal = palette
+                .ok_or_else(|| Error::invalid("BMP encoder: Indexed2 requires a palette"))?;
+            let (raw_pixels, _) = pack_indexed(plane, 2, width, height, options)?;
+            let file = build_indexed_bmp(width, height, 2, BI_RGB, pal, &raw_pixels, options);
+            Ok((file, EncodedBmpFormat::Indexed2))
         }
         BmpPixelFormat::Indexed1 => {
             let pal = palette
@@ -674,6 +683,7 @@ fn encode_bmp_v4_indexed_calibrated(
     let bpp: u16 = match image.pixel_format {
         BmpPixelFormat::Indexed8 => 8,
         BmpPixelFormat::Indexed4 => 4,
+        BmpPixelFormat::Indexed2 => 2,
         BmpPixelFormat::Indexed1 => 1,
         _ => {
             return Err(Error::invalid(
@@ -762,6 +772,7 @@ fn encode_bmp_v5_indexed_with_profile_blob(
     let bpp: u16 = match image.pixel_format {
         BmpPixelFormat::Indexed8 => 8,
         BmpPixelFormat::Indexed4 => 4,
+        BmpPixelFormat::Indexed2 => 2,
         BmpPixelFormat::Indexed1 => 1,
         _ => {
             return Err(Error::invalid(
@@ -1018,6 +1029,21 @@ pub fn encode_dib_plane(
             let mut out = Vec::new();
             let entries = written_palette_entries(4, pal, opts);
             write_dib_header_v3_indexed(&mut out, width, stored_h, 4, BI_RGB, pal, entries);
+            out.extend_from_slice(&pixels);
+            Ok(out)
+        }
+        BmpPixelFormat::Indexed2 => {
+            let pal = palette
+                .ok_or_else(|| Error::invalid("BMP encoder: Indexed2 requires a palette"))?;
+            let (pixels, _) = pack_indexed(plane, 2, width, height, opts)?;
+            let stored_h = if double_height_for_ico_mask {
+                (height * 2) as i32
+            } else {
+                height as i32
+            };
+            let mut out = Vec::new();
+            let entries = written_palette_entries(2, pal, opts);
+            write_dib_header_v3_indexed(&mut out, width, stored_h, 2, BI_RGB, pal, entries);
             out.extend_from_slice(&pixels);
             Ok(out)
         }
@@ -1401,10 +1427,13 @@ fn pack_rgb565(
 /// Pack indexed pixel data with proper row padding. Row order honours
 /// `options.top_down`.
 ///
-/// `bpp` must be 1, 4, or 8.
+/// `bpp` must be 1, 2, 4, or 8.
 /// For 8-bit: input is 1 byte per pixel (index 0-255).
 /// For 4-bit: input is 1 byte per pixel (index 0-15); packing into
 ///   hi-nibble/lo-nibble is done here.
+/// For 2-bit: input is 1 byte per pixel (index 0-3, treated as
+///   `byte & 3`); four pixels pack per byte, the left-most pixel in the
+///   two most-significant bits.
 /// For 1-bit: input is 1 byte per pixel (index 0 or 1, treated as
 ///   `byte & 1`); packing into MSB-first bytes is done here.
 fn pack_indexed(
@@ -1442,6 +1471,16 @@ fn pack_indexed(
                     }
                 }
             }
+            2 => {
+                // Four 2-bit indices per byte; the left-most pixel sits in
+                // the two most-significant bits (Windows CE indexed layout,
+                // the encode counterpart of the decoder's 2-bpp unpack).
+                for x in 0..w {
+                    let idx = src[x] & 0x03;
+                    let shift = 6 - 2 * (x % 4);
+                    dst[x / 4] |= idx << shift;
+                }
+            }
             1 => {
                 for x in 0..w {
                     let bit = src[x] & 1;
@@ -1450,7 +1489,7 @@ fn pack_indexed(
                     }
                 }
             }
-            _ => return Err(Error::invalid("pack_indexed: bpp must be 1, 4, or 8")),
+            _ => return Err(Error::invalid("pack_indexed: bpp must be 1, 2, 4, or 8")),
         }
     }
     Ok((out, out_stride))
@@ -1965,7 +2004,10 @@ fn build_and_mask_from_alpha(
             // No alpha → fully opaque → all-zero AND mask. Short-circuit.
             return Ok(mask);
         }
-        BmpPixelFormat::Indexed8 | BmpPixelFormat::Indexed4 | BmpPixelFormat::Indexed1 => {
+        BmpPixelFormat::Indexed8
+        | BmpPixelFormat::Indexed4
+        | BmpPixelFormat::Indexed2
+        | BmpPixelFormat::Indexed1 => {
             return Ok(mask);
         }
     };
@@ -1991,6 +2033,7 @@ fn build_and_mask_from_alpha(
 fn palette_entry_count(bpp: u16) -> usize {
     match bpp {
         1 => 2,
+        2 => 4,
         4 => 16,
         8 => 256,
         _ => 0,
