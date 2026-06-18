@@ -401,8 +401,10 @@ fn indexed4_clr_used_exceeds_2_bpp_is_rejected() {
 #[test]
 fn illegal_bit_depths_are_rejected() {
     let mut bytes = encode_bmp(&rgba_image(4, 4)).unwrap().0;
-    // bpp at offset 14+14 = 28 (u16).
-    for bpp in [0u16, 2, 3, 5, 6, 7, 9, 10, 15, 17, 31, 33, 48, 64, 0xFFFF] {
+    // bpp at offset 14+14 = 28 (u16). 1/2/4/8/16/24/32 are the legal
+    // depths (2 is the Windows CE indexed variant); everything else is
+    // rejected.
+    for bpp in [0u16, 3, 5, 6, 7, 9, 10, 15, 17, 31, 33, 48, 64, 0xFFFF] {
         bytes[28..30].copy_from_slice(&bpp.to_le_bytes());
         let r = decode_bmp(&bytes);
         assert!(r.is_err(), "bpp={bpp} must be rejected");

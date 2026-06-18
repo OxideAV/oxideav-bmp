@@ -305,7 +305,7 @@ impl DibHeader {
     /// Palette size in entries. Each entry is 4 bytes (BGRA, though
     /// the alpha byte is always 0 for classic BMP).
     pub fn palette_entries(&self) -> usize {
-        if matches!(self.bpp, 1 | 4 | 8) {
+        if matches!(self.bpp, 1 | 2 | 4 | 8) {
             if self.clr_used == 0 {
                 1usize << self.bpp
             } else {
@@ -709,13 +709,14 @@ impl BitmapInfoHeader {
     }
 
     /// Colour-table entry count implied by `biClrUsed` + `biBitCount`
-    /// for the indexed depths (1 / 4 / 8 bpp): `biClrUsed` when
+    /// for the indexed depths (1 / 2 / 4 / 8 bpp): `biClrUsed` when
     /// non-zero, otherwise the `2^biBitCount` maximum the structure
-    /// page documents for a zero `biClrUsed`. Non-indexed depths
-    /// return 0 (any optional optimal palette is not consumed by the
-    /// pixel pipeline).
+    /// page documents for a zero `biClrUsed`. The 2 bpp depth is the
+    /// Windows CE variant (4-entry table). Non-indexed depths return 0
+    /// (any optional optimal palette is not consumed by the pixel
+    /// pipeline).
     pub fn palette_entries(&self) -> usize {
-        if matches!(self.bit_count, 1 | 4 | 8) {
+        if matches!(self.bit_count, 1 | 2 | 4 | 8) {
             if self.clr_used == 0 {
                 1usize << self.bit_count
             } else {

@@ -10,6 +10,7 @@ sub-images.
 | Bit depth | Compression    | Output     |
 | --------- | -------------- | ---------- |
 | 1         | `BI_RGB`       | `Rgba`     |
+| 2         | `BI_RGB`       | `Rgba` (Windows CE, 4-entry palette) |
 | 4         | `BI_RGB`       | `Rgba`     |
 | 4         | `BI_RLE4`      | `Rgba` (delta + absolute mode) |
 | 8         | `BI_RGB`       | `Rgba`     |
@@ -33,7 +34,10 @@ accepted. The OS/2 1.x path honours the 3-byte `RGBTRIPLE` colour-table
 layout (the OS/2 2.x and every V3+ header use 4-byte `RGBQUAD`).
 Bottom-up and top-down row orders are auto-detected from the sign of
 `biHeight`; output is always top-down `Rgba`. `BI_JPEG` and `BI_PNG`
-are rejected at the boundary.
+are rejected at the boundary. The Windows CE 2-bit/pixel indexed depth
+is decoded too: four pixels pack per byte (left-most pixel in the two
+most-significant bits), each a 2-bit index into a 4-entry colour table;
+the `biClrUsed = 0` sentinel resolves to the full `2^2 = 4` entries.
 
 ### CMYK family (`BI_CMYK` / `BI_CMYKRLE8` / `BI_CMYKRLE4`)
 

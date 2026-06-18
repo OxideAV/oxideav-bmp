@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(decode)* **Windows CE 2-bit/pixel indexed depth** (round 330): the
+  `2` bpp pixel format documented for Windows CE is now decoded — four
+  pixels pack per byte with the left-most pixel in the two
+  most-significant bits, each a 2-bit index into a 4-entry colour table
+  (`biClrUsed = 0` resolves to the full `2^2 = 4` entries). Bottom-up
+  and top-down (negative `biHeight`) row orders both decode to top-down
+  `Rgba`. The depth is now accepted alongside `1 / 4 / 8 / 16 / 24 / 32`
+  by the decoder's bit-depth guards and the typed `BitmapInfoHeader` /
+  `DibHeader` `palette_entries()` accessors.
 - *(decode)* **`bfOffBits` recovery for minimal / corrupt writers**
   (round 327): when the `BITMAPFILEHEADER` `bfOffBits` field is `0`
   (left unset by minimal encoders) or points implausibly early — inside

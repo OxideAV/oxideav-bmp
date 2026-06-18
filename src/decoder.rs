@@ -739,7 +739,7 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
     // attacker-chosen 134-million-element vector and OOM-aborts. Reject
     // unsupported depths here so a non-zero stride always bounds the
     // height against the available bytes.
-    if !matches!(h.bpp, 1 | 4 | 8 | 16 | 24 | 32) {
+    if !matches!(h.bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
         return Err(Error::invalid(format!(
             "BMP: unsupported bit depth {}",
             h.bpp
@@ -1005,7 +1005,7 @@ fn decode_pixels(
     // bogus `bpp` never reserves the full RGBA plane. (`decode_dib_payload`
     // already filters bpp upstream, but keeping the guard here makes the
     // function self-contained against future direct callers.)
-    if !matches!(h.bpp, 1 | 4 | 8 | 16 | 24 | 32) {
+    if !matches!(h.bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
         return Err(Error::invalid(format!(
             "BMP: unsupported bit depth {}",
             h.bpp
@@ -1039,6 +1039,27 @@ fn decode_pixels(
                     px.copy_from_slice(
                         &palette
                             .get(bit as usize)
+                            .copied()
+                            .unwrap_or([0, 0, 0, 0xFF]),
+                    );
+                }
+            }
+        }
+        2 => {
+            // Windows CE 2-bit/pixel: four pixels packed per byte, the
+            // left-most pixel in the two most-significant bits, each a
+            // 2-bit index into a 4-entry colour table.
+            for y in 0..height {
+                let row = &pixels[y * stride..y * stride + stride];
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                for (x, px) in dst.chunks_exact_mut(4).enumerate() {
+                    let byte = row[x / 4];
+                    let shift = 6 - 2 * (x % 4);
+                    let idx = (byte >> shift) & 0x03;
+                    px.copy_from_slice(
+                        &palette
+                            .get(idx as usize)
                             .copied()
                             .unwrap_or([0, 0, 0, 0xFF]),
                     );

@@ -852,6 +852,114 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Windows CE 2-bit/pixel indexed (V3 BITMAPINFOHEADER)
+    // -----------------------------------------------------------------------
+
+    /// Hand-assemble a `w×h` 2-bit indexed BMP with a 40-byte
+    /// `BITMAPINFOHEADER` and a 4-entry RGBQUAD colour table. Four pixels
+    /// pack per byte, the left-most pixel in the two most-significant
+    /// bits, each a 2-bit index. Rows are bottom-up.
+    fn build_v3_2bpp_bmp(w: u32, h: u32, indices_top_down: &[u8], palette: &[[u8; 3]]) -> Vec<u8> {
+        assert!(palette.len() <= 4);
+        let row_stride = (w as usize * 2).div_ceil(32) * 4;
+        let mut pixel_array = vec![0u8; row_stride * h as usize];
+        for y in 0..h as usize {
+            let src_y = h as usize - 1 - y;
+            let row = &mut pixel_array[y * row_stride..];
+            for x in 0..w as usize {
+                let idx = indices_top_down[src_y * w as usize + x] & 0x03;
+                let shift = 6 - 2 * (x % 4);
+                row[x / 4] |= idx << shift;
+            }
+        }
+        // biClrUsed = 0 → 2^2 = 4 RGBQUAD entries.
+        let palette_entries = 4usize;
+        let palette_bytes = (palette_entries * 4) as u32;
+        let header_size = 40u32;
+        let pixel_offset = 14 + header_size + palette_bytes;
+        let file_size = pixel_offset + pixel_array.len() as u32;
+        let mut out = Vec::with_capacity(file_size as usize);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&file_size.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&pixel_offset.to_le_bytes());
+        out.extend_from_slice(&header_size.to_le_bytes()); // biSize @0
+        out.extend_from_slice(&(w as i32).to_le_bytes()); // biWidth @4
+        out.extend_from_slice(&(h as i32).to_le_bytes()); // biHeight @8
+        out.extend_from_slice(&1u16.to_le_bytes()); // biPlanes @12
+        out.extend_from_slice(&2u16.to_le_bytes()); // biBitCount @14
+        out.extend_from_slice(&0u32.to_le_bytes()); // biCompression @16 (BI_RGB)
+        out.extend_from_slice(&0u32.to_le_bytes()); // biSizeImage @20
+        out.extend_from_slice(&0i32.to_le_bytes()); // biXPelsPerM @24
+        out.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerM @28
+        out.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed @32
+        out.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant @36
+        for i in 0..palette_entries {
+            if let Some(rgb) = palette.get(i) {
+                out.push(rgb[2]); // B
+                out.push(rgb[1]); // G
+                out.push(rgb[0]); // R
+                out.push(0);
+            } else {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        out.extend_from_slice(&pixel_array);
+        out
+    }
+
+    #[test]
+    fn decode_v3_2bpp_windows_ce() {
+        // 4×2: top row indices 0,1,2,3 ; bottom row 3,2,1,0.
+        let w = 4u32;
+        let h = 2u32;
+        let indices = [0u8, 1, 2, 3, 3, 2, 1, 0];
+        let palette: &[[u8; 3]] = &[[10, 20, 30], [40, 50, 60], [70, 80, 90], [255, 128, 0]];
+        let bytes = build_v3_2bpp_bmp(w, h, &indices, palette);
+        let img = decode_bmp(&bytes).unwrap();
+        assert_eq!(img.width, w);
+        assert_eq!(img.height, h);
+        let s = img.planes[0].stride;
+        // Top-down row 0: idx 0,1,2,3.
+        assert_eq!(&img.planes[0].data[0..4], &[10, 20, 30, 255]);
+        assert_eq!(&img.planes[0].data[4..8], &[40, 50, 60, 255]);
+        assert_eq!(&img.planes[0].data[8..12], &[70, 80, 90, 255]);
+        assert_eq!(&img.planes[0].data[12..16], &[255, 128, 0, 255]);
+        // Row 1: idx 3,2,1,0.
+        assert_eq!(&img.planes[0].data[s..s + 4], &[255, 128, 0, 255]);
+        assert_eq!(&img.planes[0].data[s + 12..s + 16], &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn decode_v3_2bpp_top_down_negative_height() {
+        // Negative biHeight → top-down rows; reverse the source rows so
+        // the decoded top-down output matches the bottom-up case.
+        let w = 4u32;
+        let mut bytes = build_v3_2bpp_bmp(
+            w,
+            2,
+            &[3, 2, 1, 0, 0, 1, 2, 3],
+            &[[10, 20, 30], [40, 50, 60], [70, 80, 90], [255, 128, 0]],
+        );
+        // Patch biHeight (@14 + 8 = offset 22) to -2.
+        bytes[22..26].copy_from_slice(&(-2i32).to_le_bytes());
+        // Swap the two pixel rows. pixel offset = 14 + 40 + 4*4 = 70,
+        // row stride = ((4*2 + 31)/32)*4 = 4.
+        let po = 14 + 40 + 4 * 4;
+        let stride = 4;
+        let (r0, r1) = bytes[po..po + 2 * stride].split_at(stride);
+        let swapped: Vec<u8> = r1.iter().chain(r0.iter()).copied().collect();
+        bytes[po..po + 2 * stride].copy_from_slice(&swapped);
+        let img = decode_bmp(&bytes).unwrap();
+        assert_eq!(img.width, w);
+        assert_eq!(img.height, 2);
+        // Top-down row 0 now: idx 3,2,1,0.
+        assert_eq!(&img.planes[0].data[0..4], &[255, 128, 0, 255]);
+        assert_eq!(&img.planes[0].data[12..16], &[10, 20, 30, 255]);
+    }
+
+    // -----------------------------------------------------------------------
     // Truncated OS/2 2.x OS22XBITMAPHEADER (biSize 16..40)
     // -----------------------------------------------------------------------
 
