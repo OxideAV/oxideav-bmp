@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.6...v0.2.0) - 2026-06-19
+
+### Added
+
+- *(encode)* Windows CE 2-bit/pixel indexed output (Indexed2)
+
+### Other
+
+- cover Indexed2 in encode_roundtrip (fix daily-fuzz E0004 build break)
+- recognise OS/2 file-magic family (BA/CI/CP/IC/PT) with named errors
+- explicit-mask BI_BITFIELDS/BI_ALPHABITFIELDS (V3 header + mask tail)
+- Windows CE 2-bit/pixel indexed depth
+- recover canonical pixel offset when bfOffBits is 0 / inside header
+- recognise CMYK compression family (BI_CMYK/RLE8/RLE4) by name
+- honour V4/V5 in-header alpha mask on 32-bit BI_RGB
+- cover Rgb555 in encode_roundtrip (fix daily-fuzz E0004 build break)
+- accept Rgb555 on V4-calibrated + V5 ICC colour-managed paths
+- refresh to current status, drop per-round changelog cruft
+
 ### Added
 
 - *(decode)* **OS/2 file-magic recognition** (round 342): the six
