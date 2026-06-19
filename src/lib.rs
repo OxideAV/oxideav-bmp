@@ -357,6 +357,40 @@ mod tests {
     }
 
     #[test]
+    fn bitfields_wide_custom_masks_do_not_panic() {
+        // A 32-bpp mask set with channels wider than a byte exercises the
+        // `quantise` n>8 replication branch (the underflow-prone path).
+        // 10/12/8 bits across the 32-bit word, no alpha.
+        let masks = BmpBitfields {
+            bpp: 32,
+            r: 0x3FF0_0000, // bits 20..29 (10 bits)
+            g: 0x000F_FF00, // bits 8..19 (12 bits)
+            b: 0x0000_00FF, // bits 0..7 (8 bits)
+            a: 0,
+        };
+        assert!(masks.validate().is_ok());
+        let (src, _w, _h) = rgba_checker(4, 4);
+        let bytes = encode_bmp_bitfields(&src, masks, BmpEncodeOptions::default()).unwrap();
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.planes[0].data.len(), 4 * 4 * 4);
+        // Full-scale source channels stay near full-scale after the
+        // widen-and-replicate round-trip (replication keeps 255 ≈ 255).
+        let stride = back.planes[0].stride;
+        let s = &src.planes[0].data;
+        for y in 0..4usize {
+            for x in 0..4usize {
+                let d = &back.planes[0].data[y * stride + x * 4..][..4];
+                let so = &s[y * 16 + x * 4..][..4];
+                for c in 0..3 {
+                    if so[c] == 255 {
+                        assert!(d[c] >= 254, "channel {c} lost full-scale: {}", d[c]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn bitfields_rejects_indexed_source() {
         let (data, stride) = indexed_checker(4, 4);
         let img = BmpImage {

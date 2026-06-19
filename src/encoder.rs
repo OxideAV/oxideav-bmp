@@ -645,8 +645,16 @@ fn quantise(sample: u8, n: u32) -> u32 {
         core::cmp::Ordering::Equal => s,
         core::cmp::Ordering::Less => s >> (8 - n),
         core::cmp::Ordering::Greater => {
+            // Left-justify the 8 sample bits into the n-bit run, then
+            // replicate the high bits downward so full-scale stays
+            // full-scale. `extra` is the freed low-bit count (1..=24 for a
+            // 9..=32-bit run); replicate by `s >> (8 - extra)` but clamp
+            // the shift to 0 once `extra >= 8` (the whole sample fits in
+            // the replicated region) to avoid a shift underflow.
             let extra = n - 8;
-            ((s << extra) | (s >> (8 - extra).min(8))) & ((1u32 << n) - 1)
+            let mask = if n >= 32 { u32::MAX } else { (1u32 << n) - 1 };
+            let repl = if extra >= 8 { s } else { s >> (8 - extra) };
+            ((s << extra) | repl) & mask
         }
     }
 }
