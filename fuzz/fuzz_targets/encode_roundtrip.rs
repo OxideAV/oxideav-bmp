@@ -30,7 +30,7 @@
 //! The fuzzer's bytes are sliced into a small header + pixel payload:
 //!
 //!   * byte 0 — format selector (low 3 bits): 0=Rgba, 1=Rgb24, 2=Rgb565,
-//!     3=Indexed8, 4=Indexed4, 5=Indexed1, 6=Rgb555, 7 wraps to Rgb24.
+//!     3=Indexed8, 4=Indexed4, 5=Indexed1, 6=Rgb555, 7=Indexed2.
 //!   * byte 1 — encode options: bit 0 = `top_down`, bit 1 =
 //!     `minimal_palette`.
 //!   * byte 2 — width in pixels, clamped to 1..=64. The cap keeps memory
@@ -74,7 +74,10 @@ fn bytes_per_pixel(format: BmpPixelFormat) -> usize {
         BmpPixelFormat::Rgba => 4,
         BmpPixelFormat::Rgb24 => 3,
         BmpPixelFormat::Rgb555 | BmpPixelFormat::Rgb565 => 2,
-        BmpPixelFormat::Indexed8 | BmpPixelFormat::Indexed4 | BmpPixelFormat::Indexed1 => 1,
+        BmpPixelFormat::Indexed8
+        | BmpPixelFormat::Indexed4
+        | BmpPixelFormat::Indexed2
+        | BmpPixelFormat::Indexed1 => 1,
     }
 }
 
@@ -83,14 +86,15 @@ fn palette_cap(format: BmpPixelFormat) -> usize {
     match format {
         BmpPixelFormat::Indexed8 => 256,
         BmpPixelFormat::Indexed4 => 16,
+        BmpPixelFormat::Indexed2 => 4,
         BmpPixelFormat::Indexed1 => 2,
         _ => 0,
     }
 }
 
 /// Map the format selector byte onto a [`BmpPixelFormat`]. Code 6
-/// selects `Rgb555` and code 7 wraps back to `Rgb24` to keep the
-/// distribution roughly even across the seven encodable formats.
+/// selects `Rgb555` and code 7 selects `Indexed2` (Windows CE 4-colour)
+/// so the distribution covers all eight encodable formats.
 fn pick_format(byte: u8) -> BmpPixelFormat {
     match byte & 0b111 {
         0 => BmpPixelFormat::Rgba,
@@ -100,7 +104,7 @@ fn pick_format(byte: u8) -> BmpPixelFormat {
         4 => BmpPixelFormat::Indexed4,
         5 => BmpPixelFormat::Indexed1,
         6 => BmpPixelFormat::Rgb555,
-        _ => BmpPixelFormat::Rgb24,
+        _ => BmpPixelFormat::Indexed2,
     }
 }
 
