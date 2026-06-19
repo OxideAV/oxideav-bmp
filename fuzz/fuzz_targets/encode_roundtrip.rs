@@ -29,8 +29,8 @@
 //!
 //! The fuzzer's bytes are sliced into a small header + pixel payload:
 //!
-//!   * byte 0 — format selector (low 3 bits): 0=Rgba, 1=Rgb24, 2=Rgb565,
-//!     3=Indexed8, 4=Indexed4, 5=Indexed1, 6=Rgb555, 7 wraps to Rgb24.
+//!   * byte 0 — format selector (`byte % 8`): 0=Rgba, 1=Rgb24, 2=Rgb565,
+//!     3=Indexed8, 4=Indexed4, 5=Indexed2, 6=Indexed1, 7=Rgb555.
 //!   * byte 1 — encode options: bit 0 = `top_down`, bit 1 =
 //!     `minimal_palette`.
 //!   * byte 2 — width in pixels, clamped to 1..=64. The cap keeps memory
@@ -42,7 +42,7 @@
 //!     `width × height × bytes_per_pixel` plane.
 //!   * trailing bytes — palette entries for indexed formats: chunks of
 //!     three bytes become `[R, G, B]` until the palette size cap for the
-//!     selected format is hit (256 / 16 / 2). A short tail is padded
+//!     selected format is hit (256 / 16 / 4 / 2). A short tail is padded
 //!     with `[0, 0, 0]` so the palette is always large enough for any
 //!     index value the pixel bytes can carry.
 //!
@@ -74,7 +74,10 @@ fn bytes_per_pixel(format: BmpPixelFormat) -> usize {
         BmpPixelFormat::Rgba => 4,
         BmpPixelFormat::Rgb24 => 3,
         BmpPixelFormat::Rgb555 | BmpPixelFormat::Rgb565 => 2,
-        BmpPixelFormat::Indexed8 | BmpPixelFormat::Indexed4 | BmpPixelFormat::Indexed1 => 1,
+        BmpPixelFormat::Indexed8
+        | BmpPixelFormat::Indexed4
+        | BmpPixelFormat::Indexed2
+        | BmpPixelFormat::Indexed1 => 1,
     }
 }
 
@@ -83,24 +86,25 @@ fn palette_cap(format: BmpPixelFormat) -> usize {
     match format {
         BmpPixelFormat::Indexed8 => 256,
         BmpPixelFormat::Indexed4 => 16,
+        BmpPixelFormat::Indexed2 => 4,
         BmpPixelFormat::Indexed1 => 2,
         _ => 0,
     }
 }
 
-/// Map the format selector byte onto a [`BmpPixelFormat`]. Code 6
-/// selects `Rgb555` and code 7 wraps back to `Rgb24` to keep the
-/// distribution roughly even across the seven encodable formats.
+/// Map the format selector byte onto a [`BmpPixelFormat`]. The low
+/// nibble selects across all eight encodable formats; codes 8..=15 wrap
+/// back onto the table to keep the distribution roughly even.
 fn pick_format(byte: u8) -> BmpPixelFormat {
-    match byte & 0b111 {
+    match byte % 8 {
         0 => BmpPixelFormat::Rgba,
         1 => BmpPixelFormat::Rgb24,
         2 => BmpPixelFormat::Rgb565,
         3 => BmpPixelFormat::Indexed8,
         4 => BmpPixelFormat::Indexed4,
-        5 => BmpPixelFormat::Indexed1,
-        6 => BmpPixelFormat::Rgb555,
-        _ => BmpPixelFormat::Rgb24,
+        5 => BmpPixelFormat::Indexed2,
+        6 => BmpPixelFormat::Indexed1,
+        _ => BmpPixelFormat::Rgb555,
     }
 }
 
