@@ -320,6 +320,337 @@ pub fn encode_bmp_plane_with_options(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Explicit-mask BI_BITFIELDS / BI_ALPHABITFIELDS encoder (V3 header)
+// ---------------------------------------------------------------------------
+
+/// Per-channel bit masks for an explicit-mask `BI_BITFIELDS` /
+/// `BI_ALPHABITFIELDS` BMP.
+///
+/// `r` / `g` / `b` / `a` are the 32-bit DWORD masks selecting each
+/// channel's bits inside the packed pixel word. `bpp` is the on-disk
+/// bit depth (16 or 32). When `a` is zero the encoder writes a 12-byte
+/// (three-mask) `BI_BITFIELDS` tail and decoders treat every pixel as
+/// opaque; a non-zero `a` writes a 16-byte (four-mask)
+/// `BI_ALPHABITFIELDS` tail so the alpha channel survives the round-trip.
+///
+/// The masks for each channel must be a single contiguous run of set
+/// bits (the BMP `BI_BITFIELDS` mechanism is shift-and-scale, not an
+/// arbitrary bit permutation); the masks must not overlap and must fit
+/// inside `bpp` bits. [`BmpBitfields::validate`] enforces this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BmpBitfields {
+    /// On-disk bit depth: 16 or 32.
+    pub bpp: u16,
+    /// Red-channel DWORD mask.
+    pub r: u32,
+    /// Green-channel DWORD mask.
+    pub g: u32,
+    /// Blue-channel DWORD mask.
+    pub b: u32,
+    /// Alpha-channel DWORD mask. Zero ⇒ no alpha (three-mask
+    /// `BI_BITFIELDS`); non-zero ⇒ four-mask `BI_ALPHABITFIELDS`.
+    pub a: u32,
+}
+
+impl BmpBitfields {
+    /// 16-bit RGB 5-6-5: R bits 15..11, G bits 10..5, B bits 4..0, no
+    /// alpha. The canonical Windows/`BI_BITFIELDS` 16-bpp layout.
+    pub const RGB565: Self = Self {
+        bpp: 16,
+        r: 0xF800,
+        g: 0x07E0,
+        b: 0x001F,
+        a: 0x0000,
+    };
+    /// 16-bit RGB 5-5-5: R bits 14..10, G bits 9..5, B bits 4..0, bit 15
+    /// unused, no alpha.
+    pub const RGB555: Self = Self {
+        bpp: 16,
+        r: 0x7C00,
+        g: 0x03E0,
+        b: 0x001F,
+        a: 0x0000,
+    };
+    /// 16-bit ARGB 1-5-5-5: A bit 15, R bits 14..10, G bits 9..5, B bits
+    /// 4..0. The 16-bpp four-mask `BI_ALPHABITFIELDS` layout.
+    pub const ARGB1555: Self = Self {
+        bpp: 16,
+        r: 0x7C00,
+        g: 0x03E0,
+        b: 0x001F,
+        a: 0x8000,
+    };
+    /// 32-bit BGRA 8-8-8-8: B bits 7..0, G bits 15..8, R bits 23..16,
+    /// A bits 31..24 — the byte-aligned alpha-carrying layout. Every
+    /// channel is a full 8-bit run, so the round-trip is bit-exact.
+    pub const BGRA8888: Self = Self {
+        bpp: 32,
+        r: 0x00FF_0000,
+        g: 0x0000_FF00,
+        b: 0x0000_00FF,
+        a: 0xFF00_0000,
+    };
+    /// 32-bit BGRX 8-8-8-8: same channel layout as [`Self::BGRA8888`]
+    /// but the top byte is unused (no alpha mask) — a three-mask
+    /// `BI_BITFIELDS` 32-bpp bitmap. Colour is bit-exact; alpha is
+    /// dropped (decoders read every pixel as opaque).
+    pub const BGRX8888: Self = Self {
+        bpp: 32,
+        r: 0x00FF_0000,
+        g: 0x0000_FF00,
+        b: 0x0000_00FF,
+        a: 0x0000_0000,
+    };
+
+    /// `true` when an alpha mask is present (a four-mask
+    /// `BI_ALPHABITFIELDS` tail is required).
+    pub fn has_alpha(&self) -> bool {
+        self.a != 0
+    }
+
+    /// The `biCompression` value this mask set declares: `BI_ALPHABITFIELDS`
+    /// when an alpha mask is present, else `BI_BITFIELDS`.
+    pub fn compression(&self) -> u32 {
+        if self.has_alpha() {
+            BI_ALPHABITFIELDS
+        } else {
+            BI_BITFIELDS
+        }
+    }
+
+    /// Validate the mask set: `bpp` must be 16 or 32, each non-zero mask
+    /// must be a single contiguous bit run, masks must not overlap, and
+    /// every mask bit must fit inside `bpp` bits.
+    pub fn validate(&self) -> Result<()> {
+        if self.bpp != 16 && self.bpp != 32 {
+            return Err(Error::invalid(format!(
+                "BMP bitfields: bpp must be 16 or 32, got {}",
+                self.bpp
+            )));
+        }
+        let limit: u32 = if self.bpp == 32 {
+            0xFFFF_FFFF
+        } else {
+            (1u32 << self.bpp) - 1
+        };
+        let channels = [("R", self.r), ("G", self.g), ("B", self.b), ("A", self.a)];
+        let mut union: u32 = 0;
+        for (name, mask) in channels {
+            if mask == 0 {
+                continue; // a zero mask means "channel absent"
+            }
+            if mask & !limit != 0 {
+                return Err(Error::invalid(format!(
+                    "BMP bitfields: {name} mask {mask:#010x} exceeds {} bits",
+                    self.bpp
+                )));
+            }
+            // Contiguous run check: a value whose set bits are contiguous
+            // satisfies `m & (m + lsb) == 0` where lsb isolates the low set
+            // bit — equivalently `(m >> tz)` is one less than a power of two.
+            let normalised = mask >> mask.trailing_zeros();
+            if normalised & (normalised + 1) != 0 {
+                return Err(Error::invalid(format!(
+                    "BMP bitfields: {name} mask {mask:#010x} is not a contiguous bit run"
+                )));
+            }
+            if union & mask != 0 {
+                return Err(Error::invalid(format!(
+                    "BMP bitfields: {name} mask {mask:#010x} overlaps another channel"
+                )));
+            }
+            union |= mask;
+        }
+        if self.r == 0 && self.g == 0 && self.b == 0 {
+            return Err(Error::invalid(
+                "BMP bitfields: at least one of R/G/B must be non-zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Encode a [`BmpImage`] as an explicit-mask `BI_BITFIELDS` /
+/// `BI_ALPHABITFIELDS` BMP using a 40-byte `BITMAPINFOHEADER` (V3) with
+/// the per-channel masks written as a 12-byte (RGB) or 16-byte (RGBA)
+/// tail immediately after the header — the classic Windows in-file mask
+/// layout, distinct from the V4/V5 in-header mask block the
+/// [`encode_bmp`] `Rgb565` path emits.
+///
+/// The source plane must be [`BmpPixelFormat::Rgba`] or
+/// [`BmpPixelFormat::Rgb24`]; each 8-bit channel is requantised down to
+/// the width of its mask and shifted into place. For a byte-aligned
+/// 32-bpp mask set ([`BmpBitfields::BGRA8888`] /
+/// [`BmpBitfields::BGRX8888`]) every channel keeps its full 8 bits so the
+/// round-trip through [`decode_bmp`] is bit-exact.
+///
+/// [`BmpEncodeOptions::top_down`] is honoured (negative `biHeight`);
+/// `minimal_palette` is irrelevant to direct-colour bitfields.
+pub fn encode_bmp_bitfields(
+    image: &BmpImage,
+    masks: BmpBitfields,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    if image.planes.is_empty() {
+        return Err(Error::invalid("BMP encoder: empty frame plane"));
+    }
+    encode_bmp_plane_bitfields(
+        &image.planes[0],
+        image.pixel_format,
+        masks,
+        image.width,
+        image.height,
+        options,
+    )
+}
+
+/// Plane-level variant of [`encode_bmp_bitfields`].
+pub fn encode_bmp_plane_bitfields(
+    plane: &BmpPlane,
+    format: BmpPixelFormat,
+    masks: BmpBitfields,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    masks.validate()?;
+    let pixels = pack_bitfields(plane, format, masks, width, height, options)?;
+    let mask_tail = if masks.has_alpha() { 16u32 } else { 12u32 };
+    let pixel_bytes = pixels.len() as u32;
+    let header_and_tail = BITMAPINFOHEADER_SIZE + mask_tail;
+    let pixel_offset = BITMAPFILEHEADER_SIZE + header_and_tail;
+    let file_size = pixel_offset + pixel_bytes;
+    let mut out = Vec::with_capacity(file_size as usize);
+    write_file_header(&mut out, file_size, pixel_offset);
+    write_dib_header_v3(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        masks.bpp,
+        masks.compression(),
+        0,
+    );
+    // V3 mask tail: 3 DWORDs (R/G/B) for BI_BITFIELDS, 4 (R/G/B/A) for
+    // BI_ALPHABITFIELDS, immediately after the 40-byte header.
+    out.extend_from_slice(&masks.r.to_le_bytes());
+    out.extend_from_slice(&masks.g.to_le_bytes());
+    out.extend_from_slice(&masks.b.to_le_bytes());
+    if masks.has_alpha() {
+        out.extend_from_slice(&masks.a.to_le_bytes());
+    }
+    out.extend_from_slice(&pixels);
+    Ok(out)
+}
+
+/// Pack `Rgba` / `Rgb24` source pixels into the on-disk word layout
+/// declared by `masks`, with 4-byte-aligned rows and the row order
+/// `options.top_down` requests.
+///
+/// Each source channel is an 8-bit sample. It is requantised to the bit
+/// width of its mask (`v >> (8 - n)`, the inverse of the decoder's
+/// `expand` shift-and-scale) and shifted up by the mask's trailing-zero
+/// count. A zero mask drops the channel. `Rgb24` input has no alpha, so
+/// an alpha mask receives the fully-opaque value `(1 << n) - 1`.
+fn pack_bitfields(
+    plane: &BmpPlane,
+    format: BmpPixelFormat,
+    masks: BmpBitfields,
+    width: u32,
+    height: u32,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
+    let in_stride = plane.stride;
+    let in_bpp = match format {
+        BmpPixelFormat::Rgba => 4,
+        BmpPixelFormat::Rgb24 => 3,
+        other => {
+            return Err(Error::invalid(format!(
+                "BMP bitfields: source must be Rgba or Rgb24, got {other:?}"
+            )))
+        }
+    };
+    if plane.data.len() < in_stride * h {
+        return Err(Error::invalid(
+            "BMP encoder: frame plane truncated (bitfields)",
+        ));
+    }
+    let out_bpp_bytes = (masks.bpp / 8) as usize;
+    let out_stride = row_stride(w, masks.bpp as usize);
+    let (rs, rn) = mask_shift_len(masks.r);
+    let (gs, gn) = mask_shift_len(masks.g);
+    let (bs, bn) = mask_shift_len(masks.b);
+    let (as_, an) = mask_shift_len(masks.a);
+    let mut out = vec![0u8; out_stride * h];
+    for y in 0..h {
+        let src_y = source_row(y, h, options);
+        let src = &plane.data[src_y * in_stride..src_y * in_stride + w * in_bpp];
+        let dst = &mut out[y * out_stride..y * out_stride + w * out_bpp_bytes];
+        for x in 0..w {
+            let r = src[x * in_bpp];
+            let g = src[x * in_bpp + 1];
+            let b = src[x * in_bpp + 2];
+            let a = if in_bpp == 4 {
+                src[x * in_bpp + 3]
+            } else {
+                0xFF
+            };
+            let mut word: u32 = 0;
+            if rn > 0 {
+                word |= (quantise(r, rn) as u32) << rs;
+            }
+            if gn > 0 {
+                word |= (quantise(g, gn) as u32) << gs;
+            }
+            if bn > 0 {
+                word |= (quantise(b, bn) as u32) << bs;
+            }
+            if an > 0 {
+                word |= (quantise(a, an) as u32) << as_;
+            }
+            let bytes = word.to_le_bytes();
+            dst[x * out_bpp_bytes..x * out_bpp_bytes + out_bpp_bytes]
+                .copy_from_slice(&bytes[..out_bpp_bytes]);
+        }
+    }
+    Ok(out)
+}
+
+/// Trailing-zero shift and run-length of a single-run channel mask.
+/// `(0, 0)` for a zero mask (absent channel).
+fn mask_shift_len(mask: u32) -> (u32, u32) {
+    if mask == 0 {
+        return (0, 0);
+    }
+    let shift = mask.trailing_zeros();
+    let len = 32 - mask.leading_zeros() - shift;
+    (shift, len)
+}
+
+/// Requantise an 8-bit sample to an `n`-bit channel run.
+///
+/// * `n == 8` — identity, so byte-aligned masks are bit-exact.
+/// * `n < 8`  — drop the low `8 - n` bits (the inverse of the decoder's
+///   `expand`, which scales an `n`-bit sample back up to 8).
+/// * `n > 8`  — left-justify the 8 bits into the `n`-bit run and
+///   replicate the high bits into the freed low bits, so a full-scale
+///   input (`0xFF`) maps to a full-scale `n`-bit value rather than
+///   leaving the low bits dark. Only reachable for a 32-bpp mask wider
+///   than a byte, which `validate` permits.
+fn quantise(sample: u8, n: u32) -> u32 {
+    let s = sample as u32;
+    match n.cmp(&8) {
+        core::cmp::Ordering::Equal => s,
+        core::cmp::Ordering::Less => s >> (8 - n),
+        core::cmp::Ordering::Greater => {
+            let extra = n - 8;
+            ((s << extra) | (s >> (8 - extra).min(8))) & ((1u32 << n) - 1)
+        }
+    }
+}
+
 /// Encode a `BmpImage` into a complete BMP file with a V5 header that
 /// declares an embedded ICC profile (`PROFILE_EMBEDDED`).
 ///

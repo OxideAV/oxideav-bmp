@@ -50,9 +50,10 @@ pub use decoder::{decode_bmp, decode_bmp_with_metadata, decode_dib, decode_dib_w
 #[cfg(feature = "registry")]
 pub use decoder::{decode_bmp_videoframe, decode_dib_videoframe};
 pub use encoder::{
-    encode_bmp, encode_bmp_plane, encode_bmp_plane_with_options, encode_bmp_with_calibrated_rgb,
-    encode_bmp_with_icc_profile, encode_bmp_with_linked_icc_profile, encode_bmp_with_options,
-    BmpEncodeOptions, EncodedBmpFormat,
+    encode_bmp, encode_bmp_bitfields, encode_bmp_plane, encode_bmp_plane_bitfields,
+    encode_bmp_plane_with_options, encode_bmp_with_calibrated_rgb, encode_bmp_with_icc_profile,
+    encode_bmp_with_linked_icc_profile, encode_bmp_with_options, BmpBitfields, BmpEncodeOptions,
+    EncodedBmpFormat,
 };
 #[cfg(feature = "registry")]
 pub use encoder::{encode_bmp_videoframe, encode_dib_videoframe};
@@ -126,6 +127,250 @@ mod tests {
             h as usize
         );
         assert_eq!(back.planes[0].data, src.planes[0].data);
+    }
+
+    // -----------------------------------------------------------------------
+    // Explicit-mask BI_BITFIELDS / BI_ALPHABITFIELDS encoder (V3 + mask tail)
+    // -----------------------------------------------------------------------
+
+    /// Assert the on-disk header is a 40-byte BITMAPINFOHEADER whose
+    /// `biCompression` matches `compression`, whose pixel offset accounts
+    /// for the expected mask-tail length, and whose mask DWORDs at offset
+    /// `54..` (14 + 40) match the requested masks.
+    fn assert_bitfields_layout(bytes: &[u8], masks: &BmpBitfields) {
+        assert_eq!(&bytes[..2], b"BM");
+        // biSize == 40 (V3 header).
+        assert_eq!(u32::from_le_bytes(bytes[14..18].try_into().unwrap()), 40);
+        // biBitCount.
+        assert_eq!(
+            u16::from_le_bytes(bytes[28..30].try_into().unwrap()),
+            masks.bpp
+        );
+        // biCompression.
+        assert_eq!(
+            u32::from_le_bytes(bytes[30..34].try_into().unwrap()),
+            masks.compression()
+        );
+        // Mask tail right after the 40-byte header (file offset 54).
+        assert_eq!(
+            u32::from_le_bytes(bytes[54..58].try_into().unwrap()),
+            masks.r
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[58..62].try_into().unwrap()),
+            masks.g
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[62..66].try_into().unwrap()),
+            masks.b
+        );
+        let tail = if masks.has_alpha() { 16 } else { 12 };
+        if masks.has_alpha() {
+            assert_eq!(
+                u32::from_le_bytes(bytes[66..70].try_into().unwrap()),
+                masks.a
+            );
+        }
+        // bfOffBits = 14 + 40 + tail.
+        assert_eq!(
+            u32::from_le_bytes(bytes[10..14].try_into().unwrap()),
+            14 + 40 + tail
+        );
+    }
+
+    #[test]
+    fn bitfields_bgra8888_roundtrips_losslessly() {
+        // Byte-aligned 32-bpp masks: every channel keeps its full 8 bits
+        // and alpha survives, so the round-trip is bit-exact.
+        let (src, _w, _h) = rgba_checker(9, 7);
+        let bytes = encode_bmp_bitfields(&src, BmpBitfields::BGRA8888, BmpEncodeOptions::default())
+            .unwrap();
+        assert_bitfields_layout(&bytes, &BmpBitfields::BGRA8888);
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.planes[0].data, src.planes[0].data);
+    }
+
+    #[test]
+    fn bitfields_bgra8888_top_down_roundtrips() {
+        let (src, _w, _h) = rgba_checker(5, 4);
+        let opts = BmpEncodeOptions {
+            top_down: true,
+            minimal_palette: false,
+        };
+        let bytes = encode_bmp_bitfields(&src, BmpBitfields::BGRA8888, opts).unwrap();
+        // Negative biHeight.
+        assert!(i32::from_le_bytes(bytes[22..26].try_into().unwrap()) < 0);
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.planes[0].data, src.planes[0].data);
+    }
+
+    #[test]
+    fn bitfields_bgrx8888_drops_alpha_keeps_colour() {
+        // Three-mask 32-bpp: colour is bit-exact, alpha decodes opaque.
+        let (src, w, h) = rgba_checker(8, 8);
+        let bytes = encode_bmp_bitfields(&src, BmpBitfields::BGRX8888, BmpEncodeOptions::default())
+            .unwrap();
+        assert_bitfields_layout(&bytes, &BmpBitfields::BGRX8888);
+        let back = decode_bmp(&bytes).unwrap();
+        let stride = back.planes[0].stride;
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let d = &back.planes[0].data[y * stride + x * 4..][..4];
+                let s = &src.planes[0].data[y * (w as usize * 4) + x * 4..][..4];
+                assert_eq!(&d[..3], &s[..3], "colour diverged at ({x},{y})");
+                assert_eq!(d[3], 0xFF, "alpha should decode opaque at ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn bitfields_rgb24_source_synthesises_opaque_alpha() {
+        // Rgb24 in → BGRA8888 out: the encoder fills the alpha run with
+        // full-scale, so the decoder reads every pixel opaque.
+        let src = rgb24_checker(6, 6);
+        let bytes = encode_bmp_bitfields(&src, BmpBitfields::BGRA8888, BmpEncodeOptions::default())
+            .unwrap();
+        let back = decode_bmp(&bytes).unwrap();
+        for px in back.planes[0].data.chunks_exact(4) {
+            assert_eq!(px[3], 0xFF);
+        }
+    }
+
+    #[test]
+    fn bitfields_rgb565_16bpp_layout_and_quantised_roundtrip() {
+        // Primary colours survive 5/6/5 quantisation exactly (their
+        // channels are 0x00 / 0xFF, which map to 0 / max in any run).
+        let (src, w, h) = rgba_checker(4, 4);
+        let bytes =
+            encode_bmp_bitfields(&src, BmpBitfields::RGB565, BmpEncodeOptions::default()).unwrap();
+        assert_bitfields_layout(&bytes, &BmpBitfields::RGB565);
+        // 16-bpp three-mask tail = BI_BITFIELDS.
+        assert_eq!(
+            u32::from_le_bytes(bytes[30..34].try_into().unwrap()),
+            crate::types::BI_BITFIELDS
+        );
+        let back = decode_bmp(&bytes).unwrap();
+        let stride = back.planes[0].stride;
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let d = &back.planes[0].data[y * stride + x * 4..][..4];
+                let s = &src.planes[0].data[y * (w as usize * 4) + x * 4..][..4];
+                for c in 0..3 {
+                    // Full-scale / zero channels quantise exactly.
+                    if s[c] == 0 || s[c] == 255 {
+                        assert_eq!(d[c], s[c], "channel {c} diverged at ({x},{y})");
+                    }
+                }
+                assert_eq!(d[3], 0xFF);
+            }
+        }
+    }
+
+    #[test]
+    fn bitfields_argb1555_writes_alpha_mask_tail() {
+        // 16-bpp four-mask: the alpha bit (0x8000) forces a 16-byte tail
+        // and BI_ALPHABITFIELDS.
+        let (src, _w, _h) = rgba_checker(4, 4);
+        let bytes = encode_bmp_bitfields(&src, BmpBitfields::ARGB1555, BmpEncodeOptions::default())
+            .unwrap();
+        assert_bitfields_layout(&bytes, &BmpBitfields::ARGB1555);
+        assert_eq!(
+            u32::from_le_bytes(bytes[30..34].try_into().unwrap()),
+            crate::types::BI_ALPHABITFIELDS
+        );
+        // Decodes without error and at full geometry.
+        let back = decode_bmp(&bytes).unwrap();
+        assert_eq!(back.planes[0].data.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn bitfields_rgb555_3mask_tail() {
+        let (src, _w, _h) = rgba_checker(3, 5);
+        let bytes =
+            encode_bmp_bitfields(&src, BmpBitfields::RGB555, BmpEncodeOptions::default()).unwrap();
+        assert_bitfields_layout(&bytes, &BmpBitfields::RGB555);
+        assert!(decode_bmp(&bytes).is_ok());
+    }
+
+    #[test]
+    fn bitfields_validate_rejects_bad_masks() {
+        // Non-contiguous mask.
+        assert!(BmpBitfields {
+            bpp: 32,
+            r: 0x0000_00FF,
+            g: 0x0000_FF00,
+            b: 0b1010,
+            a: 0,
+        }
+        .validate()
+        .is_err());
+        // Overlapping masks.
+        assert!(BmpBitfields {
+            bpp: 32,
+            r: 0x0000_00FF,
+            g: 0x0000_00FF,
+            b: 0x00FF_0000,
+            a: 0,
+        }
+        .validate()
+        .is_err());
+        // Bad bpp.
+        assert!(BmpBitfields {
+            bpp: 24,
+            r: 0xFF,
+            g: 0xFF00,
+            b: 0xFF_0000,
+            a: 0,
+        }
+        .validate()
+        .is_err());
+        // 16-bpp mask exceeding 16 bits.
+        assert!(BmpBitfields {
+            bpp: 16,
+            r: 0x1_0000,
+            g: 0x07E0,
+            b: 0x001F,
+            a: 0,
+        }
+        .validate()
+        .is_err());
+        // No colour channels at all.
+        assert!(BmpBitfields {
+            bpp: 32,
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0xFF00_0000,
+        }
+        .validate()
+        .is_err());
+        // All presets validate.
+        for m in [
+            BmpBitfields::RGB565,
+            BmpBitfields::RGB555,
+            BmpBitfields::ARGB1555,
+            BmpBitfields::BGRA8888,
+            BmpBitfields::BGRX8888,
+        ] {
+            assert!(m.validate().is_ok(), "{m:?} should validate");
+        }
+    }
+
+    #[test]
+    fn bitfields_rejects_indexed_source() {
+        let (data, stride) = indexed_checker(4, 4);
+        let img = BmpImage {
+            width: 4,
+            height: 4,
+            pixel_format: BmpPixelFormat::Indexed8,
+            planes: vec![BmpPlane { stride, data }],
+            palette: Some(four_color_palette()),
+            pts: None,
+        };
+        assert!(
+            encode_bmp_bitfields(&img, BmpBitfields::BGRA8888, BmpEncodeOptions::default())
+                .is_err()
+        );
     }
 
     #[test]
