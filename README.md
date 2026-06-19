@@ -470,6 +470,57 @@ the encoder packs them MSB-first per the BMP spec. Unused entries are
 zero-padded in the on-disk colour table; set
 `minimal_palette = true` to record only the entries actually supplied.
 
+### Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` encode
+
+`encode_bmp_bitfields` is the symmetric encode counterpart of the
+decoder's V3 mask-tail path. It emits a 40-byte `BITMAPINFOHEADER`
+(V3) followed by the channel-mask block in the canonical tail position
+immediately after the header — 12 bytes (R/G/B) for `BI_BITFIELDS`,
+16 bytes (R/G/B/A) for `BI_ALPHABITFIELDS` — the most common
+in-the-wild bit-field layout. (The `Rgb565` arm of `encode_bmp` emits a
+*V4* header with masks inside the header body instead; this path
+produces the alternate, V3-tail form the decoder also reads.)
+
+```rust
+use oxideav_bmp::{
+    encode_bmp_bitfields, BmpBitfieldDepth, BmpBitfieldMasks, BmpEncodeOptions,
+};
+
+// 32-bit BGRA, byte-aligned masks → lossless round-trip through decode_bmp.
+let bytes = encode_bmp_bitfields(
+    &rgba_image,                       // BmpPixelFormat::Rgba
+    BmpBitfieldDepth::Bpp32,
+    BmpBitfieldMasks::BGRA8888,        // A=0xFF000000, R/G/B byte fields
+    BmpEncodeOptions::default(),
+)?;
+
+// 16-bit 5-6-5 with a V3 12-byte R/G/B mask tail (BI_BITFIELDS).
+let bytes = encode_bmp_bitfields(
+    &rgb565_image,                     // BmpPixelFormat::Rgb565
+    BmpBitfieldDepth::Bpp16,
+    BmpBitfieldMasks::RGB565,
+    BmpEncodeOptions::default(),
+)?;
+```
+
+`BmpBitfieldDepth` is `Bpp16` (input must be `Rgb565` / `Rgb555`; the
+packed little-endian samples are copied verbatim) or `Bpp32` (input
+must be `Rgba`; each R/G/B/A byte is packed into the bits its mask
+selects). `BmpBitfieldMasks` carries the three colour masks plus an
+optional alpha mask — a `Some(alpha)` mask selects `BI_ALPHABITFIELDS`
+(value 6) and the decoder reads alpha through that mask; a `None` alpha
+mask selects `BI_BITFIELDS` (value 3) and decoded pixels are opaque.
+Presets cover `RGB565` / `RGB555` / `ARGB1555` (16-bit) and
+`BGRA8888` / `BGRX8888` (32-bit). Masks are validated: the three colour
+masks must be non-zero and mutually exclusive (alpha may not overlap
+either), and on `Bpp16` no mask may escape the 16-bit sample window.
+Byte-aligned 32-bit masks (`BGRA8888` / `BGRX8888`) round-trip
+byte-for-byte; sub-byte channels (565 / 555) are lossy in the dropped
+low bits exactly as the matching decode path is. `top_down` (negative
+`biHeight`) is honoured on every arm — bit-field bitmaps are always
+uncompressed so top-down is spec-legal. The mask block sits between the
+header and the pixel array, so `bfOffBits = 14 + 40 + (12 | 16)`.
+
 ### Minimal colour table (`biClrUsed`)
 
 ```rust

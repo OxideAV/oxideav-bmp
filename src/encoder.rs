@@ -830,6 +830,316 @@ fn encode_bmp_v5_indexed_with_profile_blob(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Explicit-mask BITFIELDS encode (V3 header + mask tail)
+// ---------------------------------------------------------------------------
+
+/// On-disk sample depth for an explicit-mask `BI_BITFIELDS` /
+/// `BI_ALPHABITFIELDS` bitmap written by [`encode_bmp_bitfields`].
+///
+/// BMP defines the bit-field compression schemes for 16-bpp and 32-bpp
+/// pixels only — they layer arbitrary channel masks over a fixed-width
+/// little-endian sample. (24-bpp has no mask form; indexed depths use a
+/// colour table instead of masks.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BmpBitfieldDepth {
+    /// 16-bit little-endian samples; each channel mask must fit in the
+    /// low 16 bits.
+    Bpp16,
+    /// 32-bit little-endian samples; channel masks span the full 32 bits.
+    Bpp32,
+}
+
+impl BmpBitfieldDepth {
+    #[inline]
+    fn bits(self) -> u16 {
+        match self {
+            BmpBitfieldDepth::Bpp16 => 16,
+            BmpBitfieldDepth::Bpp32 => 32,
+        }
+    }
+}
+
+/// Per-channel bit masks for an explicit-mask `BI_BITFIELDS` /
+/// `BI_ALPHABITFIELDS` bitmap.
+///
+/// The three colour masks must be non-zero and mutually exclusive; the
+/// alpha mask is optional. A `Some(alpha)` mask selects the four-mask
+/// `BI_ALPHABITFIELDS` compression (value 6) — the decoder reads the
+/// alpha channel through that mask. A `None` alpha mask selects the
+/// three-mask `BI_BITFIELDS` compression (value 3) and the decoded
+/// pixels are fully opaque.
+///
+/// Each mask names where a channel's bits live inside the
+/// little-endian sample. The encoder packs the source channel into
+/// exactly those bits: a channel whose mask is wider than 8 bits is
+/// left-justified into the high bits of the field (the inverse of the
+/// decoder's high-bit-replication expansion), and a channel narrower
+/// than 8 bits keeps its most-significant source bits.
+#[derive(Debug, Clone, Copy)]
+pub struct BmpBitfieldMasks {
+    /// Red-channel mask.
+    pub red: u32,
+    /// Green-channel mask.
+    pub green: u32,
+    /// Blue-channel mask.
+    pub blue: u32,
+    /// Optional alpha-channel mask. `Some` ⇒ `BI_ALPHABITFIELDS`.
+    pub alpha: Option<u32>,
+}
+
+impl BmpBitfieldMasks {
+    /// Canonical 16-bit RGB 5-6-5 masks (R=0xF800, G=0x07E0, B=0x001F).
+    pub const RGB565: BmpBitfieldMasks = BmpBitfieldMasks {
+        red: 0xF800,
+        green: 0x07E0,
+        blue: 0x001F,
+        alpha: None,
+    };
+
+    /// Canonical 16-bit RGB 5-5-5 masks (R=0x7C00, G=0x03E0, B=0x001F;
+    /// the high bit is unused / reserved).
+    pub const RGB555: BmpBitfieldMasks = BmpBitfieldMasks {
+        red: 0x7C00,
+        green: 0x03E0,
+        blue: 0x001F,
+        alpha: None,
+    };
+
+    /// Canonical 16-bit ARGB 1-5-5-5 masks (A=0x8000, R=0x7C00,
+    /// G=0x03E0, B=0x001F) — a four-mask `BI_ALPHABITFIELDS` layout.
+    pub const ARGB1555: BmpBitfieldMasks = BmpBitfieldMasks {
+        red: 0x7C00,
+        green: 0x03E0,
+        blue: 0x001F,
+        alpha: Some(0x8000),
+    };
+
+    /// Canonical 32-bit BGRA byte-aligned masks (B in bits 0..8, G in
+    /// 8..16, R in 16..24, A in 24..32). Every channel is exactly one
+    /// byte at a byte boundary, so an 8-bit source channel round-trips
+    /// losslessly through the decoder.
+    pub const BGRA8888: BmpBitfieldMasks = BmpBitfieldMasks {
+        red: 0x00FF_0000,
+        green: 0x0000_FF00,
+        blue: 0x0000_00FF,
+        alpha: Some(0xFF00_0000),
+    };
+
+    /// 32-bit RGB byte-aligned masks with no alpha (B in 0..8, G in
+    /// 8..16, R in 16..24). Selects the three-mask `BI_BITFIELDS` form;
+    /// decoded pixels are opaque.
+    pub const BGRX8888: BmpBitfieldMasks = BmpBitfieldMasks {
+        red: 0x00FF_0000,
+        green: 0x0000_FF00,
+        blue: 0x0000_00FF,
+        alpha: None,
+    };
+
+    /// `BI_ALPHABITFIELDS` when an alpha mask is present, else
+    /// `BI_BITFIELDS`.
+    #[inline]
+    fn compression(self) -> u32 {
+        if self.alpha.is_some() {
+            BI_ALPHABITFIELDS
+        } else {
+            BI_BITFIELDS
+        }
+    }
+
+    /// Reject masks that can't be honoured at the chosen depth: a zero
+    /// colour mask, a colour/colour or colour/alpha overlap, or a mask
+    /// that escapes the 16-bit sample window on a `Bpp16` bitmap.
+    fn validate(self, depth: BmpBitfieldDepth) -> Result<()> {
+        if self.red == 0 || self.green == 0 || self.blue == 0 {
+            return Err(Error::invalid(
+                "BMP bitfields encode: red/green/blue masks must be non-zero",
+            ));
+        }
+        let masks = [self.red, self.green, self.blue, self.alpha.unwrap_or(0)];
+        for i in 0..masks.len() {
+            for j in (i + 1)..masks.len() {
+                if masks[i] != 0 && masks[j] != 0 && masks[i] & masks[j] != 0 {
+                    return Err(Error::invalid(
+                        "BMP bitfields encode: channel masks overlap",
+                    ));
+                }
+            }
+        }
+        if depth == BmpBitfieldDepth::Bpp16 {
+            let union = self.red | self.green | self.blue | self.alpha.unwrap_or(0);
+            if union & !0xFFFF != 0 {
+                return Err(Error::invalid(
+                    "BMP bitfields encode: a mask exceeds the 16-bit sample window",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Pack an 8-bit source channel into the bits its `mask` selects,
+/// left-justifying into the field's high bits. The inverse of the
+/// decoder's high-bit-replication `expand`: a value of `0xFF` fills the
+/// whole field, `0x00` clears it, and intermediate values keep their
+/// most-significant bits. A wider-than-8 field is filled by replicating
+/// the source's high bits downward so the round-trip is monotone.
+#[inline]
+fn pack_channel(sample: u8, mask: u32) -> u32 {
+    if mask == 0 {
+        return 0;
+    }
+    let shift = mask.trailing_zeros();
+    let len = 32 - mask.leading_zeros() - shift;
+    let field: u32 = if len >= 8 {
+        // Left-justify the byte into the top of the field, then repeat
+        // its high bits downward to fill the remaining low bits so the
+        // field's value scales smoothly across its full range.
+        let mut v = (sample as u32) << (len - 8);
+        let mut filled = 8u32;
+        while filled < len {
+            v |= (sample as u32) >> (filled.min(8));
+            filled += 8;
+        }
+        v
+    } else {
+        // Field narrower than a byte: keep the source's most-significant
+        // `len` bits (the bits the decoder's `expand` will replicate).
+        (sample as u32) >> (8 - len)
+    };
+    (field << shift) & mask
+}
+
+/// Encode a [`BmpImage`] as an explicit-mask `BI_BITFIELDS` /
+/// `BI_ALPHABITFIELDS` BMP with a **V3 (40-byte) `BITMAPINFOHEADER`**
+/// plus the mask block written in the canonical tail position
+/// immediately after the header — the layout the decoder reads for a
+/// 40-byte header (12 bytes of R/G/B for `BI_BITFIELDS`, 16 bytes of
+/// R/G/B/A for `BI_ALPHABITFIELDS`). This is the most common in-the-wild
+/// bit-field form and the symmetric encode counterpart to the decoder's
+/// V3 mask-tail path (the existing `Rgb565` arm of [`encode_bmp`] emits
+/// a *V4* header instead, with masks inside the header body).
+///
+/// Input pixel source:
+/// * [`BmpBitfieldDepth::Bpp16`] — the image must be
+///   [`BmpPixelFormat::Rgb565`] or [`BmpPixelFormat::Rgb555`]; the plane
+///   already carries packed little-endian 16-bit samples and is copied
+///   verbatim (the caller is responsible for matching the words to the
+///   masks they pass).
+/// * [`BmpBitfieldDepth::Bpp32`] — the image must be
+///   [`BmpPixelFormat::Rgba`]; each R/G/B/A source byte is packed into
+///   the bits its mask selects. With [`BmpBitfieldMasks::BGRA8888`] the
+///   round-trip is byte-for-byte lossless.
+///
+/// `top_down` is honoured (negative `biHeight`); bit-field bitmaps are
+/// always uncompressed so the top-down form is spec-legal. The mask
+/// block sits between the header and the pixel array, so
+/// `bfOffBits = 14 + 40 + (12 | 16)`.
+pub fn encode_bmp_bitfields(
+    image: &BmpImage,
+    depth: BmpBitfieldDepth,
+    masks: BmpBitfieldMasks,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    if image.planes.is_empty() {
+        return Err(Error::invalid("BMP encoder: empty frame plane"));
+    }
+    masks.validate(depth)?;
+    let width = image.width;
+    let height = image.height;
+    let plane = &image.planes[0];
+
+    let pixels = match depth {
+        BmpBitfieldDepth::Bpp16 => {
+            match image.pixel_format {
+                BmpPixelFormat::Rgb565 | BmpPixelFormat::Rgb555 => {}
+                other => {
+                    return Err(Error::invalid(format!(
+                        "BMP bitfields encode: 16-bpp needs Rgb565/Rgb555 input, got {other:?}"
+                    )))
+                }
+            }
+            // 16-bit samples are passed through verbatim (same wire
+            // shape pack_rgb565 produces).
+            let (p, _) = pack_rgb565(plane, width, height, options)?;
+            p
+        }
+        BmpBitfieldDepth::Bpp32 => {
+            if image.pixel_format != BmpPixelFormat::Rgba {
+                return Err(Error::invalid(format!(
+                    "BMP bitfields encode: 32-bpp needs Rgba input, got {:?}",
+                    image.pixel_format
+                )));
+            }
+            pack_rgba_bitfields(plane, width, height, masks, options)?
+        }
+    };
+
+    let bpp = depth.bits();
+    let mask_bytes: u32 = if masks.alpha.is_some() { 16 } else { 12 };
+    let pixel_bytes = pixels.len() as u32;
+    let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPINFOHEADER_SIZE + mask_bytes;
+    let file_size = pixel_offset + pixel_bytes;
+
+    let mut out = Vec::with_capacity(file_size as usize);
+    write_file_header(&mut out, file_size, pixel_offset);
+    write_dib_header_v3(
+        &mut out,
+        width,
+        signed_stored_height(height, options),
+        bpp,
+        masks.compression(),
+        0,
+    );
+    // Mask tail: R, G, B (and A for BI_ALPHABITFIELDS), each a DWORD.
+    out.extend_from_slice(&masks.red.to_le_bytes());
+    out.extend_from_slice(&masks.green.to_le_bytes());
+    out.extend_from_slice(&masks.blue.to_le_bytes());
+    if let Some(a) = masks.alpha {
+        out.extend_from_slice(&a.to_le_bytes());
+    }
+    out.extend_from_slice(&pixels);
+    Ok(out)
+}
+
+/// Pack `Rgba` input into 32-bit little-endian samples laid out by
+/// `masks`. Row order honours `options.top_down`.
+fn pack_rgba_bitfields(
+    plane: &BmpPlane,
+    width: u32,
+    height: u32,
+    masks: BmpBitfieldMasks,
+    options: BmpEncodeOptions,
+) -> Result<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
+    let in_stride = plane.stride;
+    if plane.data.len() < in_stride * h {
+        return Err(Error::invalid(
+            "BMP encoder: frame plane truncated (bitfields32)",
+        ));
+    }
+    // 32-bpp rows are always a multiple of 4 bytes — no extra padding.
+    let out_stride = w * 4;
+    let mut out = vec![0u8; out_stride * h];
+    for y in 0..h {
+        let src_y = source_row(y, h, options);
+        let src = &plane.data[src_y * in_stride..src_y * in_stride + w * 4];
+        let dst = &mut out[y * out_stride..y * out_stride + out_stride];
+        for x in 0..w {
+            let (r, g, b, a) = (src[x * 4], src[x * 4 + 1], src[x * 4 + 2], src[x * 4 + 3]);
+            let mut sample = pack_channel(r, masks.red)
+                | pack_channel(g, masks.green)
+                | pack_channel(b, masks.blue);
+            if let Some(am) = masks.alpha {
+                sample |= pack_channel(a, am);
+            }
+            dst[x * 4..x * 4 + 4].copy_from_slice(&sample.to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
 /// Encode a [`BmpImage`] into a headerless DIB suitable for `.ico`
 /// sub-images. `double_height_for_ico_mask` tells the encoder to:
 ///

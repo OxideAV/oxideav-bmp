@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(encode)* **Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` encode**
+  (round 342): `encode_bmp_bitfields` is the symmetric encode counterpart
+  of the decoder's V3 mask-tail path. It writes a 40-byte
+  `BITMAPINFOHEADER` (V3) with the channel-mask block in the canonical
+  tail position immediately after the header — 12 bytes (R/G/B) for
+  `BI_BITFIELDS`, 16 bytes (R/G/B/A) for `BI_ALPHABITFIELDS` — which is
+  the most common in-the-wild bit-field layout (the existing `Rgb565`
+  arm of `encode_bmp` emits a *V4* header with masks inside the header
+  body instead). New public types `BmpBitfieldDepth` (`Bpp16` / `Bpp32`)
+  and `BmpBitfieldMasks` (with `RGB565` / `RGB555` / `ARGB1555` /
+  `BGRA8888` / `BGRX8888` presets) drive the channel placement. A
+  `Some(alpha)` mask selects the four-mask `BI_ALPHABITFIELDS`
+  compression; `None` selects the three-mask `BI_BITFIELDS` form
+  (decoded pixels opaque). For 32-bpp, `Rgba` input is packed into the
+  masked bit positions — byte-aligned masks (`BGRA8888`) round-trip
+  byte-for-byte lossless through `decode_bmp`; for 16-bpp the packed
+  little-endian samples are copied verbatim. Masks are validated
+  (non-zero colours, no channel overlap, fitting the 16-bit window on
+  `Bpp16`). `top_down` (negative `biHeight`) is honoured; bit-field
+  bitmaps are always uncompressed so top-down is spec-legal.
 - *(encode)* **Windows CE 2-bit/pixel indexed output** (round 334): the
   new `BmpPixelFormat::Indexed2` encode format is the symmetric
   counterpart of the round-330 2-bpp decoder. Input is one byte per
