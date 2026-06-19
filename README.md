@@ -141,6 +141,41 @@ let _ = h.reserved_is_clean();        // bfReserved1/2 zero per the spec
 header parse through this struct, so the "shorter than header" and
 "missing 'BM' signature" error messages come from a single source.
 
+### OS/2 file-magic recognition (`BmpFileMagic`)
+
+The *Bitmap Storage* material lists six legal `bfType` signatures: the
+canonical Windows `BM` (single-image DIB) plus the OS/2-era `BA`
+(struct bitmap array), `CI` (colour icon), `CP` (colour pointer),
+`IC` (icon), and `PT` (pointer). `BitmapFileHeader::magic()` classifies
+the signature into the `BmpFileMagic` enum so a caller can branch on
+the family instead of inspecting raw bytes:
+
+```rust
+use oxideav_bmp::{BitmapFileHeader, BmpFileMagic};
+
+let h = BitmapFileHeader::from_bytes(bytes).unwrap();
+match h.magic() {
+    BmpFileMagic::Windows         => { /* decodable BM */ }
+    BmpFileMagic::Os2Array        => { /* multi-image OS/2 archive */ }
+    m if m.is_os2()               => { /* CI / CP / IC / PT sub-bitmap */ }
+    BmpFileMagic::Unknown(raw)    => { /* not a bitmap signature */ }
+    _                             => {}
+}
+let _ = BmpFileMagic::Os2Array.ascii(); // b"BA"
+```
+
+This crate decodes the `BM` family only. The OS/2 multi-image archive
+(`BA`) and the icon / pointer sub-bitmaps wrap their own
+`BITMAPARRAYHEADER` / sub-header structures whose byte layout is **not
+part of the BMP file-format documentation** this crate works from, so
+they are recognised by name and rejected at the decode boundary with a
+precise diagnostic (`BMP: OS/2 bitmap array ('BA') archive not
+supported`, `… colour icon ('CI') …`, etc.) rather than the generic
+`missing 'BM' signature` error — an OS/2 wrapper is reported as a
+known-but-unsupported format instead of looking like a non-bitmap. Full
+OS/2 archive walking is blocked on a `BITMAPARRAYHEADER` field-layout
+trace in `docs/image/bmp/`.
+
 ### `bfOffBits` recovery (zero / implausibly-early offset)
 
 `bfOffBits` is the spec's source of truth for where the pixel array

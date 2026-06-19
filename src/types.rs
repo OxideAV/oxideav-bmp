@@ -325,6 +325,94 @@ pub fn row_stride(width_px: usize, bpp: usize) -> usize {
     (width_px * bpp).div_ceil(32) * 4
 }
 
+/// `bfType` signature for the OS/2 *bitmap array* archive wrapper
+/// (`BA`, ASCII, little-endian `0x4142`).
+pub const OS2_MAGIC_ARRAY: u16 = 0x4142;
+/// `bfType` for an OS/2 *colour icon* (`CI`, little-endian `0x4943`).
+pub const OS2_MAGIC_COLOR_ICON: u16 = 0x4943;
+/// `bfType` for an OS/2 *colour pointer* (`CP`, little-endian `0x5043`).
+pub const OS2_MAGIC_COLOR_POINTER: u16 = 0x5043;
+/// `bfType` for an OS/2 *icon* (`IC`, little-endian `0x4349`).
+pub const OS2_MAGIC_ICON: u16 = 0x4349;
+/// `bfType` for an OS/2 *pointer* (`PT`, little-endian `0x5450`).
+pub const OS2_MAGIC_POINTER: u16 = 0x5450;
+
+/// Classification of the two-byte `bfType` file signature.
+///
+/// The *Bitmap Storage* material documents the legal signatures: the
+/// canonical Windows `BM` (single-image DIB) plus the OS/2-era family
+/// `BA` / `CI` / `CP` / `IC` / `PT`. This crate decodes `BM` only — the
+/// OS/2 archive (`BA`) and icon / pointer sub-bitmaps wrap their own
+/// `BITMAPARRAYHEADER` / sub-header structures whose byte layout is not
+/// part of the BMP file-format documentation, so they are recognised by
+/// name and reported as known-but-unsupported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BmpFileMagic {
+    /// `BM` — canonical Windows single-image DIB. Decodable.
+    Windows,
+    /// `BA` — OS/2 struct bitmap array (multi-image archive wrapper).
+    Os2Array,
+    /// `CI` — OS/2 struct colour icon.
+    Os2ColorIcon,
+    /// `CP` — OS/2 const colour pointer.
+    Os2ColorPointer,
+    /// `IC` — OS/2 struct (monochrome) icon.
+    Os2Icon,
+    /// `PT` — OS/2 (monochrome) pointer.
+    Os2Pointer,
+    /// Any other `bfType` value — not a recognised BMP signature.
+    Unknown(u16),
+}
+
+impl BmpFileMagic {
+    /// Classify a little-endian `bfType` value.
+    pub fn from_bytes(file_type: u16) -> Self {
+        match file_type {
+            BMP_MAGIC => BmpFileMagic::Windows,
+            OS2_MAGIC_ARRAY => BmpFileMagic::Os2Array,
+            OS2_MAGIC_COLOR_ICON => BmpFileMagic::Os2ColorIcon,
+            OS2_MAGIC_COLOR_POINTER => BmpFileMagic::Os2ColorPointer,
+            OS2_MAGIC_ICON => BmpFileMagic::Os2Icon,
+            OS2_MAGIC_POINTER => BmpFileMagic::Os2Pointer,
+            other => BmpFileMagic::Unknown(other),
+        }
+    }
+
+    /// `true` for the canonical `BM` Windows signature — the only
+    /// family this crate's decoder accepts.
+    pub fn is_decodable(self) -> bool {
+        matches!(self, BmpFileMagic::Windows)
+    }
+
+    /// `true` for an OS/2-family signature (`BA` / `CI` / `CP` / `IC` /
+    /// `PT`) — recognised but not decodable.
+    pub fn is_os2(self) -> bool {
+        matches!(
+            self,
+            BmpFileMagic::Os2Array
+                | BmpFileMagic::Os2ColorIcon
+                | BmpFileMagic::Os2ColorPointer
+                | BmpFileMagic::Os2Icon
+                | BmpFileMagic::Os2Pointer
+        )
+    }
+
+    /// The two ASCII characters of the signature (e.g. `"BM"`, `"BA"`).
+    /// `Unknown` renders the raw little-endian bytes.
+    pub fn ascii(self) -> [u8; 2] {
+        let v = match self {
+            BmpFileMagic::Windows => BMP_MAGIC,
+            BmpFileMagic::Os2Array => OS2_MAGIC_ARRAY,
+            BmpFileMagic::Os2ColorIcon => OS2_MAGIC_COLOR_ICON,
+            BmpFileMagic::Os2ColorPointer => OS2_MAGIC_COLOR_POINTER,
+            BmpFileMagic::Os2Icon => OS2_MAGIC_ICON,
+            BmpFileMagic::Os2Pointer => OS2_MAGIC_POINTER,
+            BmpFileMagic::Unknown(v) => v,
+        };
+        v.to_le_bytes()
+    }
+}
+
 /// Typed view of the 14-byte `BITMAPFILEHEADER` that prefixes every
 /// real `.bmp` file (the headerless DIB variant consumed by `.ico`
 /// strips this off — see [`crate::decode_dib`]).
@@ -405,9 +493,21 @@ impl BitmapFileHeader {
         let h = Self::from_bytes(buf)
             .ok_or_else(|| crate::error::BmpError::invalid("BMP: input shorter than header"))?;
         if h.file_type != BMP_MAGIC {
-            return Err(crate::error::BmpError::invalid(
-                "BMP: missing 'BM' signature",
-            ));
+            // Give the OS/2 archive / icon / pointer family a named
+            // diagnostic instead of the generic bad-signature string so
+            // a caller can tell "this is a known-but-unsupported OS/2
+            // wrapper" apart from "this isn't a bitmap at all". The
+            // BITMAPARRAYHEADER / sub-header byte layout is not in the
+            // BMP file-format documentation, so these are not decoded.
+            let msg = match h.magic() {
+                BmpFileMagic::Os2Array => "BMP: OS/2 bitmap array ('BA') archive not supported",
+                BmpFileMagic::Os2ColorIcon => "BMP: OS/2 colour icon ('CI') not supported",
+                BmpFileMagic::Os2ColorPointer => "BMP: OS/2 colour pointer ('CP') not supported",
+                BmpFileMagic::Os2Icon => "BMP: OS/2 icon ('IC') not supported",
+                BmpFileMagic::Os2Pointer => "BMP: OS/2 pointer ('PT') not supported",
+                _ => "BMP: missing 'BM' signature",
+            };
+            return Err(crate::error::BmpError::invalid(msg));
         }
         Ok(h)
     }
@@ -419,6 +519,24 @@ impl BitmapFileHeader {
     /// caller probing a multi-image OS/2 archive can branch on this.
     pub fn has_canonical_magic(&self) -> bool {
         self.file_type == BMP_MAGIC
+    }
+
+    /// Classify the `bfType` signature into the documented BMP / OS/2
+    /// file-magic family.
+    ///
+    /// The *Bitmap Storage* material enumerates the legal two-byte
+    /// signatures: `BM` (Windows / single-image DIB), and the OS/2-era
+    /// `BA` (struct bitmap array), `CI` (struct colour icon), `CP`
+    /// (const colour pointer), `IC` (struct icon), and `PT` (pointer).
+    /// Only `BM` is decodable by this crate; the OS/2 multi-image
+    /// archive (`BA`) and the icon / pointer sub-bitmaps wrap their own
+    /// `BITMAPARRAYHEADER` / sub-header structures whose byte layout is
+    /// not part of the BMP file-format documentation this crate works
+    /// from. A caller can branch on the returned [`BmpFileMagic`] to
+    /// give a precise "OS/2 archive, not supported" diagnostic instead
+    /// of a generic bad-signature error.
+    pub fn magic(&self) -> BmpFileMagic {
+        BmpFileMagic::from_bytes(self.file_type)
     }
 
     /// `true` when the reserved field words are both zero, matching
@@ -1364,5 +1482,70 @@ mod tests {
         let decoded = crate::decoder::decode_bmp(&bytes).unwrap();
         assert_eq!(decoded.width, h.absolute_width());
         assert_eq!(decoded.height, h.absolute_height());
+    }
+
+    #[test]
+    fn file_magic_classification() {
+        assert_eq!(BmpFileMagic::from_bytes(BMP_MAGIC), BmpFileMagic::Windows);
+        assert!(BmpFileMagic::Windows.is_decodable());
+        assert!(!BmpFileMagic::Windows.is_os2());
+        assert_eq!(BmpFileMagic::Windows.ascii(), *b"BM");
+
+        for (raw, want, ascii) in [
+            (OS2_MAGIC_ARRAY, BmpFileMagic::Os2Array, *b"BA"),
+            (OS2_MAGIC_COLOR_ICON, BmpFileMagic::Os2ColorIcon, *b"CI"),
+            (
+                OS2_MAGIC_COLOR_POINTER,
+                BmpFileMagic::Os2ColorPointer,
+                *b"CP",
+            ),
+            (OS2_MAGIC_ICON, BmpFileMagic::Os2Icon, *b"IC"),
+            (OS2_MAGIC_POINTER, BmpFileMagic::Os2Pointer, *b"PT"),
+        ] {
+            let m = BmpFileMagic::from_bytes(raw);
+            assert_eq!(m, want);
+            assert!(m.is_os2());
+            assert!(!m.is_decodable());
+            assert_eq!(m.ascii(), ascii);
+        }
+
+        assert_eq!(
+            BmpFileMagic::from_bytes(0x1234),
+            BmpFileMagic::Unknown(0x1234)
+        );
+        assert!(!BmpFileMagic::Unknown(0x1234).is_decodable());
+        assert!(!BmpFileMagic::Unknown(0x1234).is_os2());
+    }
+
+    #[test]
+    fn os2_archive_magic_gives_named_error() {
+        // A 'BA' bitmap-array archive must produce the precise OS/2
+        // diagnostic, not the generic "missing 'BM' signature".
+        let mut buf = vec![0u8; 64];
+        buf[0..2].copy_from_slice(&OS2_MAGIC_ARRAY.to_le_bytes());
+        let err = BitmapFileHeader::parse(&buf).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("OS/2 bitmap array"), "{msg}");
+        assert!(msg.contains("BA"), "{msg}");
+
+        // 'CI' colour icon.
+        buf[0..2].copy_from_slice(&OS2_MAGIC_COLOR_ICON.to_le_bytes());
+        let msg = format!("{}", BitmapFileHeader::parse(&buf).unwrap_err());
+        assert!(msg.contains("colour icon"), "{msg}");
+
+        // A genuinely-foreign signature keeps the generic message.
+        buf[0] = b'X';
+        buf[1] = b'Z';
+        let msg = format!("{}", BitmapFileHeader::parse(&buf).unwrap_err());
+        assert!(msg.contains("missing 'BM' signature"), "{msg}");
+    }
+
+    #[test]
+    fn file_header_magic_accessor() {
+        let mut buf = vec![0u8; 14];
+        buf[0..2].copy_from_slice(&OS2_MAGIC_ARRAY.to_le_bytes());
+        let h = BitmapFileHeader::from_bytes(&buf).unwrap();
+        assert_eq!(h.magic(), BmpFileMagic::Os2Array);
+        assert!(!h.has_canonical_magic());
     }
 }

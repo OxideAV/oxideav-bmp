@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(decode)* **OS/2 file-magic recognition** (round 342): the six
+  documented `bfType` signatures are now classified through the new
+  public `BmpFileMagic` enum (`Windows` `BM`, plus OS/2 `Os2Array` `BA`,
+  `Os2ColorIcon` `CI`, `Os2ColorPointer` `CP`, `Os2Icon` `IC`,
+  `Os2Pointer` `PT`, and `Unknown(u16)`), with the matching
+  `OS2_MAGIC_*` constants and a `BitmapFileHeader::magic()` accessor
+  (`is_decodable` / `is_os2` / `ascii` helpers). An OS/2-family bitmap
+  now produces a precise diagnostic (`BMP: OS/2 bitmap array ('BA')
+  archive not supported`, `… colour icon ('CI') …`, etc.) instead of
+  the generic `missing 'BM' signature`, so a caller can tell a
+  known-but-unsupported OS/2 wrapper apart from a non-bitmap. Full OS/2
+  archive (`BITMAPARRAYHEADER`) walking remains docs-blocked — the
+  array/sub-header byte layout is not in the BMP file-format
+  documentation.
 - *(encode)* **Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` encode**
   (round 342): `encode_bmp_bitfields` is the symmetric encode counterpart
   of the decoder's V3 mask-tail path. It writes a 40-byte
