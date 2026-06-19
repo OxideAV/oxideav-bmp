@@ -22,6 +22,114 @@
 /// `BM` ASCII as a little-endian u16.
 pub const BMP_MAGIC: u16 = 0x4D42;
 
+/// `BA` — OS/2 `struct bitmap array`. The two-byte signature of a
+/// multi-image OS/2 archive (`BITMAPARRAYHEADER`) whose body is a linked
+/// list of sub-bitmaps, not a single DIB. Archive-walking is docs-blocked
+/// (#1760), so the decoder recognises this magic and rejects it with a
+/// precise message instead of the generic "missing 'BM'".
+pub const OS2_MAGIC_BA: u16 = 0x4142;
+/// `CI` — OS/2 `struct color icon`. Recognise-and-reject.
+pub const OS2_MAGIC_CI: u16 = 0x4943;
+/// `CP` — OS/2 `const color pointer`. Recognise-and-reject.
+pub const OS2_MAGIC_CP: u16 = 0x5043;
+/// `IC` — OS/2 `struct icon`. Recognise-and-reject.
+pub const OS2_MAGIC_IC: u16 = 0x4349;
+/// `PT` — OS/2 `pointer`. Recognise-and-reject.
+pub const OS2_MAGIC_PT: u16 = 0x5450;
+
+/// Classification of the two-byte `bfType` file signature.
+///
+/// The staged Wikipedia file-format reference lists six possible
+/// `bfType` signatures: `BM` (Windows / OS/2 single bitmap) plus five
+/// OS/2-era container wrappers (`BA` bitmap array, `CI` colour icon,
+/// `CP` colour pointer, `IC` icon, `PT` pointer). Only `BM` carries a
+/// bare DIB our decoder can read; the wrappers prefix or restructure the
+/// payload (the `BA` array is a linked list of sub-bitmaps; the icon /
+/// pointer wrappers carry hotspot metadata). Recognising the wrapper
+/// signature lets the decoder reject with a precise, named diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BmpFileMagic {
+    /// `BM` — the canonical Windows / OS/2 single-bitmap signature.
+    Windows,
+    /// `BA` — OS/2 `struct bitmap array` (multi-image archive).
+    Os2BitmapArray,
+    /// `CI` — OS/2 `struct color icon`.
+    Os2ColorIcon,
+    /// `CP` — OS/2 `const color pointer`.
+    Os2ColorPointer,
+    /// `IC` — OS/2 `struct icon`.
+    Os2Icon,
+    /// `PT` — OS/2 `pointer`.
+    Os2Pointer,
+    /// Any other value — not a recognised BMP-family signature.
+    Unknown(u16),
+}
+
+impl BmpFileMagic {
+    /// Map a little-endian `bfType` word onto its [`BmpFileMagic`].
+    pub fn from_word(word: u16) -> Self {
+        match word {
+            BMP_MAGIC => Self::Windows,
+            OS2_MAGIC_BA => Self::Os2BitmapArray,
+            OS2_MAGIC_CI => Self::Os2ColorIcon,
+            OS2_MAGIC_CP => Self::Os2ColorPointer,
+            OS2_MAGIC_IC => Self::Os2Icon,
+            OS2_MAGIC_PT => Self::Os2Pointer,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// `true` for the five OS/2-era container signatures (everything the
+    /// decoder recognises but cannot decode).
+    pub fn is_os2_container(self) -> bool {
+        matches!(
+            self,
+            Self::Os2BitmapArray
+                | Self::Os2ColorIcon
+                | Self::Os2ColorPointer
+                | Self::Os2Icon
+                | Self::Os2Pointer
+        )
+    }
+
+    /// The two ASCII characters of the signature, e.g. `"BA"`. `Unknown`
+    /// renders the raw little-endian bytes.
+    pub fn signature(self) -> [u8; 2] {
+        let word = match self {
+            Self::Windows => BMP_MAGIC,
+            Self::Os2BitmapArray => OS2_MAGIC_BA,
+            Self::Os2ColorIcon => OS2_MAGIC_CI,
+            Self::Os2ColorPointer => OS2_MAGIC_CP,
+            Self::Os2Icon => OS2_MAGIC_IC,
+            Self::Os2Pointer => OS2_MAGIC_PT,
+            Self::Unknown(w) => w,
+        };
+        word.to_le_bytes()
+    }
+
+    /// A precise rejection message naming the recognised-but-unsupported
+    /// signature, or the generic "missing 'BM'" string for `Unknown`.
+    pub fn reject_message(self) -> String {
+        match self {
+            Self::Windows => "BMP: 'BM' signature is valid".to_string(),
+            Self::Os2BitmapArray => {
+                "BMP: 'BA' OS/2 bitmap-array container is not supported (archive-walking \
+                 unimplemented)"
+                    .to_string()
+            }
+            Self::Os2ColorIcon => {
+                "BMP: 'CI' OS/2 colour-icon container is not supported".to_string()
+            }
+            Self::Os2ColorPointer => {
+                "BMP: 'CP' OS/2 colour-pointer container is not supported".to_string()
+            }
+            Self::Os2Icon => "BMP: 'IC' OS/2 icon container is not supported".to_string(),
+            Self::Os2Pointer => "BMP: 'PT' OS/2 pointer container is not supported".to_string(),
+            Self::Unknown(_) => "BMP: missing 'BM' signature".to_string(),
+        }
+    }
+}
+
 /// Size of `BITMAPFILEHEADER` on disk.
 pub const BITMAPFILEHEADER_SIZE: u32 = 14;
 /// Size of `BITMAPINFOHEADER` (v3) on disk. Every DIB we handle starts
@@ -405,15 +513,36 @@ impl BitmapFileHeader {
         let h = Self::from_bytes(buf)
             .ok_or_else(|| crate::error::BmpError::invalid("BMP: input shorter than header"))?;
         if h.file_type != BMP_MAGIC {
-            return Err(crate::error::BmpError::invalid(
-                "BMP: missing 'BM' signature",
-            ));
+            // Distinguish the five OS/2-era container signatures from a
+            // generic bad-magic byte stream. The OS/2 wrappers are a real
+            // (if archaic) format family, so a reader that hands us one
+            // deserves a message naming exactly which wrapper it is rather
+            // than the catch-all "missing 'BM'". The `BA` array wrapper and
+            // the `CI`/`CP`/`IC`/`PT` icon/pointer wrappers are all
+            // docs-blocked (no archive-walking / cursor-hotspot support), so
+            // every one is a recognise-and-reject (`Unsupported`). An
+            // unrecognised word stays the historical `InvalidData`
+            // "missing 'BM'" so existing matchers keep working.
+            let kind = h.magic_kind();
+            return Err(if kind.is_os2_container() {
+                crate::error::BmpError::unsupported(kind.reject_message())
+            } else {
+                crate::error::BmpError::invalid(kind.reject_message())
+            });
         }
         Ok(h)
     }
 
+    /// Classify the `bfType` signature word into a [`BmpFileMagic`].
+    /// Returns [`BmpFileMagic::Windows`] for the canonical `"BM"` and one
+    /// of the OS/2 variants for the five OS/2-era alternates; anything
+    /// else is [`BmpFileMagic::Unknown`].
+    pub fn magic_kind(&self) -> BmpFileMagic {
+        BmpFileMagic::from_word(self.file_type)
+    }
+
     /// `true` when the `bfType` field carries the canonical `"BM"`
-    /// signature. Returns `false` for the three OS/2-era alternates
+    /// signature. Returns `false` for the five OS/2-era alternates
     /// (`BA` array, `CI` colour icon, `CP` colour pointer, `IC` icon,
     /// `PT` pointer) — none of which our decoder handles, but a
     /// caller probing a multi-image OS/2 archive can branch on this.
@@ -907,6 +1036,97 @@ mod tests {
         assert!(!h.has_canonical_magic());
         h.file_type = 0x4943; // 'CI'
         assert!(!h.has_canonical_magic());
+    }
+
+    #[test]
+    fn file_magic_classifies_all_six_signatures() {
+        assert_eq!(BmpFileMagic::from_word(BMP_MAGIC), BmpFileMagic::Windows);
+        assert_eq!(
+            BmpFileMagic::from_word(OS2_MAGIC_BA),
+            BmpFileMagic::Os2BitmapArray
+        );
+        assert_eq!(
+            BmpFileMagic::from_word(OS2_MAGIC_CI),
+            BmpFileMagic::Os2ColorIcon
+        );
+        assert_eq!(
+            BmpFileMagic::from_word(OS2_MAGIC_CP),
+            BmpFileMagic::Os2ColorPointer
+        );
+        assert_eq!(BmpFileMagic::from_word(OS2_MAGIC_IC), BmpFileMagic::Os2Icon);
+        assert_eq!(
+            BmpFileMagic::from_word(OS2_MAGIC_PT),
+            BmpFileMagic::Os2Pointer
+        );
+        assert_eq!(
+            BmpFileMagic::from_word(0x5A4D),
+            BmpFileMagic::Unknown(0x5A4D)
+        );
+    }
+
+    #[test]
+    fn file_magic_signature_round_trips_ascii() {
+        // The signature bytes must read back as the two ASCII chars the
+        // OS/2 documentation lists, in file order.
+        assert_eq!(&BmpFileMagic::Windows.signature(), b"BM");
+        assert_eq!(&BmpFileMagic::Os2BitmapArray.signature(), b"BA");
+        assert_eq!(&BmpFileMagic::Os2ColorIcon.signature(), b"CI");
+        assert_eq!(&BmpFileMagic::Os2ColorPointer.signature(), b"CP");
+        assert_eq!(&BmpFileMagic::Os2Icon.signature(), b"IC");
+        assert_eq!(&BmpFileMagic::Os2Pointer.signature(), b"PT");
+    }
+
+    #[test]
+    fn file_magic_is_os2_container_excludes_windows_and_unknown() {
+        assert!(!BmpFileMagic::Windows.is_os2_container());
+        assert!(!BmpFileMagic::Unknown(0).is_os2_container());
+        for m in [
+            BmpFileMagic::Os2BitmapArray,
+            BmpFileMagic::Os2ColorIcon,
+            BmpFileMagic::Os2ColorPointer,
+            BmpFileMagic::Os2Icon,
+            BmpFileMagic::Os2Pointer,
+        ] {
+            assert!(m.is_os2_container(), "{m:?} should be an OS/2 container");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_each_os2_container_with_named_unsupported_error() {
+        // Each OS/2 wrapper signature must reject with an `Unsupported`
+        // error whose message names the two-char signature — not the
+        // generic "missing 'BM'".
+        for (sig, needle) in [
+            (OS2_MAGIC_BA, "'BA'"),
+            (OS2_MAGIC_CI, "'CI'"),
+            (OS2_MAGIC_CP, "'CP'"),
+            (OS2_MAGIC_IC, "'IC'"),
+            (OS2_MAGIC_PT, "'PT'"),
+        ] {
+            let mut bytes = canonical_header_bytes();
+            bytes[0..2].copy_from_slice(&sig.to_le_bytes());
+            let err = BitmapFileHeader::parse(&bytes).unwrap_err();
+            match err {
+                BmpError::Unsupported(msg) => {
+                    assert!(msg.contains(needle), "msg {msg:?} should name {needle}");
+                    assert!(msg.contains("OS/2"), "msg {msg:?} should mention OS/2");
+                }
+                other => panic!("expected Unsupported for {needle}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_unknown_magic_stays_invalid_data_missing_bm() {
+        // A wholly unrecognised signature keeps the historical
+        // `InvalidData("missing 'BM'")` so existing matchers are intact.
+        let mut bytes = canonical_header_bytes();
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        match BitmapFileHeader::parse(&bytes).unwrap_err() {
+            BmpError::InvalidData(msg) => assert!(msg.contains("missing 'BM'")),
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[test]
