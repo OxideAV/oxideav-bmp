@@ -127,7 +127,8 @@ use oxideav_bmp::BitmapFileHeader;
 // `parse` validates buffer length + the `0x4D42` `bfType` signature.
 let h = BitmapFileHeader::parse(bytes)?;
 assert!(h.has_canonical_magic());     // distinguishes "BM" from OS/2
-                                      // `BA`/`CI`/`CP` archive variants
+                                      // `BA`/`CI`/`CP`/`IC`/`PT` variants
+let _ = h.magic_kind();               // BmpFileMagic — the classified signature
 let _ = h.file_size;                  // bfSize (may be 0 — informational)
 let _ = h.pixel_offset;               // bfOffBits — start of pixel array
 let _ = h.reserved_is_clean();        // bfReserved1/2 zero per the spec
@@ -140,6 +141,21 @@ let _ = h.reserved_is_clean();        // bfReserved1/2 zero per the spec
 `decode_bmp` and `decode_bmp_with_metadata` now both funnel the file
 header parse through this struct, so the "shorter than header" and
 "missing 'BM' signature" error messages come from a single source.
+
+### OS/2 file-magic recognition
+
+The two-byte `bfType` signature is classified by `BmpFileMagic`. Beyond
+the canonical `BM`, the staged file-format reference lists five OS/2-era
+container signatures: `BA` (bitmap array), `CI` (colour icon), `CP`
+(colour pointer), `IC` (icon), and `PT` (pointer). None carry a bare DIB
+this crate can decode — the `BA` array is a linked list of sub-bitmaps
+(archive-walking is docs-blocked) and the icon / pointer wrappers carry
+hotspot metadata — so each is **recognised and rejected** with a precise
+`Unsupported` error naming the two-char signature (e.g. `'BA' OS/2
+bitmap-array container is not supported`) rather than the generic
+`InvalidData("missing 'BM'")`. A wholly unrecognised word keeps the
+historical `missing 'BM'` message. The `OS2_MAGIC_BA` … `OS2_MAGIC_PT`
+constants and the `BmpFileMagic` classifier are part of the public API.
 
 ### `bfOffBits` recovery (zero / implausibly-early offset)
 
@@ -501,6 +517,48 @@ when `top_down` is set since RLE escape codes have no defined meaning
 under a negative `biHeight`. `Indexed1` is always uncompressed and so
 unaffected.
 
+### Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` (V3 + mask tail)
+
+`encode_bmp_bitfields` emits a bit-field BMP using the classic Windows
+in-file mask layout: a 40-byte `BITMAPINFOHEADER` (V3) followed by a
+12-byte (R/G/B) or 16-byte (R/G/B/A) DWORD mask tail immediately after
+the header, then the pixel array. This is distinct from the in-header
+mask block a V4 / V5 header carries — the masks sit **between** the
+40-byte header and the pixels, which is exactly the V3 trailing-mask
+layout the decoder already reads.
+
+```rust
+use oxideav_bmp::{encode_bmp_bitfields, BmpBitfields, BmpEncodeOptions};
+
+let bytes = encode_bmp_bitfields(&image, BmpBitfields::BGRA8888,
+                                 BmpEncodeOptions::default())?;
+```
+
+`BmpBitfields` carries the four channel masks plus the on-disk bit depth
+(16 or 32) and ships five presets:
+
+| Preset      | bpp | R / G / B / A masks                              | Tail | Compression |
+| ----------- | --- | ------------------------------------------------ | ---- | ----------- |
+| `RGB565`    | 16  | `F800` / `07E0` / `001F` / —                     | 12 B | `BI_BITFIELDS` |
+| `RGB555`    | 16  | `7C00` / `03E0` / `001F` / —                     | 12 B | `BI_BITFIELDS` |
+| `ARGB1555`  | 16  | `7C00` / `03E0` / `001F` / `8000`                | 16 B | `BI_ALPHABITFIELDS` |
+| `BGRA8888`  | 32  | `00FF0000` / `0000FF00` / `000000FF` / `FF000000`| 16 B | `BI_ALPHABITFIELDS` |
+| `BGRX8888`  | 32  | `00FF0000` / `0000FF00` / `000000FF` / —         | 12 B | `BI_BITFIELDS` |
+
+The source plane is `Rgba` or `Rgb24`; each 8-bit channel is requantised
+to its mask width (the inverse of the decoder's shift-and-scale
+`expand`). A non-zero alpha mask selects the four-mask
+`BI_ALPHABITFIELDS` tail so alpha survives the round-trip; a zero alpha
+mask selects the three-mask `BI_BITFIELDS` tail and decoders treat every
+pixel as opaque. For the **byte-aligned 32-bpp presets** every channel
+keeps its full 8 bits, so `BGRA8888` round-trips bit-exact (alpha
+included) and `BGRX8888` round-trips colour bit-exact (alpha decodes
+`0xFF`). `Rgb24` sources synthesise a full-scale alpha run.
+`top_down` is honoured. Custom mask sets are accepted as long as
+`BmpBitfields::validate` passes — each non-zero mask must be a single
+contiguous bit run, masks must not overlap, and every bit must fit
+inside `bpp` bits.
+
 ## DIB helpers for `.ico`
 
 ```rust
@@ -530,7 +588,7 @@ same as the fuzz harness: every malformed input must return `Err`
 tolerance, return safely with the XOR alpha preserved) — never panic,
 index out of bounds, or OOM-abort.
 
-Four `cargo-fuzz` targets live in `fuzz/`:
+Five `cargo-fuzz` targets live in `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `decode_bmp` and to `decode_dib`
   (both the plain and the doubled-height XOR+AND-mask modes). The
@@ -548,7 +606,8 @@ Four `cargo-fuzz` targets live in `fuzz/`:
   the **encoder** with fuzzer-controlled pixels / palette / encode
   options, then decoding the output back. The first four input bytes
   pick the pixel format (`Rgba` / `Rgb24` / `Rgb565` / `Indexed8` /
-  `Indexed4` / `Indexed1`), the `top_down` + `minimal_palette` option
+  `Indexed4` / `Indexed2` / `Indexed1` / `Rgb555`, via `byte % 8`), the
+  `top_down` + `minimal_palette` option
   flags, and the geometry (clamped to 1..=64 px per axis to keep each
   iteration under ~16 KiB of plane data). The remainder fills the
   pixel plane and, for indexed formats, the palette tail (three bytes
@@ -572,8 +631,17 @@ Four `cargo-fuzz` targets live in `fuzz/`:
   base (14 for a BMP file, 0 for a header-less DIB) varies. Five seed
   inputs (plain V3, V4 calibrated-RGB, V5 embedded ICC on direct-colour
   and indexed images, V5 linked ICC) live in `fuzz/corpus/metadata/`.
+* `bitfields_roundtrip` — drives the explicit-mask
+  `encode_bmp_bitfields` encoder with fuzzer-controlled pixels, a mask
+  preset (RGB565 / RGB555 / ARGB1555 / BGRA8888 / BGRX8888) or an
+  arbitrary mask set that exercises `BmpBitfields::validate`'s reject
+  path, plus the `top_down` option, then decodes the output. The
+  byte-aligned 32-bpp presets additionally assert the documented exact
+  round-trip (`BGRA8888` lossless including alpha; `BGRX8888`
+  colour-exact with alpha decoding opaque); the 16-bpp presets are
+  panic-checked only.
 
-All four targets share the same panic-free contract — every input
+All five targets share the same panic-free contract — every input
 returns a `Result` rather than panicking, indexing out of bounds, or
 OOM-aborting — and build against the framework-free standalone path
 (`default-features = false`).

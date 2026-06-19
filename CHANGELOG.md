@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(encode)* **Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS`
+  encoder** (round 342): `encode_bmp_bitfields` /
+  `encode_bmp_plane_bitfields` emit a bit-field BMP using the classic
+  Windows in-file mask layout — a 40-byte `BITMAPINFOHEADER` (V3)
+  followed by a 12-byte (R/G/B) or 16-byte (R/G/B/A) DWORD mask tail
+  immediately after the header — distinct from the V4/V5 in-header mask
+  block the `Rgb565` path emits. The new `BmpBitfields` struct carries
+  the four channel masks plus bit depth and ships five presets: `RGB565`,
+  `RGB555`, `ARGB1555` (16-bpp), `BGRA8888`, `BGRX8888` (32-bpp).
+  `validate()` enforces single-run, non-overlapping, in-range masks.
+  Byte-aligned 32-bpp masks round-trip bit-exact through `decode_bmp`
+  (alpha for `BGRA8888`, opaque for `BGRX8888`); `Rgb24` sources
+  synthesise a full-scale alpha run. `top_down` is honoured.
+- *(decode)* **OS/2 file-magic recognition** (round 342): the five
+  OS/2-era container signatures (`BA` bitmap array, `CI` colour icon,
+  `CP` colour pointer, `IC` icon, `PT` pointer) are now classified by the
+  new public `BmpFileMagic` enum (plus `OS2_MAGIC_BA` … `OS2_MAGIC_PT`
+  constants) and rejected with a precise `Unsupported` error naming the
+  two-char signature instead of the generic `InvalidData("missing
+  'BM'")`. Unrecognised words keep the historical message. Archive
+  walking / hotspot parsing stay docs-blocked — recognise-and-reject
+  only.
+- *(fuzz)* **`bitfields_roundtrip` target** (round 342): exercises the
+  explicit-mask encoder with fuzzer-controlled masks + pixels, asserting
+  the no-panic contract plus the exact round-trip for the byte-aligned
+  32-bpp presets. Also covered `Indexed2` in the `encode_roundtrip`
+  harness's match arms + selector, restoring the scheduled-Fuzz build.
 - *(encode)* **Windows CE 2-bit/pixel indexed output** (round 334): the
   new `BmpPixelFormat::Indexed2` encode format is the symmetric
   counterpart of the round-330 2-bpp decoder. Input is one byte per
