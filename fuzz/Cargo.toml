@@ -89,3 +89,15 @@ name = "metadata"
 path = "fuzz_targets/metadata.rs"
 test = false
 doc = false
+
+# Explicit-mask bitfields encoder target — drives `encode_bmp_bitfields`
+# with fuzzer-controlled pixels, a mask preset (or an arbitrary mask set
+# that exercises `BmpBitfields::validate`'s reject path), and encode
+# options, then decodes the output. Byte-aligned 32-bpp presets
+# (BGRA8888 / BGRX8888) additionally assert the documented exact
+# round-trip contract; the 16-bpp presets are panic-checked only.
+[[bin]]
+name = "bitfields_roundtrip"
+path = "fuzz_targets/bitfields_roundtrip.rs"
+test = false
+doc = false
