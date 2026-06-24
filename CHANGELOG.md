@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(encode)* **Full-width 32-bit bitfields mask no longer overflow-panics**
+  (round 366, found by the `bitfields_roundtrip` fuzz target): a
+  `BmpBitfields` channel mask of `0xFFFF_FFFF` is a contiguous bit run
+  and must validate, but `BmpBitfields::validate`'s contiguity check
+  computed `(mask >> tz) + 1`, which overflowed `u32` (panic "attempt to
+  add with overflow") when the normalised mask was `u32::MAX`. The check
+  now uses `wrapping_add(1)` so a full-width mask wraps to `0` and is
+  correctly accepted. This restores the daily `bitfields_roundtrip` fuzz
+  job to green; new lib regression test pins the validate + encode +
+  decode path.
+- *(decode)* **Top-down (negative `biHeight`) RLE bitmaps are rejected**
+  (round 366): the `BITMAPINFOHEADER` remarks require that "for
+  compressed formats, `biHeight` must be positive, regardless of image
+  orientation" — an RLE stream describes a bottom-up scan whose
+  end-of-line / delta / end-of-bitmap escapes have no defined meaning
+  under a top-down layout. A `BI_RLE8` / `BI_RLE4` bitmap with a negative
+  `biHeight` is malformed; the decoder now returns a precise error
+  instead of silently decoding the `|height|` rows as if they were
+  bottom-up (which produced a vertically-mirrored, garbage image). New
+  lib tests cover the RLE8 and RLE4 cases (lib +2 = 182).
 - *(decode)* **RLE skipped pixels resolve to colour index 0** (round 366):
   an RLE bitmap is an *indexed* image, so the cells the stream never
   writes — the ones a `delta` jumps over, the tail of a short row past an

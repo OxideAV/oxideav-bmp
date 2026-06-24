@@ -449,8 +449,12 @@ impl BmpBitfields {
             // Contiguous run check: a value whose set bits are contiguous
             // satisfies `m & (m + lsb) == 0` where lsb isolates the low set
             // bit — equivalently `(m >> tz)` is one less than a power of two.
+            // A full-width mask (`normalised == u32::MAX`, e.g. a 32-bit
+            // `0xFFFF_FFFF` channel) is itself a contiguous run, so the
+            // `+ 1` must wrap to 0 rather than overflow-panic: use
+            // `wrapping_add` so `0xFFFF_FFFF & 0 == 0` correctly accepts it.
             let normalised = mask >> mask.trailing_zeros();
-            if normalised & (normalised + 1) != 0 {
+            if normalised & normalised.wrapping_add(1) != 0 {
                 return Err(Error::invalid(format!(
                     "BMP bitfields: {name} mask {mask:#010x} is not a contiguous bit run"
                 )));

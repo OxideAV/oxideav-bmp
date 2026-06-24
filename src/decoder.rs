@@ -748,6 +748,19 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
 
     let palette = read_palette(h, whole, pixel_offset)?;
 
+    // For compressed formats `biHeight` must be positive "regardless of
+    // image orientation" (BITMAPINFOHEADER remarks): an RLE stream
+    // describes a bottom-up scan with end-of-line / delta / end-of-bitmap
+    // escapes that have no defined meaning under a top-down (negative
+    // height) layout. A negative `biHeight` on an RLE bitmap is malformed
+    // — reject it rather than silently decoding the |height| rows as if
+    // they were bottom-up.
+    if (h.compression == BI_RLE8 || h.compression == BI_RLE4) && h.is_top_down() {
+        return Err(Error::invalid(
+            "BMP: RLE compression requires a positive biHeight (top-down RLE is illegal)",
+        ));
+    }
+
     // RLE-compressed bitmaps have a special decode path.
     if h.compression == BI_RLE8 {
         if h.bpp != 8 {

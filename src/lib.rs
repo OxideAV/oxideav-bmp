@@ -391,6 +391,33 @@ mod tests {
     }
 
     #[test]
+    fn bitfields_full_width_32bit_mask_validates_and_does_not_panic() {
+        // Regression (round 366, found by the `bitfields_roundtrip` fuzz
+        // target): a full-width 32-bit channel mask `0xFFFF_FFFF` is a
+        // contiguous bit run and must validate, but the contiguity check
+        // computed `normalised + 1` which overflowed `u32` (panic
+        // `attempt to add with overflow`) for `normalised == u32::MAX`.
+        // A single 32-bit R channel filling the whole word.
+        let masks = BmpBitfields {
+            bpp: 32,
+            r: 0xFFFF_FFFF,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        assert!(
+            masks.validate().is_ok(),
+            "full-width 32-bit mask is a contiguous run and must validate"
+        );
+        let (src, _w, _h) = rgba_checker(2, 2);
+        // Must encode + decode without panicking.
+        let bytes = encode_bmp_bitfields(&src, masks, BmpEncodeOptions::default())
+            .expect("full-width mask must encode");
+        let back = decode_bmp(&bytes).expect("must decode");
+        assert_eq!(back.planes[0].data.len(), 2 * 2 * 4);
+    }
+
+    #[test]
     fn bitfields_rejects_indexed_source() {
         let (data, stride) = indexed_checker(4, 4);
         let img = BmpImage {
@@ -2457,6 +2484,41 @@ mod tests {
         for x in 0..4 {
             assert_eq!(&img.planes[0].data[x * 4..x * 4 + 4], &RLE_IDX0_RGBA);
         }
+    }
+
+    #[test]
+    fn rle8_negative_height_is_rejected() {
+        // "For compressed formats, biHeight must be positive, regardless of
+        // image orientation." A top-down (negative biHeight) RLE bitmap is
+        // malformed — the decoder must reject it, not silently decode the
+        // |height| rows bottom-up.
+        let off = 14 + 40 + 4 * 4;
+        let mut input = raw_bmp(4, -2, 8, BI_RLE8, off as u32, 4, &[]);
+        input.extend_from_slice(&[0, 0, 0, 0]); // idx0
+        input.extend_from_slice(&[0, 0, 0, 0]); // idx1
+        input.extend_from_slice(&[0, 0, 0, 0]); // idx2
+        input.extend_from_slice(&[0, 0, 0, 0]); // idx3
+        input.extend_from_slice(&[0x00, 0x01]); // end of bitmap
+        let err = decode_bmp(&input).expect_err("top-down RLE8 must be rejected");
+        assert!(
+            format!("{err}").contains("positive biHeight"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rle4_negative_height_is_rejected() {
+        let off = 14 + 40 + 4 * 4;
+        let mut input = raw_bmp(4, -1, 4, BI_RLE4, off as u32, 4, &[]);
+        input.extend_from_slice(&[0, 0, 0, 0]);
+        input.extend_from_slice(&[0, 0, 0, 0]);
+        input.extend_from_slice(&[0, 0, 0, 0]);
+        input.extend_from_slice(&[0, 0, 0, 0]);
+        input.extend_from_slice(&[0x00, 0x01]);
+        assert!(
+            decode_bmp(&input).is_err(),
+            "top-down RLE4 must be rejected"
+        );
     }
 
     #[test]
