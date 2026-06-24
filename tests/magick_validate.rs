@@ -325,6 +325,80 @@ fn magick_rle8_encode() {
 }
 
 // ---------------------------------------------------------------------------
+// RLE8 with a delta-skip: the cells the delta jumps over must resolve to
+// colour index 0 — independently corroborated against magick. (Our
+// encoder never emits deltas, so this hand-builds the stream.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn magick_rle8_delta_skip_fills_index0() {
+    if !magick_available() {
+        return;
+    }
+
+    // 4×2, four-entry palette. Index 0 is an opaque magenta the skipped
+    // cells must take; index 1 = green, index 2 = blue.
+    fn le_u32(v: u32) -> [u8; 4] {
+        v.to_le_bytes()
+    }
+    let off: u32 = 14 + 40 + 4 * 4; // file + info header + 4 RGBQUADs
+                                    // RLE: idx1 at (0,bottom); delta +2x,+1y → (3,top); idx2; end.
+    let rle: [u8; 10] = [
+        0x01, 0x01, // run 1 × idx1
+        0x00, 0x02, 0x02, 0x01, // delta +2 x, +1 y
+        0x01, 0x02, // run 1 × idx2
+        0x00, 0x01, // end of bitmap
+    ];
+    let file_size = off + rle.len() as u32;
+    let mut bmp = Vec::new();
+    // BITMAPFILEHEADER — magick validates bfSize against the actual file
+    // length, so it must be correct (not the 0 informational sentinel).
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&le_u32(file_size));
+    bmp.extend_from_slice(&0u16.to_le_bytes());
+    bmp.extend_from_slice(&0u16.to_le_bytes());
+    bmp.extend_from_slice(&le_u32(off));
+    // BITMAPINFOHEADER (positive height → bottom-up, required for RLE)
+    bmp.extend_from_slice(&le_u32(40));
+    bmp.extend_from_slice(&4i32.to_le_bytes()); // width
+    bmp.extend_from_slice(&2i32.to_le_bytes()); // height
+    bmp.extend_from_slice(&1u16.to_le_bytes()); // planes
+    bmp.extend_from_slice(&8u16.to_le_bytes()); // bpp
+    bmp.extend_from_slice(&le_u32(1)); // BI_RLE8
+    bmp.extend_from_slice(&le_u32(rle.len() as u32)); // image size
+    bmp.extend_from_slice(&0i32.to_le_bytes());
+    bmp.extend_from_slice(&0i32.to_le_bytes());
+    bmp.extend_from_slice(&le_u32(4)); // clr_used
+    bmp.extend_from_slice(&le_u32(0));
+    // Palette (BGRA): idx0 magenta, idx1 green, idx2 blue, idx3 grey.
+    bmp.extend_from_slice(&[180, 10, 200, 0]); // magenta R200 G10 B180
+    bmp.extend_from_slice(&[0, 255, 0, 0]); // green
+    bmp.extend_from_slice(&[255, 0, 0, 0]); // blue
+    bmp.extend_from_slice(&[128, 128, 128, 0]); // grey
+    bmp.extend_from_slice(&rle);
+
+    let path = tmp_path("test_rle8_delta.bmp");
+    std::fs::write(&path, &bmp).unwrap();
+
+    let info = magick_identify(&path);
+    assert!(info.contains("BMP"), "magick did not recognise: {info}");
+
+    // A skipped cell on the bottom row (image y = 1, e.g. x = 2) must be
+    // index-0 magenta in BOTH our decoder and magick.
+    let ours = decode_bmp(&bmp).expect("delta RLE8 must decode");
+    // Bottom output row is y = 1 (top-down output); x = 2 is skipped.
+    let px = &ours.planes[0].data[16 + 2 * 4..16 + 2 * 4 + 4];
+    assert_eq!(px, &[200, 10, 180, 255], "our skipped cell must be index 0");
+
+    let m = magick_pixel_rgba(&path, 2, 1);
+    assert_eq!(
+        &m[..3],
+        &[200, 10, 180],
+        "magick's skipped cell must also be index 0 (magenta)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // RLE4: run-heavy image.
 // ---------------------------------------------------------------------------
 

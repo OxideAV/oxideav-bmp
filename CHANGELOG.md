@@ -44,7 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silent on the fill colour; Windows fills index 0, the canonical
   background). New lib tests cover the immediate end-of-bitmap fill, a
   `delta`-jump skip, a short-row-after-end-of-line tail, and the RLE4
-  analogue (lib +4 = 180).
+  analogue (lib +4 = 180), plus a `magick`-CLI black-box test
+  (`magick_rle8_delta_skip_fills_index0`) that hand-builds a delta-skip
+  RLE8 bitmap and confirms the external decoder independently fills the
+  skipped cells with colour index 0 (magick +1 = 10).
 
 ### Added
 
