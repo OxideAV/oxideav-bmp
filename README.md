@@ -12,9 +12,9 @@ sub-images.
 | 1         | `BI_RGB`       | `Rgba`     |
 | 2         | `BI_RGB`       | `Rgba` (Windows CE, 4-entry palette) |
 | 4         | `BI_RGB`       | `Rgba`     |
-| 4         | `BI_RLE4`      | `Rgba` (delta + absolute mode) |
+| 4         | `BI_RLE4`      | `Rgba` (delta + absolute mode; skips → index 0) |
 | 8         | `BI_RGB`       | `Rgba`     |
-| 8         | `BI_RLE8`      | `Rgba` (delta + absolute mode) |
+| 8         | `BI_RLE8`      | `Rgba` (delta + absolute mode; skips → index 0) |
 | 16        | `BI_RGB`       | `Rgba` (5-5-5) |
 | 16        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
 | 16        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
@@ -38,6 +38,19 @@ are rejected at the boundary. The Windows CE 2-bit/pixel indexed depth
 is decoded too: four pixels pack per byte (left-most pixel in the two
 most-significant bits), each a 2-bit index into a 4-entry colour table;
 the `biClrUsed = 0` sentinel resolves to the full `2^2 = 4` entries.
+
+### RLE skipped-pixel + orientation semantics
+
+An RLE bitmap is an *indexed* image, so every cell the `BI_RLE8` /
+`BI_RLE4` stream never writes — the ones a `delta` jumps over, the tail
+of a short row past an end-of-line escape, and everything past an early
+end-of-bitmap — resolves to **colour index 0**, the first colour-table
+entry (the canonical Windows background), not transparent black. A
+`magick`-CLI black-box test corroborates the fill against an external
+decoder. RLE is also strictly bottom-up: the *Bitmap Header Types*
+remarks require a positive `biHeight` for any compressed format, so a
+top-down (negative `biHeight`) RLE bitmap is rejected at the decode
+boundary rather than silently decoded mirrored.
 
 ### CMYK family (`BI_CMYK` / `BI_CMYKRLE8` / `BI_CMYKRLE4`)
 
