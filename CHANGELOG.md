@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(decode)* **RLE skipped pixels resolve to colour index 0** (round 366):
+  an RLE bitmap is an *indexed* image, so the cells the stream never
+  writes — the ones a `delta` jumps over, the tail of a short row past an
+  end-of-line escape, and everything past an early end-of-bitmap — take
+  **colour index 0** (the first colour-table entry), exactly like an
+  explicitly-coded index-0 pixel. The `BI_RLE8` / `BI_RLE4` decoders
+  previously left every untouched cell as transparent black
+  (`[0,0,0,0]`), so a bitmap whose index 0 is a non-`(0,0,0)` colour — or
+  any palette where index 0 should decode opaque — came out wrong on
+  every skipped cell (wrong colour *and* `alpha = 0` instead of `0xFF`).
+  Both RLE rows are now pre-filled with the RGBA of palette index 0 (the
+  *Bitmap Compression* material defines the escape semantics but is
+  silent on the fill colour; Windows fills index 0, the canonical
+  background). New lib tests cover the immediate end-of-bitmap fill, a
+  `delta`-jump skip, a short-row-after-end-of-line tail, and the RLE4
+  analogue (lib +4 = 180).
+
 ### Added
 
 - *(encode)* **Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS`

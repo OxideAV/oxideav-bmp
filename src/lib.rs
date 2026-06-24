@@ -2366,6 +2366,118 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // RLE skipped-pixel fill — untouched cells resolve to colour index 0
+    // -----------------------------------------------------------------------
+    //
+    // An RLE bitmap is an *indexed* image, so any cell the stream never
+    // writes — the ones a `delta` jumps over, the tail of a short row past
+    // an end-of-line, and everything past an early end-of-bitmap — takes
+    // colour index 0 (the first colour-table entry), not transparent
+    // black. These tests pin that: index 0 is a distinctive opaque colour
+    // and every skipped cell must come out as that colour.
+
+    /// Build a bottom-up RLE8 file: 4×2, four-entry palette (index 0 is a
+    /// recognisable opaque magenta), and a caller-supplied RLE payload.
+    fn rle8_skip_fixture(rle: &[u8]) -> Vec<u8> {
+        // pixel_offset = 14 + 40 + 4 palette entries × 4 bytes = 70.
+        let off = 14 + 40 + 4 * 4;
+        let mut input = raw_bmp(4, 2, 8, BI_RLE8, off as u32, 4, &[]);
+        // Palette (BGRA on disk): idx0 = magenta (R=200,G=10,B=180),
+        // idx1 = green, idx2 = blue, idx3 = grey.
+        input.extend_from_slice(&[180, 10, 200, 0]); // idx0
+        input.extend_from_slice(&[0, 255, 0, 0]); // idx1
+        input.extend_from_slice(&[255, 0, 0, 0]); // idx2
+        input.extend_from_slice(&[128, 128, 128, 0]); // idx3
+        input.extend_from_slice(rle);
+        input
+    }
+
+    /// The expected RGBA of colour index 0 in `rle8_skip_fixture`.
+    const RLE_IDX0_RGBA: [u8; 4] = [200, 10, 180, 0xFF];
+
+    #[test]
+    fn rle8_end_of_bitmap_leaves_index0_not_transparent_black() {
+        // Encode nothing but an immediate end-of-bitmap: every one of the
+        // 4×2 cells is untouched and must resolve to index 0 (magenta),
+        // not [0,0,0,0].
+        let img = decode_bmp(&rle8_skip_fixture(&[0x00, 0x01])).expect("decode");
+        assert_eq!((img.width, img.height), (4, 2));
+        for px in img.planes[0].data.chunks_exact(4) {
+            assert_eq!(px, RLE_IDX0_RGBA, "untouched RLE cell must be index 0");
+        }
+    }
+
+    #[test]
+    fn rle8_delta_skipped_cells_are_index0() {
+        // Bottom row: write one idx1 (green) pixel at (0,0), then delta
+        // +2 right / +1 up, write one idx2 (blue) pixel, end. The two
+        // cells the delta jumps over on the bottom row, plus the rest of
+        // both rows, stay index 0.
+        let rle = [
+            0x01, 0x01, // run of 1 × idx1 at bottom-left (x=0,y=0)
+            0x00, 0x02, 0x02, 0x01, // delta: +2 x, +1 y → cursor (x=3,y=1)
+            0x01, 0x02, // run of 1 × idx2 at (x=3, top row)
+            0x00, 0x01, // end of bitmap
+        ];
+        let img = decode_bmp(&rle8_skip_fixture(&rle)).expect("decode");
+        // Output is top-down RGBA, 4 wide. Top row (y=0 in output) is the
+        // stream's last-written row; bottom row (y=1) is written first.
+        let row = |y: usize| -> &[u8] { &img.planes[0].data[y * 16..y * 16 + 16] };
+        let top = row(0);
+        let bottom = row(1);
+        // Bottom row: (0) green idx1, (1..4) index 0 (incl. the two the
+        // delta jumped over).
+        assert_eq!(&bottom[0..4], &[0, 255, 0, 0xFF]);
+        assert_eq!(&bottom[4..8], &RLE_IDX0_RGBA);
+        assert_eq!(&bottom[8..12], &RLE_IDX0_RGBA);
+        assert_eq!(&bottom[12..16], &RLE_IDX0_RGBA);
+        // Top row: (3) blue idx2, everything else index 0.
+        assert_eq!(&top[0..4], &RLE_IDX0_RGBA);
+        assert_eq!(&top[4..8], &RLE_IDX0_RGBA);
+        assert_eq!(&top[8..12], &RLE_IDX0_RGBA);
+        assert_eq!(&top[12..16], &[0, 0, 255, 0xFF]);
+    }
+
+    #[test]
+    fn rle8_short_row_tail_after_eol_is_index0() {
+        // Bottom row: one idx3 (grey) pixel, then end-of-line; the rest of
+        // the bottom row (3 cells) and the whole top row must be index 0.
+        let rle = [
+            0x01, 0x03, // run of 1 × idx3
+            0x00, 0x00, // end of line
+            0x00, 0x01, // end of bitmap
+        ];
+        let img = decode_bmp(&rle8_skip_fixture(&rle)).expect("decode");
+        let bottom = &img.planes[0].data[16..32];
+        assert_eq!(&bottom[0..4], &[128, 128, 128, 0xFF]);
+        for x in 1..4 {
+            assert_eq!(&bottom[x * 4..x * 4 + 4], &RLE_IDX0_RGBA);
+        }
+        // Whole top row is index 0.
+        for x in 0..4 {
+            assert_eq!(&img.planes[0].data[x * 4..x * 4 + 4], &RLE_IDX0_RGBA);
+        }
+    }
+
+    #[test]
+    fn rle4_skipped_cells_are_index0() {
+        // RLE4 analogue: 4×1, palette idx0 = opaque cyan. Encode an
+        // immediate end-of-bitmap so every cell is index 0.
+        let off = 14 + 40 + 4 * 4;
+        let mut input = raw_bmp(4, 1, 4, BI_RLE4, off as u32, 4, &[]);
+        input.extend_from_slice(&[200, 180, 0, 0]); // idx0 BGRA → R0,G180,B200
+        input.extend_from_slice(&[0, 0, 255, 0]); // idx1
+        input.extend_from_slice(&[0, 255, 0, 0]); // idx2
+        input.extend_from_slice(&[128, 128, 128, 0]); // idx3
+        input.extend_from_slice(&[0x00, 0x01]); // end of bitmap
+        let img = decode_bmp(&input).expect("decode");
+        let idx0 = [0u8, 180, 200, 0xFF];
+        for px in img.planes[0].data.chunks_exact(4) {
+            assert_eq!(px, idx0, "untouched RLE4 cell must be index 0");
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // BI_ALPHABITFIELDS (compression value 6) — V3 header with R/G/B/A masks
     // -----------------------------------------------------------------------
     //

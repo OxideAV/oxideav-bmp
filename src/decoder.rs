@@ -1306,6 +1306,31 @@ fn rle_input(whole: &[u8], pixel_offset: usize, width: u64, height: u64) -> Resu
     Ok(rle_data)
 }
 
+/// The RGBA every RLE pixel the stream never writes resolves to.
+///
+/// An RLE bitmap is an *indexed* image: pixels left untouched by the
+/// stream — the cells a `delta` jumps over, the tail of a short row
+/// after an end-of-line escape, and every cell past an early
+/// end-of-bitmap — take **colour index 0**, the first colour-table
+/// entry, exactly like any explicitly-coded index-0 pixel. (The BMP
+/// *Bitmap Compression* material defines the escape semantics but is
+/// silent on the fill colour; Windows fills index 0, the canonical
+/// background.) Resolving through the palette here means a non-`(0,0,0)`
+/// index-0 colour — and its opaque `0xFF` alpha — survives, instead of
+/// the transparent black a bare zero-fill would leave behind.
+fn rle_background(palette: &[[u8; 4]]) -> [u8; 4] {
+    palette.first().copied().unwrap_or([0, 0, 0, 0xFF])
+}
+
+/// Build one bottom-up RGBA row pre-filled with the index-0 background.
+fn rle_row(width: usize, bg: [u8; 4]) -> Vec<u8> {
+    let mut row = Vec::with_capacity(width * 4);
+    for _ in 0..width {
+        row.extend_from_slice(&bg);
+    }
+    row
+}
+
 /// Decode a BI_RLE8 stream into bottom-up RGBA rows.
 ///
 /// The stream encodes 8-bit indices; the caller provides the palette.
@@ -1317,7 +1342,8 @@ fn decode_rle8(
     height: usize,
     palette: &[[u8; 4]],
 ) -> Result<Vec<Vec<u8>>> {
-    let mut rows: Vec<Vec<u8>> = vec![vec![0u8; width * 4]; height];
+    let bg = rle_background(palette);
+    let mut rows: Vec<Vec<u8>> = vec![rle_row(width, bg); height];
     let mut x = 0usize;
     // RLE8 bitmaps are bottom-up: row 0 in the stream is the bottom row.
     let mut y = 0usize;
@@ -1395,7 +1421,8 @@ fn decode_rle4(
     height: usize,
     palette: &[[u8; 4]],
 ) -> Result<Vec<Vec<u8>>> {
-    let mut rows: Vec<Vec<u8>> = vec![vec![0u8; width * 4]; height];
+    let bg = rle_background(palette);
+    let mut rows: Vec<Vec<u8>> = vec![rle_row(width, bg); height];
     let mut x = 0usize;
     let mut y = 0usize;
     let mut i = 0usize;
