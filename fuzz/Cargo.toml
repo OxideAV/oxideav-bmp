@@ -104,6 +104,20 @@ path = "fuzz_targets/header_forge.rs"
 test = false
 doc = false
 
+# V4 / V5 colour-management encoder round-trip target — drives
+# `encode_bmp_with_icc_profile` / `encode_bmp_with_linked_icc_profile` /
+# `encode_bmp_with_calibrated_rgb` with fuzzer-controlled pixels,
+# palette, options, intent, blob bytes, and endpoints/gamma, then
+# decodes with `decode_bmp_with_metadata` and asserts the colour-space
+# tag, blob bytes, endpoints + gamma, and (for Rgba) the pixels all
+# come back verbatim. Encoder `Err` is accepted; encoder output that
+# fails to decode is a crash.
+[[bin]]
+name = "icc_roundtrip"
+path = "fuzz_targets/icc_roundtrip.rs"
+test = false
+doc = false
+
 # Explicit-mask bitfields encoder target — drives `encode_bmp_bitfields`
 # with fuzzer-controlled pixels, a mask preset (or an arbitrary mask set
 # that exercises `BmpBitfields::validate`'s reject path), and encode
