@@ -118,6 +118,18 @@ path = "fuzz_targets/icc_roundtrip.rs"
 test = false
 doc = false
 
+# Header-less DIB encoder round-trip target — drives `encode_dib`
+# (the `.ico` / `.cur` shared surface) across all eight pixel formats
+# and both layouts (plain + doubled-height XOR/AND), then decodes with
+# the matching mask flag (must succeed, geometry must round-trip, and
+# plain-Rgba pixels must be byte-exact) and with the opposite flag
+# (panic-check only — the classic hostile-.ico confusion).
+[[bin]]
+name = "dib_roundtrip"
+path = "fuzz_targets/dib_roundtrip.rs"
+test = false
+doc = false
+
 # Explicit-mask bitfields encoder target — drives `encode_bmp_bitfields`
 # with fuzzer-controlled pixels, a mask preset (or an arbitrary mask set
 # that exercises `BmpBitfields::validate`'s reject path), and encode
