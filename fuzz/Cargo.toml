@@ -90,6 +90,20 @@ path = "fuzz_targets/metadata.rs"
 test = false
 doc = false
 
+# Structured header-forge target — the fuzzer's bytes become raw DIB
+# header *fields* (all seven header generations plus arbitrary biSize)
+# wrapped in always-well-formed BMP / DIB framing, so the iteration
+# budget lands inside the header-validation matrix instead of being
+# spent rediscovering signatures and offsets. Pushes each forged file
+# through all six public parse surfaces (decode_bmp / decode_dib ×
+# plain + metadata × plain + doubled-height DIB). Same panic-free
+# contract as `decode`.
+[[bin]]
+name = "header_forge"
+path = "fuzz_targets/header_forge.rs"
+test = false
+doc = false
+
 # Explicit-mask bitfields encoder target — drives `encode_bmp_bitfields`
 # with fuzzer-controlled pixels, a mask preset (or an arbitrary mask set
 # that exercises `BmpBitfields::validate`'s reject path), and encode
