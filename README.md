@@ -1,5 +1,7 @@
 # oxideav-bmp
 
+[![CI](https://github.com/OxideAV/oxideav-bmp/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-bmp/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-bmp.svg)](https://crates.io/crates/oxideav-bmp) [![docs.rs](https://docs.rs/oxideav-bmp/badge.svg)](https://docs.rs/oxideav-bmp) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust BMP (Windows bitmap) codec and container for the
 [`oxideav`](https://github.com/OxideAV/oxideav) framework. Also
 exposes the headerless **DIB** helpers used by `.ico` / `.cur`
