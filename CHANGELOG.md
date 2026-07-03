@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(fuzz)* **Three new cargo-fuzz targets** (round 383, fuzz-hardening
+  depth round — eight targets total):
+  - `header_forge` — the fuzzer's bytes become raw DIB header *fields*
+    (Core / Info / V2 / V3 / V4 / V5 / OS2-64 plus arbitrary `biSize`)
+    wrapped in always-well-formed BMP + DIB framing (magic selector,
+    wrapping `bfOffBits` delta, verbatim body), so the iteration budget
+    lands inside the header-validation matrix instead of rediscovering
+    signatures. Every forged file runs through all six public parse
+    surfaces.
+  - `icc_roundtrip` — drives `encode_bmp_with_icc_profile` /
+    `encode_bmp_with_linked_icc_profile` /
+    `encode_bmp_with_calibrated_rgb` across 7 pixel formats × options ×
+    blob sizes, then asserts via `decode_bmp_with_metadata` that the
+    colour-space tag, blob / path bytes, endpoints + gamma, and Rgba
+    pixels all return verbatim.
+  - `dib_roundtrip` — drives `encode_dib` (the `.ico` / `.cur` shared
+    surface) across all 8 formats and both layouts (plain +
+    doubled-height XOR/AND); matching-flag decode must succeed with
+    exact geometry, plain-Rgba must be pixel-exact, and the opposite
+    mask flag is decoded as a panic-check (hostile-`.ico` confusion).
+
+  Also seeds the previously corpus-less `bitfields_roundtrip` target.
+- *(test)* **Three adversarial / regression suites** (round 383, +24
+  tests):
+  - `tests/hostile_metadata.rs` — truncation sweeps, an exhaustive
+    single-bit-flip sweep, hostile `bV5ProfileData` / `bV5ProfileSize`
+    pairs (u32 saturation / exact wrap / EOF straddle) for embedded and
+    linked profiles, a 256-value `bV5CSType` probe, and
+    extreme-magnitude round-trips (i32::MIN/MAX endpoints, u32::MAX
+    gamma, undefined intents, 0/4096-byte blobs).
+  - `tests/hostile_masks_overflow.rs` — all 48 single-bit R/G/B mask
+    positions at 16/32 bpp must decode; overlapping / non-contiguous /
+    all-ones / above-bpp masks, `BI_ALPHABITFIELDS` hostile alpha words
+    and V4 in-header mask patches are panic-checked; dimension pairs
+    that wrap i32/u32 area + stride maths; `biClrUsed` / `bfOffBits` /
+    `biSizeImage` saturation probes; RLE4 delta-escape / absolute-mode
+    / encoded-run overruns plus a truncation × byte-value grid.
+  - `tests/fuzz_corpus_replay.rs` — replays every committed fuzz corpus
+    file through all six decode surfaces (+ typed header parsers) on
+    every `cargo test`, and requires the curated `.bmp` seeds to keep
+    decoding `Ok`, so the corpora stay exercised where CI can't build
+    the ASan harnesses.
+
+  Round-383 local campaigns across the eight targets (≈ 19 M
+  executions total: 2 M+ each on decode / rle_stream / metadata /
+  header_forge, 2 M each on the four encoder round-trip targets
+  including a value-profile soak) found **zero decoder / encoder
+  defects** — no panics, no overflow aborts, no attacker-sized
+  allocations, no round-trip divergence. The only stops were two
+  libFuzzer rss-watermark trips at a deliberately tight
+  `-rss_limit_mb=1024` that replayed clean in isolation (allocator
+  quarantine accumulation across ~1.4 M iterations, not a decoder
+  allocation — both targets then completed 2 M runs clean at the
+  default limit).
+
 ### Fixed
 
 - *(encode)* **Full-width 32-bit bitfields mask no longer overflow-panics**

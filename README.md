@@ -587,21 +587,45 @@ let ico_sub = oxideav_bmp::encode_dib(&frame, /* doubled */ true)?;
 
 ## Robustness — property tests + fuzzing
 
-`tests/malformed_inputs.rs` runs 31 deterministic structural-mutation
-tests on top of the public encoder API: every-byte truncation sweep,
-single-bit-flip across each header byte, header-size lies (V4/V5 claim
-on a V3 body), negative / zero / `i32::MIN` dimensions, `bfOffBits`
-past EOF, `biClrUsed` over-claim up to `u32::MAX`, illegal bit depths /
-plane counts / compression IDs, RLE-stream truncation, BI_BITFIELDS
-mask truncation, ICO doubled-height edge cases, OS/2
-`BITMAPCOREHEADER` truncations, plus a deterministic random-mutation
-burst (1280 corruptions across 5 base fixtures). The contract is the
-same as the fuzz harness: every malformed input must return `Err`
-(or, for the ICO doubled-height path's documented missing-AND-mask
-tolerance, return safely with the XOR alpha preserved) — never panic,
-index out of bounds, or OOM-abort.
+Four deterministic adversarial suites run on every `cargo test`:
 
-Five `cargo-fuzz` targets live in `fuzz/`:
+* `tests/malformed_inputs.rs` (31 tests) mutates encoder output
+  structurally: every-byte truncation sweep, single-bit-flip across
+  each header byte, header-size lies (V4/V5 claim on a V3 body),
+  negative / zero / `i32::MIN` dimensions, `bfOffBits` past EOF,
+  `biClrUsed` over-claim up to `u32::MAX`, illegal bit depths / plane
+  counts / compression IDs, RLE-stream truncation, BI_BITFIELDS mask
+  truncation, ICO doubled-height edge cases, OS/2 `BITMAPCOREHEADER`
+  truncations, plus a deterministic random-mutation burst (1280
+  corruptions across 5 base fixtures).
+* `tests/hostile_metadata.rs` (9 tests, round 383) points the same
+  style at the V4/V5 metadata surfaces: truncation sweeps of four
+  colour-management fixtures through both framings, an exhaustive
+  single-bit-flip sweep over every fixture byte, hostile
+  `bV5ProfileData` / `bV5ProfileSize` pairs (u32 saturation, exact
+  wrap, EOF straddle — embedded and linked), a 256-value `bV5CSType`
+  probe, and extreme-magnitude round-trips (i32::MIN/MAX endpoints,
+  u32::MAX gamma, undefined intents, 0/4096-byte blobs).
+* `tests/hostile_masks_overflow.rs` (13 tests, round 383): all 48
+  single-bit R/G/B mask positions at 16/32 bpp must decode;
+  overlapping / non-contiguous / all-ones / above-bpp mask sets,
+  `BI_ALPHABITFIELDS` alpha words and V4 in-header mask patches are
+  panic-checked; dimension pairs that wrap i32/u32 area + stride
+  maths; `biClrUsed` / `bfOffBits` / `biSizeImage` saturation; RLE4
+  delta / absolute-mode / encoded-run overruns and a truncation ×
+  byte-value grid over an all-opcode RLE4 stream.
+* `tests/fuzz_corpus_replay.rs` (2 tests, round 383) replays every
+  committed fuzz corpus file through all six decode surfaces plus the
+  typed header parsers, and requires the curated `.bmp` seeds to keep
+  decoding `Ok` — the corpora stay exercised even where CI can't
+  build the ASan harnesses.
+
+The shared contract: every malformed input must return `Err` (or, for
+the ICO doubled-height path's documented missing-AND-mask tolerance,
+return safely with the XOR alpha preserved) — never panic, index out
+of bounds, or OOM-abort.
+
+Eight `cargo-fuzz` targets live in `fuzz/`:
 
 * `decode` — feeds arbitrary bytes to `decode_bmp` and to `decode_dib`
   (both the plain and the doubled-height XOR+AND-mask modes). The
@@ -653,30 +677,53 @@ Five `cargo-fuzz` targets live in `fuzz/`:
   round-trip (`BGRA8888` lossless including alpha; `BGRX8888`
   colour-exact with alpha decoding opaque); the 16-bpp presets are
   panic-checked only.
+* `header_forge` (round 383) — the fuzzer's bytes become raw DIB
+  header *fields* (Core / Info / V2 / V3 / V4 / V5 / OS2-64 plus
+  arbitrary `biSize`) wrapped in always-well-formed BMP + DIB framing
+  (magic selector, wrapping `bfOffBits` delta, verbatim body), so the
+  iteration budget lands inside the header-validation matrix instead
+  of rediscovering signatures and offsets. Every forged file runs
+  through all six public parse surfaces. 15 seeds derived from the
+  `decode` + `metadata` corpora.
+* `icc_roundtrip` (round 383) — drives the three colour-management
+  encode surfaces (`encode_bmp_with_icc_profile`, linked-profile,
+  calibrated-RGB) across 7 pixel formats × options × blob sizes, then
+  asserts via `decode_bmp_with_metadata` that the colour-space tag,
+  blob / path bytes, endpoints + gamma, and Rgba pixels return
+  verbatim. Encoder `Err` is accepted; undecodable encoder output is
+  a crash.
+* `dib_roundtrip` (round 383) — drives `encode_dib` (the `.ico` /
+  `.cur` shared surface) across all 8 formats and both layouts (plain
+  + doubled-height XOR/AND). Matching-flag decode must succeed with
+  exact geometry, plain-Rgba must be pixel-exact, and the same bytes
+  are decoded under the opposite mask flag as a panic-check — the
+  classic hostile-`.ico` confusion.
 
-All five targets share the same panic-free contract — every input
+All eight targets share the same panic-free contract — every input
 returns a `Result` rather than panicking, indexing out of bounds, or
 OOM-aborting — and build against the framework-free standalone path
 (`default-features = false`).
 
 ```sh
-cargo +nightly fuzz run decode
-cargo +nightly fuzz run rle_stream
-cargo +nightly fuzz run encode_roundtrip
-cargo +nightly fuzz run metadata
+cargo +nightly fuzz run decode          # or any of the other seven:
+cargo +nightly fuzz run header_forge    # rle_stream, metadata,
+cargo +nightly fuzz run icc_roundtrip   # encode_roundtrip,
+cargo +nightly fuzz run dib_roundtrip   # bitfields_roundtrip
 ```
 
 The `decode` harness shook out and fixed several header-driven
-denial-of-service paths (RLE / `bpp = 0` / `biClrUsed` over-allocation);
-see `CHANGELOG.md`. A local 20-second `rle_stream` run lands ~1.5 M
-inputs (~72 k execs/sec) with zero crashes. A 60-second
-`encode_roundtrip` run lands ~1.33 M inputs (~21.8 k execs/sec, peak
-RSS ~480 MB) with zero crashes — every direct-colour input survived
-the encode→decode pair byte-for-byte. A 60-second `metadata` run lands
-~1.08 M inputs with zero crashes. A daily
-`.github/workflows/fuzz.yml` job runs all four targets on a shared
-30-minute budget via the org reusable workflow's `[[bin]]`
-auto-discovery.
+denial-of-service paths (RLE / `bpp = 0` / `biClrUsed` over-allocation)
+in earlier rounds; see `CHANGELOG.md`. The round-383 hardening
+campaign ran ≈ 19 M executions across the eight targets (2 M+ each on
+the four decode-side targets at ~25–160 k execs/sec, 2 M each on the
+four encoder round-trip targets including a `-use_value_profile=1`
+soak) with **zero decoder / encoder defects** — the only stops were
+two libFuzzer rss-watermark trips under a deliberately tightened
+1 GiB ceiling that replayed clean in isolation and completed at the
+default limit (allocator quarantine accumulation, not a decoder
+allocation). A daily `.github/workflows/fuzz.yml` job runs all eight
+targets on a shared 30-minute budget via the org reusable workflow's
+`[[bin]]` auto-discovery.
 
 ## Benchmarks
 
