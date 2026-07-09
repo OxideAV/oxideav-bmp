@@ -1856,7 +1856,9 @@ fn rle8_encode(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = row_stride(w, 8);
-    let mut out = Vec::new();
+    // Reserve the packed-input size (plus EOL/EOB terminators) so a
+    // compressible image encodes without a reallocation chain.
+    let mut out = Vec::with_capacity(w * h + h * 2 + 2);
 
     for y in 0..h {
         let row = &raw[y * in_stride..y * in_stride + w];
@@ -1927,12 +1929,17 @@ fn rle4_encode(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = row_stride(w, 4);
-    let mut out = Vec::new();
+    // The compressed stream is at worst a little larger than the packed
+    // input; reserve that up front so a compressible image never triggers
+    // a reallocation chain. The per-row nibble scratch is allocated once
+    // and refilled, not reallocated `h` times.
+    let mut out = Vec::with_capacity(raw.len() + h * 2 + 2);
+    let mut nibbles: Vec<u8> = Vec::with_capacity(w);
 
     for y in 0..h {
         let packed_row = &raw[y * in_stride..y * in_stride + w.div_ceil(2)];
         // Unpack nibbles for easier processing.
-        let mut nibbles: Vec<u8> = Vec::with_capacity(w);
+        nibbles.clear();
         for x in 0..w {
             let byte = packed_row[x / 2];
             let nib = if x & 1 == 0 { byte >> 4 } else { byte & 0x0F };
