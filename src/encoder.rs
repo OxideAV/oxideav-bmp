@@ -1662,16 +1662,23 @@ fn pack_rgba(
         let src_y = source_row(y, h, options);
         let src = &plane.data[src_y * in_stride..src_y * in_stride + w * in_bpp];
         let dst = &mut out[y * out_stride..y * out_stride + out_stride];
-        for x in 0..w {
-            let (r, g, b, a) = match in_bpp {
-                4 => (src[x * 4], src[x * 4 + 1], src[x * 4 + 2], src[x * 4 + 3]),
-                3 => (src[x * 3], src[x * 3 + 1], src[x * 3 + 2], 0xFF),
-                _ => unreachable!(),
-            };
-            dst[x * 4] = b;
-            dst[x * 4 + 1] = g;
-            dst[x * 4 + 2] = r;
-            dst[x * 4 + 3] = a;
+        // Hoist the format branch out of the per-pixel loop and iterate
+        // with `chunks_exact` so the compiler drops the per-byte bounds
+        // checks (and can vectorise the fixed 3/4-byte shuffle).
+        if in_bpp == 4 {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                d[0] = s[2];
+                d[1] = s[1];
+                d[2] = s[0];
+                d[3] = s[3];
+            }
+        } else {
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+                d[0] = s[2];
+                d[1] = s[1];
+                d[2] = s[0];
+                d[3] = 0xFF;
+            }
         }
     }
     Ok((out, out_stride))
@@ -1700,11 +1707,12 @@ fn pack_rgb24(
         let src_y = source_row(y, h, options);
         let src = &plane.data[src_y * in_stride..src_y * in_stride + w * in_bpp];
         let dst = &mut out[y * out_stride..y * out_stride + w * 3];
-        for x in 0..w {
-            let (r, g, b) = (src[x * in_bpp], src[x * in_bpp + 1], src[x * in_bpp + 2]);
-            dst[x * 3] = b;
-            dst[x * 3 + 1] = g;
-            dst[x * 3 + 2] = r;
+        // `chunks_exact` on both sides elides the per-byte bounds checks;
+        // the source step is `in_bpp` (3 or 4), the dest step a packed 3.
+        for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(in_bpp)) {
+            d[0] = s[2];
+            d[1] = s[1];
+            d[2] = s[0];
         }
     }
     Ok((out, out_stride))
