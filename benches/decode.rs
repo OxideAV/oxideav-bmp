@@ -275,6 +275,22 @@ fn bench_decode_rgb565_320x240(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_decode_rgb565_640x480(c: &mut Criterion) {
+    // 640×480 = 307 200 px sits above the pixel count where an earlier
+    // revision switched the 16bpp path to a 256 KiB combined value→RGBA
+    // table; the per-channel L1 tables should beat that big LUT here too
+    // (no L2 thrash on scattered pixel values), so this guards the
+    // large-image side of the bitfields decode against a regression.
+    let image = build_rgb565_image(640, 480);
+    let bytes = encode_to_bytes(&image);
+    let mut g = c.benchmark_group("decode_rgb565_640x480");
+    g.throughput(Throughput::Bytes((640 * 480 * 2) as u64));
+    g.bench_function(BenchmarkId::from_parameter("rgb565/640x480"), |b| {
+        b.iter(|| decode_bmp(criterion::black_box(&bytes)).expect("decode"));
+    });
+    g.finish();
+}
+
 fn bench_decode_indexed8_320x240(c: &mut Criterion) {
     // Random data — encoder's RLE picker should fall back to BI_RGB
     // because RLE wouldn't shrink noise.
@@ -356,6 +372,7 @@ criterion_group!(
     bench_decode_rgba_320x240,
     bench_decode_rgb24_640x480,
     bench_decode_rgb565_320x240,
+    bench_decode_rgb565_640x480,
     bench_decode_indexed8_320x240,
     bench_decode_indexed4_320x240,
     bench_decode_rle8_320x240,

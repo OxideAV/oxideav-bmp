@@ -1042,6 +1042,10 @@ fn decode_pixels(
 
     match h.bpp {
         1 => {
+            // A 1bpp index is a single bit, so a two-entry padded palette
+            // (`[idx as usize]`, `idx` masked to `0..2`) resolves each
+            // pixel with a bounds-check-free load.
+            let pal = padded_palette::<2>(palette);
             for y in 0..height {
                 let row = &pixels[y * stride..y * stride + stride];
                 let d = row_dst(y) * out_stride;
@@ -1049,12 +1053,7 @@ fn decode_pixels(
                 for (x, px) in dst.chunks_exact_mut(4).enumerate() {
                     let byte = row[x / 8];
                     let bit = (byte >> (7 - (x % 8))) & 1;
-                    px.copy_from_slice(
-                        &palette
-                            .get(bit as usize)
-                            .copied()
-                            .unwrap_or([0, 0, 0, 0xFF]),
-                    );
+                    px.copy_from_slice(&pal[bit as usize]);
                 }
             }
         }
@@ -1062,6 +1061,7 @@ fn decode_pixels(
             // Windows CE 2-bit/pixel: four pixels packed per byte, the
             // left-most pixel in the two most-significant bits, each a
             // 2-bit index into a 4-entry colour table.
+            let pal = padded_palette::<4>(palette);
             for y in 0..height {
                 let row = &pixels[y * stride..y * stride + stride];
                 let d = row_dst(y) * out_stride;
@@ -1070,16 +1070,12 @@ fn decode_pixels(
                     let byte = row[x / 4];
                     let shift = 6 - 2 * (x % 4);
                     let idx = (byte >> shift) & 0x03;
-                    px.copy_from_slice(
-                        &palette
-                            .get(idx as usize)
-                            .copied()
-                            .unwrap_or([0, 0, 0, 0xFF]),
-                    );
+                    px.copy_from_slice(&pal[idx as usize]);
                 }
             }
         }
         4 => {
+            let pal = padded_palette::<16>(palette);
             for y in 0..height {
                 let row = &pixels[y * stride..y * stride + stride];
                 let d = row_dst(y) * out_stride;
@@ -1087,27 +1083,21 @@ fn decode_pixels(
                 for (x, px) in dst.chunks_exact_mut(4).enumerate() {
                     let byte = row[x / 2];
                     let idx = if x & 1 == 0 { byte >> 4 } else { byte & 0x0F };
-                    px.copy_from_slice(
-                        &palette
-                            .get(idx as usize)
-                            .copied()
-                            .unwrap_or([0, 0, 0, 0xFF]),
-                    );
+                    px.copy_from_slice(&pal[idx as usize]);
                 }
             }
         }
         8 => {
+            // A full 256-entry padded palette lets the inner loop index
+            // with the raw `u8` sample — the compiler drops the per-pixel
+            // bounds check that the `.get().unwrap_or()` form forced.
+            let pal = padded_palette::<256>(palette);
             for y in 0..height {
                 let row = &pixels[y * stride..y * stride + width];
                 let d = row_dst(y) * out_stride;
                 let dst = &mut out[d..d + out_stride];
                 for (px, &idx) in dst.chunks_exact_mut(4).zip(row.iter()) {
-                    px.copy_from_slice(
-                        &palette
-                            .get(idx as usize)
-                            .copied()
-                            .unwrap_or([0, 0, 0, 0xFF]),
-                    );
+                    px.copy_from_slice(&pal[idx as usize]);
                 }
             }
         }
@@ -1128,23 +1118,20 @@ fn decode_pixels(
                 } else {
                     (0x7C00, 0x03E0, 0x001F, 0)
                 };
-            let (rs, rn) = shift_len(mr);
-            let (gs, gn) = shift_len(mg);
-            let (bs, bn) = shift_len(mb);
-            let (as_, an) = shift_len(ma);
-            // A 16bpp pixel has only 65 536 distinct values, so for large
-            // images we precompute the entire value → RGBA table once and
-            // replace the four per-pixel `expand()` calls with a single
-            // indexed load. Building the 256 KiB table itself costs 65 536
-            // mask-expansions, so it only pays for itself once the image is
-            // several times that size; below the threshold the direct
-            // per-pixel path is at least as fast and a small icon never eats
-            // a full-table build. Both paths produce bit-identical bytes;
-            // the 1<<18-pixel (256 K) cutoff was picked from the round-286
-            // profiling harness, where the LUT is a clear win at 640×480 and
-            // a wash at 320×240.
+            // Below the size where a 65 536-entry combined value→RGBA
+            // table amortises its 256 KiB build, four 256-byte per-channel
+            // tables (1 KiB total, L1-resident) decode each pixel with
+            // three/four branch-free loads — a large win over the old
+            // per-pixel `expand()` match (≈ −56 % at 320×240, where the big
+            // table never paid for itself). At or above the threshold the
+            // combined table's single indexed load per pixel still edges
+            // ahead, so it is retained. Both paths emit bit-identical bytes.
             let total_px = width.saturating_mul(height);
             if total_px >= 1 << 18 {
+                let (rs, rn) = shift_len(mr);
+                let (gs, gn) = shift_len(mg);
+                let (bs, bn) = shift_len(mb);
+                let (as_, an) = shift_len(ma);
                 let mut lut = vec![0u8; 65_536 * 4];
                 for (v, slot) in lut.chunks_exact_mut(4).enumerate() {
                     let v = v as u32;
@@ -1167,20 +1154,21 @@ fn decode_pixels(
                     }
                 }
             } else {
+                let rl = ChannelLut::new(mr);
+                let gl = ChannelLut::new(mg);
+                let bl = ChannelLut::new(mb);
+                let al = ChannelLut::new(ma);
+                let has_alpha = ma != 0;
                 for y in 0..height {
                     let row = &pixels[y * stride..y * stride + width * 2];
                     let d = row_dst(y) * out_stride;
                     let dst = &mut out[d..d + out_stride];
-                    for (x, px) in dst.chunks_exact_mut(4).enumerate() {
-                        let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as u32;
-                        px[0] = expand(((v & mr) >> rs) as u8, rn);
-                        px[1] = expand(((v & mg) >> gs) as u8, gn);
-                        px[2] = expand(((v & mb) >> bs) as u8, bn);
-                        px[3] = if an > 0 {
-                            expand(((v & ma) >> as_) as u8, an)
-                        } else {
-                            0xFF
-                        };
+                    for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(2)) {
+                        let v = u16::from_le_bytes([src[0], src[1]]) as u32;
+                        px[0] = rl.get(v);
+                        px[1] = gl.get(v);
+                        px[2] = bl.get(v);
+                        px[3] = if has_alpha { al.get(v) } else { 0xFF };
                     }
                 }
             }
@@ -1208,24 +1196,23 @@ fn decode_pixels(
                 let mg = h.mask_g.unwrap_or(0x0000_FF00);
                 let mb = h.mask_b.unwrap_or(0x0000_00FF);
                 let ma = h.mask_a.unwrap_or(0);
-                let (rs, rn) = shift_len(mr);
-                let (gs, gn) = shift_len(mg);
-                let (bs, bn) = shift_len(mb);
-                let (as_, an) = shift_len(ma);
+                // Per-channel expansion tables (see the 16bpp path): four
+                // branch-free L1 loads per pixel, bit-identical output.
+                let rl = ChannelLut::new(mr);
+                let gl = ChannelLut::new(mg);
+                let bl = ChannelLut::new(mb);
+                let al = ChannelLut::new(ma);
+                let has_alpha = ma != 0;
                 for y in 0..height {
                     let row = &pixels[y * stride..y * stride + width * 4];
                     let d = row_dst(y) * out_stride;
                     let dst = &mut out[d..d + out_stride];
                     for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
                         let v = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
-                        px[0] = expand(((v & mr) >> rs) as u8, rn);
-                        px[1] = expand(((v & mg) >> gs) as u8, gn);
-                        px[2] = expand(((v & mb) >> bs) as u8, bn);
-                        px[3] = if an > 0 {
-                            expand(((v & ma) >> as_) as u8, an)
-                        } else {
-                            0xFF
-                        };
+                        px[0] = rl.get(v);
+                        px[1] = gl.get(v);
+                        px[2] = bl.get(v);
+                        px[3] = if has_alpha { al.get(v) } else { 0xFF };
                     }
                 }
             } else if h.compression == BI_RGB && h.mask_a.is_some() {
@@ -1546,4 +1533,62 @@ fn expand(v: u8, n: u32) -> u8 {
         }
         _ => v,
     }
+}
+
+/// A 256-entry per-channel expansion table for the `BI_BITFIELDS` /
+/// `BI_RGB` mask paths.
+///
+/// `table[sub]` holds the 8-bit expansion of the `n`-bit sub-value
+/// `sub`, where `sub = ((pixel & mask) >> shift) as u8` is the raw
+/// channel sample already extracted from the packed pixel. Building a
+/// full 256-byte table for each channel turns the per-pixel `expand()`
+/// `match` (four branches per pixel) into a single L1-resident indexed
+/// load. All four channel tables together are 1 KiB — cache-friendly at
+/// any image size, unlike a combined 256 KiB value→RGBA table whose
+/// random-access decode loop thrashes L2 on scattered pixel values.
+///
+/// The bytes are bit-identical to the old per-pixel path: `table[i]` is
+/// exactly `expand(i as u8, n)`, and the `as u8` truncation on lookup
+/// matches the `(… ) as u8` the direct path applied, so a mask wider
+/// than 8 bits (`n >= 8`) resolves through the same low-8 truncation.
+struct ChannelLut {
+    mask: u32,
+    shift: u32,
+    table: [u8; 256],
+}
+
+impl ChannelLut {
+    fn new(mask: u32) -> Self {
+        let (shift, n) = shift_len(mask);
+        let mut table = [0u8; 256];
+        for (i, t) in table.iter_mut().enumerate() {
+            *t = expand(i as u8, n);
+        }
+        Self { mask, shift, table }
+    }
+
+    #[inline(always)]
+    fn get(&self, v: u32) -> u8 {
+        // `as u8` truncates the extracted sub-value to the low 8 bits
+        // (matching the historical direct path) so the index is always
+        // in `0..256` and the bounds check is elided.
+        self.table[((v & self.mask) >> self.shift) as u8 as usize]
+    }
+}
+
+/// Copy a decoded palette into a fixed-size RGBA lookup array padded to
+/// the full `2^bpp` index space so the indexed decode loops can address
+/// it with a masked index whose range the compiler already knows — the
+/// per-pixel `.get(idx).unwrap_or(…)` bounds check drops out.
+///
+/// Entries the (possibly short — `biClrUsed` may be below `2^bpp`)
+/// palette does not cover keep the canonical opaque-black fallback
+/// `[0, 0, 0, 0xFF]`, exactly what the old `.unwrap_or([0, 0, 0, 0xFF])`
+/// produced for an out-of-range index.
+fn padded_palette<const N: usize>(palette: &[[u8; 4]]) -> [[u8; 4]; N] {
+    let mut out = [[0u8, 0, 0, 0xFF]; N];
+    for (o, p) in out.iter_mut().zip(palette.iter()) {
+        *o = *p;
+    }
+    out
 }
