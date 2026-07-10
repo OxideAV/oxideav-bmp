@@ -767,13 +767,10 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
             return Err(Error::invalid("BMP: BI_RLE8 requires bpp=8"));
         }
         let rle_data = rle_input(whole, pixel_offset, width as u64, height as u64)?;
-        // decode_rle8 returns rows in bottom-up order (row 0 = bottom of
-        // image). Reverse to produce the top-down output the caller expects.
-        let rows = decode_rle8(rle_data, width as usize, height as usize, &palette)?;
-        let mut flat = Vec::with_capacity(width as usize * height as usize * 4);
-        for row in rows.into_iter().rev() {
-            flat.extend_from_slice(&row);
-        }
+        // `decode_rle8` writes a single flat top-down RGBA plane (it
+        // resolves the bottom-up flip internally), so no row reversal or
+        // concatenation pass is needed here.
+        let flat = decode_rle8(rle_data, width as usize, height as usize, &palette)?;
         return Ok(BmpImage {
             width,
             height,
@@ -791,12 +788,8 @@ fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Resul
             return Err(Error::invalid("BMP: BI_RLE4 requires bpp=4"));
         }
         let rle_data = rle_input(whole, pixel_offset, width as u64, height as u64)?;
-        // Same: bottom-up → reverse to top-down.
-        let rows = decode_rle4(rle_data, width as usize, height as usize, &palette)?;
-        let mut flat = Vec::with_capacity(width as usize * height as usize * 4);
-        for row in rows.into_iter().rev() {
-            flat.extend_from_slice(&row);
-        }
+        // Same: `decode_rle4` writes the flat top-down plane directly.
+        let flat = decode_rle4(rle_data, width as usize, height as usize, &palette)?;
         return Ok(BmpImage {
             width,
             height,
@@ -1322,28 +1315,30 @@ fn rle_background(palette: &[[u8; 4]]) -> [u8; 4] {
     palette.first().copied().unwrap_or([0, 0, 0, 0xFF])
 }
 
-/// Build one bottom-up RGBA row pre-filled with the index-0 background.
-fn rle_row(width: usize, bg: [u8; 4]) -> Vec<u8> {
-    let mut row = Vec::with_capacity(width * 4);
-    for _ in 0..width {
-        row.extend_from_slice(&bg);
+/// Allocate a flat RGBA plane pre-filled with the index-0 background so
+/// every cell the RLE stream never writes resolves to colour index 0.
+fn rle_background_plane(width: usize, height: usize, bg: [u8; 4]) -> Vec<u8> {
+    let out_stride = width.saturating_mul(4);
+    let mut out = vec![0u8; out_stride.saturating_mul(height)];
+    for px in out.chunks_exact_mut(4) {
+        px.copy_from_slice(&bg);
     }
-    row
+    out
 }
 
-/// Decode a BI_RLE8 stream into bottom-up RGBA rows.
+/// Decode a BI_RLE8 stream straight into a single flat top-down RGBA
+/// plane.
 ///
-/// The stream encodes 8-bit indices; the caller provides the palette.
-/// Output rows are in bottom-up order (row 0 = bottom of image) to
-/// match the caller's `rev()` flip in `decode_dib_payload`.
-fn decode_rle8(
-    data: &[u8],
-    width: usize,
-    height: usize,
-    palette: &[[u8; 4]],
-) -> Result<Vec<Vec<u8>>> {
+/// The stream encodes 8-bit indices bottom-up (stream row 0 = bottom of
+/// image); each pixel is written to its already-flipped destination row
+/// `(height - 1 - y)`, so the caller needs no reversal or concatenation
+/// pass. The palette is looked up through a 256-entry padded table so
+/// the index load carries no per-pixel bounds check.
+fn decode_rle8(data: &[u8], width: usize, height: usize, palette: &[[u8; 4]]) -> Result<Vec<u8>> {
     let bg = rle_background(palette);
-    let mut rows: Vec<Vec<u8>> = vec![rle_row(width, bg); height];
+    let pal = padded_palette::<256>(palette);
+    let out_stride = width.saturating_mul(4);
+    let mut out = rle_background_plane(width, height, bg);
     let mut x = 0usize;
     // RLE8 bitmaps are bottom-up: row 0 in the stream is the bottom row.
     let mut y = 0usize;
@@ -1352,12 +1347,8 @@ fn decode_rle8(
     macro_rules! put_pixel {
         ($idx:expr) => {
             if x < width && y < height {
-                let rgba = palette
-                    .get($idx as usize)
-                    .copied()
-                    .unwrap_or([0, 0, 0, 0xFF]);
-                let off = x * 4;
-                rows[y][off..off + 4].copy_from_slice(&rgba);
+                let off = (height - 1 - y) * out_stride + x * 4;
+                out[off..off + 4].copy_from_slice(&pal[$idx as usize]);
                 x += 1;
             }
         };
@@ -1411,18 +1402,17 @@ fn decode_rle8(
             }
         }
     }
-    Ok(rows)
+    Ok(out)
 }
 
-/// Decode a BI_RLE4 stream into bottom-up RGBA rows.
-fn decode_rle4(
-    data: &[u8],
-    width: usize,
-    height: usize,
-    palette: &[[u8; 4]],
-) -> Result<Vec<Vec<u8>>> {
+/// Decode a BI_RLE4 stream straight into a single flat top-down RGBA
+/// plane (see [`decode_rle8`] for the bottom-up flip + padded-palette
+/// details; here the index is a 4-bit nibble into a 16-entry table).
+fn decode_rle4(data: &[u8], width: usize, height: usize, palette: &[[u8; 4]]) -> Result<Vec<u8>> {
     let bg = rle_background(palette);
-    let mut rows: Vec<Vec<u8>> = vec![rle_row(width, bg); height];
+    let pal = padded_palette::<16>(palette);
+    let out_stride = width.saturating_mul(4);
+    let mut out = rle_background_plane(width, height, bg);
     let mut x = 0usize;
     let mut y = 0usize;
     let mut i = 0usize;
@@ -1430,12 +1420,8 @@ fn decode_rle4(
     macro_rules! put_pixel {
         ($idx:expr) => {
             if x < width && y < height {
-                let rgba = palette
-                    .get(($idx & 0x0F) as usize)
-                    .copied()
-                    .unwrap_or([0, 0, 0, 0xFF]);
-                let off = x * 4;
-                rows[y][off..off + 4].copy_from_slice(&rgba);
+                let off = (height - 1 - y) * out_stride + x * 4;
+                out[off..off + 4].copy_from_slice(&pal[($idx & 0x0F) as usize]);
                 x += 1;
             }
         };
@@ -1498,7 +1484,7 @@ fn decode_rle4(
             }
         }
     }
-    Ok(rows)
+    Ok(out)
 }
 
 /// Locate a channel mask's bit position + bit length so we can scale
