@@ -754,10 +754,22 @@ Indicative throughput (Apple M-series, `--quick`):
 | `roundtrip_rgba_320x240`                      | ~3.95 GiB/s    |
 | `roundtrip_dib_ico_rgba_64x64`                | ~1.7 GiB/s     |
 
-The uncompressed pixel-unpack path fills one flat top-down RGBA plane
-in a single pass (a `chunks_exact_mut(4)` cursor, no per-scanline
-allocation); for 16 bpp `BI_BITFIELDS` at large sizes a 65 536-entry
-value→RGBA lookup table replaces the four per-pixel mask expansions.
+Per-operation before/after timings for the hot-path optimisation work
+live in [`BENCHMARKS.md`](BENCHMARKS.md).
+
+Every decode path fills one flat top-down RGBA plane in a single pass (a
+`chunks_exact_mut(4)` cursor, no per-scanline allocation) — the
+uncompressed depths, and now the `BI_RLE8` / `BI_RLE4` decoders too,
+which write each pixel straight to its flipped destination row instead
+of building per-row vectors and concatenating them. Indexed depths index
+a fixed-size padded palette array so the per-pixel bounds check drops
+out. For `BI_BITFIELDS` / mask-carrying `BI_RGB`, four 256-byte
+per-channel expansion tables (L1-resident) replace the per-pixel mask
+expansions below the size where a 65 536-entry combined value→RGBA table
+amortises its build; the combined table is kept above that threshold.
+The encoder's BGR(A) packers walk `chunks_exact` for a bounds-check-free
+shuffle, and the indexed RLE size probe aborts as soon as the compressed
+stream exceeds the raw array on incompressible input.
 
 ## Registration
 
