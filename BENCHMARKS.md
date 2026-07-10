@@ -26,8 +26,8 @@ change; the deltas, not the microsecond figures, are what carry over.
 | rgb565 640×480         | 307 200    | 197 µs² | 192 µs  | —²    |
 | **indexed8 320×240**   | 76 800     | 27 µs   | 19.8 µs | **−27 %** |
 | indexed4 320×240       | 76 800     | 33.5 µs | 32.1 µs | −4 %  |
-| rle8 320×240           | 76 800     | 58.6 µs | 58.7 µs | —     |
-| rle4 320×240           | 76 800     | 70.8 µs | 71.9 µs | —     |
+| **rle8 320×240**       | 76 800     | 58.6 µs | 37.5 µs | **−36 %** |
+| **rle4 320×240**       | 76 800     | 70.8 µs | 44.9 µs | **−37 %** |
 | dib rgba 320×240       | 76 800     | 9.3 µs  | 9.1 µs  | —     |
 | dib ico rgba 64×64     | 4 096      | 2.04 µs | 1.92 µs | −6 %  |
 
@@ -87,3 +87,10 @@ change; the deltas, not the microsecond figures, are what carry over.
    the emitted stream reaches the raw-array budget, so an incompressible
    image no longer scans the whole plane to produce a result that is then
    discarded. The chosen format and output bytes are unchanged.
+
+5. **Flat-plane RLE decode (decode).** `decode_rle8` / `decode_rle4`
+   built a `Vec<Vec<u8>>` (one allocation per scanline) that the caller
+   then reversed and concatenated. They now write a single top-down plane
+   directly, each pixel to its already-flipped row, with palette lookups
+   through the padded table — dropping `height + 1` allocations, a full
+   copy pass, and the per-pixel bounds check.
