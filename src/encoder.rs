@@ -1536,9 +1536,9 @@ fn encode_indexed8_auto(
     let (raw_pixels, _) = pack_indexed(plane, 8, width, height, options)?;
 
     if !options.top_down {
-        // Try RLE8 only when bottom-up.
-        let rle_pixels = rle8_encode(&raw_pixels, width, height);
-        if rle_pixels.len() < raw_pixels.len() {
+        // Try RLE8 only when bottom-up. `rle8_encode` returns `Some` only
+        // when the stream came out strictly smaller than the raw array.
+        if let Some(rle_pixels) = rle8_encode(&raw_pixels, width, height, raw_pixels.len()) {
             let file = build_indexed_bmp(width, height, 8, BI_RLE8, palette, &rle_pixels, options);
             return Ok((file, EncodedBmpFormat::Rle8));
         }
@@ -1561,8 +1561,7 @@ fn encode_indexed4_auto(
     let (raw_pixels, _) = pack_indexed(plane, 4, width, height, options)?;
 
     if !options.top_down {
-        let rle_pixels = rle4_encode(&raw_pixels, width, height);
-        if rle_pixels.len() < raw_pixels.len() {
+        if let Some(rle_pixels) = rle4_encode(&raw_pixels, width, height, raw_pixels.len()) {
             let file = build_indexed_bmp(width, height, 4, BI_RLE4, palette, &rle_pixels, options);
             return Ok((file, EncodedBmpFormat::Rle4));
         }
@@ -1852,7 +1851,14 @@ fn pack_indexed(
 
 /// RLE8 encoder. Input is bottom-up raw indexed rows (4-byte padded).
 /// Output is the BI_RLE8 stream (EOL + EOB terminators).
-fn rle8_encode(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
+///
+/// Returns `None` once the emitted stream reaches `budget` bytes: the
+/// sole caller only keeps the RLE encoding when it is strictly smaller
+/// than the raw pixel array, so an incompressible image (where RLE only
+/// grows the data) can bail out after one row past the budget instead of
+/// scanning the whole plane to produce a result that is then discarded.
+/// A returned `Some` is guaranteed `< budget` bytes.
+fn rle8_encode(raw: &[u8], width: u32, height: u32, budget: usize) -> Option<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = row_stride(w, 8);
@@ -1861,6 +1867,10 @@ fn rle8_encode(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(w * h + h * 2 + 2);
 
     for y in 0..h {
+        // Already no smaller than the raw array — RLE has lost, stop.
+        if out.len() >= budget {
+            return None;
+        }
         let row = &raw[y * in_stride..y * in_stride + w];
         encode_rle8_row(&mut out, row);
         if y + 1 < h {
@@ -1872,7 +1882,7 @@ fn rle8_encode(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
     // End of bitmap
     out.push(0x00);
     out.push(0x01);
-    out
+    (out.len() < budget).then_some(out)
 }
 
 fn encode_rle8_row(out: &mut Vec<u8>, row: &[u8]) {
@@ -1925,7 +1935,10 @@ fn encode_rle8_row(out: &mut Vec<u8>, row: &[u8]) {
 
 /// RLE4 encoder. Input is bottom-up raw nibble-packed rows (4-byte padded).
 /// Output is the BI_RLE4 stream.
-fn rle4_encode(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
+///
+/// Returns `None` once the emitted stream reaches `budget` bytes (see
+/// [`rle8_encode`] for the rationale); a returned `Some` is `< budget`.
+fn rle4_encode(raw: &[u8], width: u32, height: u32, budget: usize) -> Option<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = row_stride(w, 4);
@@ -1937,6 +1950,9 @@ fn rle4_encode(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut nibbles: Vec<u8> = Vec::with_capacity(w);
 
     for y in 0..h {
+        if out.len() >= budget {
+            return None;
+        }
         let packed_row = &raw[y * in_stride..y * in_stride + w.div_ceil(2)];
         // Unpack nibbles for easier processing.
         nibbles.clear();
@@ -1955,7 +1971,7 @@ fn rle4_encode(raw: &[u8], width: u32, height: u32) -> Vec<u8> {
     // End of bitmap
     out.push(0x00);
     out.push(0x01);
-    out
+    (out.len() < budget).then_some(out)
 }
 
 fn encode_rle4_row(out: &mut Vec<u8>, nibbles: &[u8]) {
