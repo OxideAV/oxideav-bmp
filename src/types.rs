@@ -859,14 +859,17 @@ impl BitmapInfoHeader {
 
 /// Minimum number of little-endian bytes in `buf` starting at `off`
 /// needed to read a u32. Small helper that keeps parse sites noise-free.
+#[doc(hidden)]
 #[inline]
 pub fn read_u32_le(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
+#[doc(hidden)]
 #[inline]
 pub fn read_i32_le(buf: &[u8], off: usize) -> i32 {
     i32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
+#[doc(hidden)]
 #[inline]
 pub fn read_u16_le(buf: &[u8], off: usize) -> u16 {
     u16::from_le_bytes([buf[off], buf[off + 1]])
