@@ -2,44 +2,226 @@
 
 [![CI](https://github.com/OxideAV/oxideav-bmp/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-bmp/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-bmp.svg)](https://crates.io/crates/oxideav-bmp) [![docs.rs](https://docs.rs/oxideav-bmp/badge.svg)](https://docs.rs/oxideav-bmp) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Pure-Rust BMP (Windows bitmap) codec and container for the
-[`oxideav`](https://github.com/OxideAV/oxideav) framework. Also
-exposes the headerless **DIB** helpers used by `.ico` / `.cur`
-sub-images.
+Pure-Rust BMP (Windows bitmap) decoder, encoder and container for the
+[`oxideav`](https://github.com/OxideAV/oxideav) framework, following
+the OxideAV **image-crate API contract** (`IMAGE_CRATE_API.md` in the
+workspace). Also exposes the headerless **DIB** helpers used by `.ico`
+/ `.cur` sub-images.
 
-## Decode
+## Standalone use
 
-| Bit depth | Compression    | Output     |
-| --------- | -------------- | ---------- |
-| 1         | `BI_RGB`       | `Rgba`     |
-| 2         | `BI_RGB`       | `Rgba` (Windows CE, 4-entry palette) |
-| 4         | `BI_RGB`       | `Rgba`     |
-| 4         | `BI_RLE4`      | `Rgba` (delta + absolute mode; skips → index 0) |
-| 8         | `BI_RGB`       | `Rgba`     |
-| 8         | `BI_RLE8`      | `Rgba` (delta + absolute mode; skips → index 0) |
-| 16        | `BI_RGB`       | `Rgba` (5-5-5) |
-| 16        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
-| 16        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
-| 24        | `BI_RGB`       | `Rgba` (BGR→RGB, α=0xFF) |
-| 32        | `BI_RGB` (V3)  | `Rgba` (BGRA→RGBA, reserved byte = α) |
-| 32        | `BI_RGB` (V4/V5) | `Rgba` (BGR + in-header alpha mask; α=0xFF if mask=0) |
-| 32        | `BI_BITFIELDS` | `Rgba` (mask-derived) |
-| 32        | `BI_ALPHABITFIELDS` | `Rgba` (mask-derived, R/G/B/A) |
+```toml
+[dependencies]
+oxideav-bmp = { version = "0.1", default-features = false }
+```
 
-`BITMAPCOREHEADER` (OS/2 1.x, 12 B), the truncated OS/2 2.x
-`OS22XBITMAPHEADER` (16…39 B), `BITMAPINFOHEADER` (v3, 40 B; the full
-64-byte `OS22XBITMAPHEADER` decodes through this path on its 40-byte
-INFO prefix), `BITMAPV2INFOHEADER` (52 B, Adobe-intermediate
-RGB-masks-in-header), `BITMAPV3INFOHEADER` (56 B, adds the in-header
-alpha mask slot), `BITMAPV4HEADER`, and `BITMAPV5HEADER` are all
-accepted. The OS/2 1.x path honours the 3-byte `RGBTRIPLE` colour-table
-layout (the OS/2 2.x and every V3+ header use 4-byte `RGBQUAD`).
-Bottom-up and top-down row orders are auto-detected from the sign of
-`biHeight`; output is always top-down `Rgba`. `BI_JPEG` and `BI_PNG`
-are rejected at the boundary. The Windows CE 2-bit/pixel indexed depth
-is decoded too: four pixels pack per byte (left-most pixel in the two
-most-significant bits), each a 2-bit index into a 4-entry colour table;
-the `biClrUsed = 0` sentinel resolves to the full `2^2 = 4` entries.
+```rust
+let bytes = std::fs::read("in.bmp")?;
+if oxideav_bmp::probe(&bytes) {
+    let info = oxideav_bmp::info(&bytes)?;         // header only: width, height, format, colour
+    let img  = oxideav_bmp::decode(&bytes)?;       // BmpImage, native layout (Pal8 / Rgb555 / Bgr24 / Bgra …)
+    let rgba: Vec<u8> = img.to_rgba8();            // tightly packed RGBA, 4 × width bytes per row
+    let (w, h) = (img.width(), img.height());
+
+    let opts = oxideav_bmp::EncodeOptions::default().with_top_down(true);
+    let out: Vec<u8> = oxideav_bmp::encode_rgba8(w, h, &rgba, &opts)?;   // 32-bit BGRA BI_RGB
+    std::fs::write("out.bmp", out)?;
+    let _ = info;
+}
+```
+
+Root vocabulary (identical across every `oxideav-*` image crate):
+`probe`, `info -> ImageInfo`, `decode -> BmpImage`,
+`decode_with(&DecodeOptions)`, `decode_rgb8 -> RgbImage`,
+`decode_rgba8 -> RgbaImage`, `decode_from<R: Read>`,
+`encode(&BmpImage, &EncodeOptions) -> Vec<u8>`, `encode_rgb8`,
+`encode_rgba8`, `encode_to<W: Write>`; types `BmpImage { width, height,
+format: PixelFormat, planes: Vec<Plane>, color: ColorInfo, metadata:
+Metadata, palette: Option<Palette> }`, `RgbImage` / `RgbaImage { width,
+height, data }`, `Plane { stride, data }`, `ColorInfo { range,
+primaries, transfer, matrix }`, `Metadata { icc, exif, xmp, gamma }`,
+`Palette { entries: Vec<[u8; 4]> }`, `ImageInfo`, `DecodeOptions`,
+`EncodeOptions`, `PixelFormat` (= `BmpPixelFormat`), `Error`
+(= `BmpError`: `InvalidData`, `Unsupported`, `LimitExceeded`, `Io`).
+BMP has one image per file, so there is no `decode_all`.
+
+BMP-specific depth on top of the contract: `encode_with_report` (also
+tells you which on-disk variant was written — RLE or raw, bitfields,
+…), `decode_dib` / `decode_dib_with` / `encode_dib` (headerless DIBs for
+`.ico` / `.cur`), `BmpMetadata::from_bmp` / `from_dib` (every V3 / V4 /
+V5 header field, header-only), `BmpBitfields` (mask presets), the typed
+`BitmapFileHeader` / `BitmapInfoHeader` / `DibHeader` views and the
+`BI_*` / `LCS_*` constants.
+
+### Migrating from 0.1.x
+
+The pre-contract names remain for one release as `#[deprecated]`
+wrappers: `decode_bmp` (now `decode(..)` + `to_rgba8()` — the old
+function always returned `Rgba`, `decode` returns the native layout),
+`decode_bmp_with_metadata` / `decode_dib_with_metadata` (now `decode` /
+`decode_dib` plus `BmpMetadata::from_bmp` / `from_dib`), `encode_bmp` /
+`encode_bmp_with_options` / `encode_bmp_plane*` (now `encode` /
+`encode_with_report`), `encode_bmp_bitfields` / `encode_bmp_with_icc_profile`
+/ `encode_bmp_with_linked_icc_profile` / `encode_bmp_with_calibrated_rgb`
+(now `EncodeOptions` fields: `bitfields`, `embed_icc` + `metadata.icc`,
+`linked_icc`, `calibrated_rgb`), `BmpEncodeOptions` (now `EncodeOptions`,
+`#[non_exhaustive]`, built with `with_*`), `BmpPlane` (now `Plane`),
+`BmpPalette` (`[u8; 3]` entries; now `Palette` with `[u8; 4]`),
+`BmpPixelFormat::Indexed8` (now `Pal8`), and the `*_videoframe`
+wrappers. `BmpImage` lost its `pts` field (it belongs to the framework
+frame) and `pixel_format` is now `format`.
+
+## Framework use
+
+The default `registry` feature pulls in `oxideav-core`:
+
+```rust
+let mut ctx = oxideav_core::RuntimeContext::new();
+oxideav_bmp::register(&mut ctx);          // codec "bmp" + container "bmp" (.bmp / .dib)
+```
+
+`register_codecs(&mut CodecRegistry)` / `register_containers(&mut
+ContainerRegistry)` install the two halves separately; `make_decoder` /
+`make_encoder` are the factories. The framework decoder hands the
+pipeline **`Rgba` frames** (the container declares `Rgba`; every native
+layout is widened through `BmpImage::to_rgba8`); the framework encoder
+accepts `Rgba`, `Rgb24`, `Bgra`, `Bgr24` and `Pal8` (palette from the
+frame's palette side-channel) and reads `EncodeOptions` from
+`CodecParameters::options` (`top_down`, `minimal_palette`, `rle`,
+`embed_icc`). `From<BmpImage> for VideoFrame`,
+`BmpImage::from_video_frame(&VideoFrame, &CodecParameters)` and
+`TryFrom<(&VideoFrame, &CodecParameters)>` bridge the two worlds
+(`Pal8` carries its palette as the frame's palette side-channel, a
+signalled colour space as the colour-signal side-channel).
+
+## Supported layouts
+
+### Decode (`decode` returns the native layout)
+
+| Bit depth | Compression | Native `PixelFormat` | `to_rgba8` |
+| --- | --- | --- | --- |
+| 1 / 2 / 4 | `BI_RGB` | `Pal8` — indices unpacked to one byte per pixel, colour table in `palette` | palette lookup, α = 255 |
+| 4 | `BI_RLE4` | `Pal8` (delta + absolute mode; skipped cells → index 0) | palette lookup |
+| 8 | `BI_RGB`, `BI_RLE8` | `Pal8` | palette lookup |
+| 16 | `BI_RGB`, or `BI_BITFIELDS` with the 5-5-5 masks | `Rgb555` (packed `u16` words, verbatim) | 5-bit → 8-bit by bit replication |
+| 16 | `BI_BITFIELDS` with the 5-6-5 masks | `Rgb565` (verbatim) | 5/6-bit → 8-bit by bit replication |
+| 16 | any other mask set, `BI_ALPHABITFIELDS` | `Rgba` (every channel expanded) | copy |
+| 24 | `BI_RGB` | `Bgr24` | swizzle, α = 255 |
+| 32 | `BI_RGB` (V3) | `Bgra` — fourth byte kept as stored | swizzle |
+| 32 | `BI_RGB` (V4 / V5) | `Bgra` — alpha from the in-header alpha mask, `0xFF` if the mask is zero | swizzle |
+| 32 | `BI_BITFIELDS` / `BI_ALPHABITFIELDS`, byte-aligned B,G,R(,A) | `Bgra` | swizzle |
+| 32 | `BI_BITFIELDS` / `BI_ALPHABITFIELDS`, byte-aligned R,G,B(,A) | `Rgba` | copy |
+| 32 | any other mask set | `Rgba` (every channel expanded through the masks) | copy |
+
+Rows are always delivered top-down and tightly packed (no DWORD
+padding); bottom-up files are flipped while decoding. Every header
+generation is accepted: OS/2 1.x `BITMAPCOREHEADER` (12 B, 3-byte
+`RGBTRIPLE` palette), truncated and full OS/2 2.x `OS22XBITMAPHEADER`
+(16…64 B), `BITMAPINFOHEADER` (V3, 40 B), Adobe `BITMAPV2INFOHEADER` /
+`BITMAPV3INFOHEADER` (52 / 56 B), `BITMAPV4HEADER` (108 B),
+`BITMAPV5HEADER` (124 B). `BI_JPEG`, `BI_PNG` and the CMYK compressions
+are rejected with `Error::InvalidData`; the OS/2 `BA` / `CI` / `CP` /
+`IC` / `PT` container wrappers with `Error::Unsupported`.
+
+### Encode (`encode` writes the image's layout)
+
+| Input `PixelFormat` | On disk | Compression | Header |
+| --- | --- | --- | --- |
+| `Rgba`, `Bgra` (4 B/px) | 32-bit BGRA, alpha in the fourth byte | `BI_RGB` | V3 |
+| `Rgb24`, `Bgr24` (3 B/px) | 24-bit BGR | `BI_RGB` | V3 |
+| `Rgb555` (2 B/px) | 16-bit 5-5-5 | `BI_RGB` | V3 |
+| `Rgb565` (2 B/px) | 16-bit 5-6-5, masks in the header | `BI_BITFIELDS` | V4 (`LCS_sRGB`) |
+| `Pal8` (1 B/px) | 8-bit indexed | `BI_RGB` or `BI_RLE8` (whichever is smaller) | V3 |
+| `Indexed4` (1 B/px, values 0..=15) | 4-bit indexed | `BI_RGB` or `BI_RLE4` | V3 |
+| `Indexed2` (1 B/px, values 0..=3) | 2-bit indexed (Windows CE) | `BI_RGB` | V3 |
+| `Indexed1` (1 B/px, values 0 / 1) | 1-bit indexed | `BI_RGB` | V3 |
+
+Every layout `BmpImage` can express is writable, so `encode` never
+converts silently and `Error::Unsupported` is reserved for mutually
+exclusive header options (see below) and for `bitfields` on an indexed
+image. `encode_rgb8` writes 24-bit `BI_RGB`, `encode_rgba8` 32-bit
+`BI_RGB` with the alpha byte stored in the fourth byte (a V3 header has
+no way to declare it; `decode` hands it back verbatim, readers that
+ignore the byte see the colours). The indexed layouts need
+`BmpImage::palette`. **Lossless round trip:** `decode(encode(img))`
+reproduces the planes, palette and metadata of every native layout
+(`Bgra`, `Bgr24`, `Rgb555`, `Rgb565`, `Pal8`); `Rgba` / `Rgb24` come
+back as `Bgra` / `Bgr24` and `Indexed4` / `Indexed2` / `Indexed1` as
+`Pal8`, pixel values intact — pinned by `tests/contract.rs` and the
+`encode_roundtrip` fuzz target.
+
+## Options
+
+`DecodeOptions` (`#[non_exhaustive]`, `Default`, `with_*`):
+`max_width` / `max_height: Option<u32>`, `max_pixels` /
+`max_bytes: Option<u64>` (`None` = unlimited; default: no dimension cap,
+1 GiB of decoded plane), `strict: bool` (default `false`; `true` rejects
+a `bfOffBits` that points inside the header / colour table instead of
+recovering the canonical offset, and non-zero `BITMAPFILEHEADER`
+reserved words).
+
+`EncodeOptions` (`#[non_exhaustive]`, `Default`, `with_*`):
+
+| Field | Default | Effect |
+| --- | --- | --- |
+| `top_down: bool` | `false` | rows stored top-down, `biHeight` negative; disables RLE (illegal for top-down) |
+| `minimal_palette: bool` | `false` | write only the palette's entries, recording the count in `biClrUsed`, instead of a full `2^bpp` table |
+| `rle: bool` | `true` | allow `BI_RLE8` / `BI_RLE4` for `Pal8` / `Indexed4` when smaller than raw |
+| `bitfields: Option<BmpBitfields>` | `None` | explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` (V3 + 12 / 16-byte mask tail) for `Rgba` / `Rgb24` / `Bgra` / `Bgr24` input; presets `RGB565`, `RGB555`, `ARGB1555`, `BGRA8888`, `BGRX8888` |
+| `embed_icc: bool` | `true` | write a V5 `PROFILE_EMBEDDED` header carrying `metadata.icc` when the image has one |
+| `linked_icc: Option<Vec<u8>>` | `None` | V5 `PROFILE_LINKED` header with this path bytestring in the profile slot |
+| `rendering_intent: u32` | `LCS_GM_IMAGES` | `bV5Intent` for the two V5 modes |
+| `calibrated_rgb: Option<CalibratedRgb>` | `None` | V4 `LCS_CALIBRATED_RGB` header with the given CIE endpoints and Q16.16 gamma triple |
+
+A file has one DIB header, so `bitfields`, `calibrated_rgb` and the V5
+profile modes are mutually exclusive — asking for two is
+`Error::Unsupported`. `encode_with_report` returns the
+`EncodedBmpFormat` actually written.
+
+## Metadata and colour
+
+`BmpImage::color` is filled from the header: V4 / V5 `LCS_sRGB` and
+`LCS_WINDOWS_COLOR_SPACE` ("the system default color space, sRGB")
+decode to `ColorInfo::srgb()` (full range, H.273 primaries 1, transfer
+13, matrix 0); V3 / OS/2 headers, `LCS_CALIBRATED_RGB` and the two ICC
+modes decode to `ColorInfo::bmp_default()` — full-range device RGB
+with unspecified primaries and transfer. `BmpImage::metadata.icc` holds
+the embedded ICC profile of a V5 `PROFILE_EMBEDDED` file (when the
+declared slot fits in the buffer); `exif` and `xmp` are always `None`
+(BMP has no such slots) and `gamma` is `None` — the V4 per-channel
+Q16.16 "tone response curve" triple has no documented relation to the
+single file-gamma convention the contract field uses, so it stays in
+`BmpMetadata::gamma_rgb`. `ImageInfo::has_icc` reports a declared
+embedded profile of non-zero size. The full header record (colour-space
+tag, endpoints, gamma triple, rendering intent, profile offset / size,
+linked path bytes, pixels-per-metre, colour counts, OS/2 2.x fields) is
+`BmpMetadata::from_bmp(&bytes)` / `BmpMetadata::from_dib(&dib)`, both
+header-only.
+
+## Limits
+
+`probe` is allocation-free and total. `info` and `BmpMetadata::from_*`
+read headers only. `decode_with` checks `DecodeOptions` against the
+header before the colour table is read or any pixel buffer exists; a
+hostile header fails with `Error::LimitExceeded`. Independently of the
+options, the uncompressed path never allocates more than the input can
+back (`stride × height` is bounds-checked against the buffer first) and
+the RLE path caps the output grid at `255 × stream length` pixels, so a
+40-byte header claiming 2³¹ × 2³¹ is rejected, not allocated. Eight
+cargo-fuzz targets (`decode`, `rle_stream`, `header_forge`, `metadata`,
+`encode_roundtrip`, `icc_roundtrip`, `dib_roundtrip`,
+`bitfields_roundtrip`) cover `probe` / `info` / `decode` / `decode_with`
+/ `decode_rgb8` / `decode_rgba8` / `decode_dib` and every encode option;
+`tests/contract.rs` pins the contract behaviour and `tests/*.rs` replay
+the curated corpora and adversarial suites on every `cargo test`.
+
+---
+
+# Format specifics
+
+The sections below are the format-level detail behind the tables above.
+
+## Decode details
 
 ### RLE skipped-pixel + orientation semantics
 
@@ -107,8 +289,8 @@ populated only for an exactly-64-byte header (every Windows generation
 and the truncated OS/2 2.x forms report `None`):
 
 ```rust
-use oxideav_bmp::{BmpOs2Halftone, decode_bmp_with_metadata};
-let (_image, md) = decode_bmp_with_metadata(bytes)?;
+use oxideav_bmp::{BmpMetadata, BmpOs2Halftone};
+let md = BmpMetadata::from_bmp(bytes)?;
 if let Some(h2) = md.os2_header2 {
     h2.units_is_pels_per_meter();   // units == 0
     h2.is_bottom_up();              // recording == 0 (lower-left origin)
@@ -153,7 +335,7 @@ let _ = h.reserved_is_clean();        // bfReserved1/2 zero per the spec
 // other way via `to_bytes()` for a deterministic 14-byte layout.
 ```
 
-`decode_bmp` and `decode_bmp_with_metadata` now both funnel the file
+`decode`, `info` and `BmpMetadata::from_bmp` all funnel the file
 header parse through this struct, so the "shorter than header" and
 "missing 'BM' signature" error messages come from a single source.
 
@@ -188,9 +370,9 @@ describes — instead of reading header / palette bytes as pixels or
 tripping the "pixel array truncated" check. The recovery only ever
 moves the read *forward* to the earliest byte the pixels could legally
 occupy, so a larger, valid `bfOffBits` (a deliberate gap) is left
-untouched. `decode_bmp` and `decode_bmp_with_metadata` share the
-resolution; the headerless `decode_dib` path already used the canonical
-layout and is unchanged.
+untouched. `decode`, `info` and `BmpMetadata::from_bmp` share the
+resolution (`DecodeOptions::strict` turns the recovery off); the
+headerless `decode_dib` path always uses the canonical layout.
 
 ### Typed `BitmapInfoHeader` view + `DibHeaderKind`
 
@@ -250,13 +432,13 @@ use).
 
 ### V3+ device-resolution + palette-count metadata
 
-`BmpMetadata` (returned by `decode_bmp_with_metadata` /
-`decode_dib_with_metadata`) also surfaces the four V3+ metadata fields
+`BmpMetadata` (`BmpMetadata::from_bmp` / `BmpMetadata::from_dib`)
+also surfaces the four V3+ metadata fields
 that pre-date colour management: `biXPelsPerMeter`, `biYPelsPerMeter`,
 `biClrUsed`, and `biClrImportant`. The named accessors:
 
 ```rust
-let (_image, md) = oxideav_bmp::decode_bmp_with_metadata(bytes)?;
+let md = oxideav_bmp::BmpMetadata::from_bmp(bytes)?;
 md.pixels_per_meter_x      // Option<i32>  — None on OS/2 V1
 md.pixels_per_meter_y      // Option<i32>
 md.colors_used             // Option<u32>  — `0` = "all 2^bpp"
@@ -279,9 +461,10 @@ negative values so a misencoded file doesn't generate a nonsensical
 
 ### V4 / V5 colour-space metadata + embedded ICC profile
 
-`decode_bmp_with_metadata` / `decode_dib_with_metadata` return a
-`(BmpImage, BmpMetadata)` pair so callers that need the V4/V5
-colour-management tail can inspect `bV4CSType`, the `CIEXYZTRIPLE`
+`decode` puts the contract view on the image (`BmpImage::color`,
+`BmpImage::metadata.icc`); `BmpMetadata::from_bmp` /
+`BmpMetadata::from_dib` parse the full header record so callers that
+need the V4/V5 colour-management tail can inspect `bV4CSType`, the `CIEXYZTRIPLE`
 endpoints, the `R/G/B` gamma triple, the V5 rendering intent, and the
 on-disk `bV5ProfileData` / `bV5ProfileSize` fields. A V5 header that
 declares `PROFILE_EMBEDDED` additionally surfaces the embedded ICC blob
@@ -289,7 +472,7 @@ as `BmpMetadata::icc_profile: Option<Vec<u8>>`; `PROFILE_LINKED`
 surfaces the offset + size so callers can resolve the path themselves.
 
 ```rust
-let (image, md) = oxideav_bmp::decode_bmp_with_metadata(bytes)?;
+let md = oxideav_bmp::BmpMetadata::from_bmp(bytes)?;
 match md.color_space {
     Some(oxideav_bmp::BmpColorSpace::SRgb) => /* sRGB */ {}
     Some(oxideav_bmp::BmpColorSpace::ProfileEmbedded) => {
@@ -326,19 +509,21 @@ Windows) is the caller's responsibility.
 
 V3 / OS/2 headers report every metadata field as `None` (they pre-date
 colour management). V4 fills `color_space` / `endpoints` / `gamma_rgb`;
-V5 additionally fills `rendering_intent`. The decode-path itself is
-unchanged — pixels still come out as top-down `Rgba` regardless of the
-declared colour space — and the original `decode_bmp` / `decode_dib`
-entry points stay byte-for-byte compatible. A V5 header that lies about
+V5 additionally fills `rendering_intent`. The pixel decode does not
+depend on the declared colour space (`decode` returns the native
+layout, `BmpImage::color` carries the sRGB / default signalling). A V5
+header that lies about
 its ICC offset / size (slice falls past EOF) leaves
 `icc_profile = None` with the declared fields still populated so the
 metadata path can never make decode fail on its own.
 
-`encode_bmp_with_icc_profile` is the matching encode side: pass an
-`Rgba`, `Rgb24`, `Rgb555`, `Rgb565`, `Indexed8`, `Indexed4`, or
-`Indexed1` `BmpImage` plus an ICC blob plus an intent constant (0 for
+`encode` with `BmpImage::metadata.icc = Some(..)` (and the default
+`EncodeOptions::embed_icc = true`) is the matching encode side: for an
+`Rgba`, `Bgra`, `Rgb24`, `Bgr24`, `Rgb555`, `Rgb565`, `Pal8`,
+`Indexed4`, `Indexed2` or `Indexed1` image, with
+`EncodeOptions::rendering_intent` (default `LCS_GM_IMAGES`; 0 for
 unspecified, or one of `LCS_GM_BUSINESS` / `LCS_GM_GRAPHICS` /
-`LCS_GM_IMAGES` / `LCS_GM_ABS_COLORIMETRIC`) and the encoder emits a
+`LCS_GM_IMAGES` / `LCS_GM_ABS_COLORIMETRIC`), the encoder emits a
 124-byte `BITMAPV5HEADER` with `bV5CSType = PROFILE_EMBEDDED` followed
 by the colour table (for indexed input) + pixel array + ICC blob.
 `top_down` is honoured on every arm; `minimal_palette` trims the
@@ -350,37 +535,36 @@ between the header and the pixel array. The indexed paths set
 spec doesn't define how an RLE pixel stream and a trailing
 colour-management blob co-exist on disk).
 
-`encode_bmp_with_linked_icc_profile` writes the same 124-byte
+`EncodeOptions::linked_icc = Some(path)` writes the same 124-byte
 `BITMAPV5HEADER` shape but with `bV5CSType = PROFILE_LINKED` and a
 caller-supplied **path-string blob** in the trailing slot rather than
 the ICC bytes themselves. The path encoding is system-dependent per
 spec (typically null-terminated ANSI on Windows); the encoder surfaces
 the buffer verbatim so callers that need UTF-16 / URL transport can
-pass whatever blob they choose. Decoder side: `decode_bmp_with_metadata`
+pass whatever blob they choose. Decoder side: `BmpMetadata::from_bmp`
 sets `BmpColorSpace::ProfileLinked` and exposes `profile_data_offset` /
 `profile_size` so callers can resolve the path themselves — the
 decoder never auto-loads the linked file. Supported pixel formats
-(`Rgba` / `Rgb24` / `Rgb555` / `Rgb565` / `Indexed8` / `Indexed4` /
-`Indexed1`), `top_down`, and `minimal_palette` handling match the
-embedded path.
+(every `PixelFormat`), `top_down`, and `minimal_palette` handling
+match the embedded path.
 
-`encode_bmp_with_calibrated_rgb` is the V4 colour-space counterpart to
-those V5 + ICC paths: instead of pointing at an embedded or linked ICC
-profile it emits a 108-byte `BITMAPV4HEADER` with
-`bV4CSType = LCS_CALIBRATED_RGB` and bakes the caller-supplied CIE
-endpoints (`[i32; 9]` `CIEXYZTRIPLE`, packed
+`EncodeOptions::calibrated_rgb = Some(CalibratedRgb { endpoints, gamma })`
+is the V4 colour-space counterpart to those V5 + ICC paths: instead of
+pointing at an embedded or linked ICC profile it emits a 108-byte
+`BITMAPV4HEADER` with `bV4CSType = LCS_CALIBRATED_RGB` and bakes the
+caller-supplied CIE endpoints (`[i32; 9]` `CIEXYZTRIPLE`, packed
 R.x R.y R.z G.x G.y G.z B.x B.y B.z) and per-channel gamma triple
 (`[u32; 3]`, unsigned 16.16 fixed point) directly into the header's
 endpoint / gamma fields. The decoder round-trips it:
-`decode_bmp_with_metadata` reports `BmpColorSpace::Calibrated` and
+`BmpMetadata::from_bmp` reports `BmpColorSpace::Calibrated` and
 returns the same `endpoints` + `gamma_rgb` the encoder was given (V4
 carries no rendering intent, so `rendering_intent` stays `None`).
 Supported pixel formats and option handling match the ICC paths:
-`Rgba` (32-bit BGRA `BI_RGB`), `Rgb24` (24-bit BGR `BI_RGB`),
-`Rgb555` (16-bit `BI_RGB` 5-5-5, high bit reserved, no mask block),
-`Rgb565` (16-bit `BI_BITFIELDS` 5-6-5 with the canonical masks in the
-V4 four-mask region), and the indexed `Indexed8` / `Indexed4` /
-`Indexed1` (uncompressed `BI_RGB`, colour table between the header and
+`Rgba` / `Bgra` (32-bit BGRA `BI_RGB`), `Rgb24` / `Bgr24` (24-bit BGR
+`BI_RGB`), `Rgb555` (16-bit `BI_RGB` 5-5-5, high bit reserved, no mask
+block), `Rgb565` (16-bit `BI_BITFIELDS` 5-6-5 with the canonical masks
+in the V4 four-mask region), and the indexed `Pal8` / `Indexed4` /
+`Indexed2` / `Indexed1` (uncompressed `BI_RGB`, colour table between the header and
 the pixel array). RLE is never chosen so the header shape is
 deterministic; `top_down` and `minimal_palette` are honoured on every
 arm. A caller that only wants to *tag* a bitmap as calibrated without
@@ -402,8 +586,8 @@ encode counterpart of the decoder's 16-bit `BI_RGB` 5-5-5 path). The
 trailing ICC / path / endpoint-gamma colour-management payload is
 unaffected.
 
-`Indexed8` / `Indexed4` / `Indexed1` input is also accepted on both
-V5 + ICC paths: the encoder emits a 124-byte V5 header
+`Pal8` / `Indexed4` / `Indexed2` / `Indexed1` input is also accepted on
+both V5 + ICC paths: the encoder emits a 124-byte V5 header
 with `biCompression = BI_RGB`, writes the colour table between the
 header and the pixel array (so `bfOffBits = 14 + 124 + entries × 4`),
 sets `biClrUsed` from the supplied palette (honouring
@@ -449,71 +633,26 @@ reserved high bytes happen to be zero.
 The plain 40-byte `BITMAPINFOHEADER` (V3) `BI_RGB` path is deliberately
 *unchanged*: it has no in-header alpha-mask slot, so it keeps reading
 the reserved high byte directly as alpha — the behaviour this crate's
-own 32-bit BGRA encoder (`encode_bmp` → V3 `BI_RGB`) relies on for a
-lossless `Rgba` round-trip. The colour-managed V4 / V5 encode paths
-(`encode_bmp_with_icc_profile` / `_linked_icc_profile` /
-`_calibrated_rgb`) now write the canonical `0xFF000000` alpha mask for
-32-bit `Rgba` input so the file they emit is a spec-correct
+own 32-bit BGRA encoder (`encode` → V3 `BI_RGB`) relies on for a
+lossless alpha round-trip. The colour-managed V4 / V5 encode paths
+(`embed_icc` / `linked_icc` / `calibrated_rgb`) write the canonical
+`0xFF000000` alpha mask for 32-bit `Rgba` / `Bgra` input so the file
+they emit is a spec-correct
 alpha-carrying bitmap rather than one that hides opacity in the
 reserved byte.
 
-## Encode
-
-| Input format        | BMP output                    | Header |
-| ------------------- | ----------------------------- | ------ |
-| `Rgba` (4 B/px)     | 32-bit BGRA `BI_RGB`          | V3     |
-| `Rgb24` (3 B/px)    | 24-bit BGR `BI_RGB`           | V3     |
-| `Rgb555` (2 B/px)   | 16-bit `BI_RGB` 5-5-5         | V3     |
-| `Rgb565` (2 B/px)   | 16-bit `BI_BITFIELDS` 5-6-5   | V4     |
-| `Indexed8` (1 B/px) | 8-bit indexed `BI_RGB` or `BI_RLE8` (auto) | V3 |
-| `Indexed4` (1 B/px) | 4-bit indexed `BI_RGB` or `BI_RLE4` (auto) | V3 |
-| `Indexed2` (1 B/px) | 2-bit indexed `BI_RGB` (Windows CE, 4-entry palette) | V3 |
-| `Indexed1` (1 B/px) | 1-bit indexed `BI_RGB` (monochrome) | V3 |
-
-For a 16-bpp `BI_RGB` bitmap the on-disk layout is always RGB 5-5-5
-(high bit reserved, then R in bits 14..10, G in bits 9..5, B in bits
-4..0), so `Rgb555` input is emitted with a plain 40-byte
-`BITMAPINFOHEADER` and **no** `BI_BITFIELDS` mask block — the encode
-counterpart of the decoder's 16-bit `BI_RGB` 5-5-5 path. Input is one
-little-endian 5-5-5 `u16` per pixel (the same packed wire shape
-`Rgb565` accepts). `top_down` is honoured (negative `biHeight`); the
-headerless DIB helper (`encode_dib` / `encode_dib_plane`) also accepts
-`Rgb555`. For `Rgb565` the V4 header carries canonical masks R=0xF800,
-G=0x07E0, B=0x001F. For 8/4-bit indexed formats the encoder tries RLE
-compression
-first and falls back to uncompressed when RLE does not shrink the
-output. BMP has no RLE flavour at 2 bpp or 1 bpp, so `Indexed2` and
-`Indexed1` are always emitted as uncompressed `BI_RGB`.
-
-`Indexed2` is the encode counterpart of the decoder's Windows CE
-2-bit/pixel path: four pixels pack per byte with the left-most pixel
-in the two most-significant bits, each a 2-bit index into a 4-entry
-colour table. Input is one byte per pixel (`idx & 0x03`), emitted with
-a plain 40-byte `BITMAPINFOHEADER` (V3 `BI_RGB`). `top_down`,
-`minimal_palette`, and the headerless DIB helper all apply exactly as
-they do for the other indexed depths.
-
-`Indexed8`, `Indexed4`, `Indexed2`, and `Indexed1` all require a
-`BmpPalette` alongside the image: up to 256 (8-bit), 16 (4-bit), 4
-(2-bit), or 2 (1-bit) entries. Pixel-byte inputs carry
-`idx & 0xFF` / `idx & 0x0F` / `idx & 0x03` / `idx & 1` respectively;
-the encoder packs them MSB-first per the BMP spec. Unused entries are
-zero-padded in the on-disk colour table; set
-`minimal_palette = true` to record only the entries actually supplied.
+## Encode details
 
 ### Minimal colour table (`biClrUsed`)
 
 ```rust
-encode_bmp_with_options(&image, BmpEncodeOptions {
-    minimal_palette: true,
-    ..Default::default()
-})
+encode(&image, &EncodeOptions::default().with_minimal_palette(true))
 ```
 
 By default the indexed paths write a full `2^bpp` colour table and
 leave `biClrUsed = 0` (the "all colours used" sentinel). Setting
 `minimal_palette: true` instead writes exactly as many `RGBQUAD`
-entries as the supplied `BmpPalette` carries and records that count
+entries as the image's `Palette` carries and records that count
 in `biClrUsed` — a 2-colour 8-bit image sheds 254 unused entries
 (1016 bytes); a 1-entry `Indexed1` table sheds 4 bytes. The count is
 clamped to `[1, 2^bpp]`; a palette that already fills the space keeps
@@ -523,18 +662,18 @@ transparently.
 
 ### Top-down DIB output
 
-`encode_bmp_with_options(&image, BmpEncodeOptions { top_down: true })`
+`encode(&image, &EncodeOptions::default().with_top_down(true))`
 emits a top-down DIB — rows stored top-to-bottom, `biHeight` written
 as a negative integer per the BMP signed-height convention.
-Compatible with `Rgba` / `Rgb24` / `Rgb565` / `Indexed8` / `Indexed4` /
-`Indexed1`; the 8/4-bit indexed paths force the uncompressed fall-back
+Compatible with every `PixelFormat`; the 8/4-bit indexed paths force
+the uncompressed fall-back
 when `top_down` is set since RLE escape codes have no defined meaning
 under a negative `biHeight`. `Indexed1` is always uncompressed and so
 unaffected.
 
 ### Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` (V3 + mask tail)
 
-`encode_bmp_bitfields` emits a bit-field BMP using the classic Windows
+`EncodeOptions::bitfields = Some(masks)` emits a bit-field BMP using the classic Windows
 in-file mask layout: a 40-byte `BITMAPINFOHEADER` (V3) followed by a
 12-byte (R/G/B) or 16-byte (R/G/B/A) DWORD mask tail immediately after
 the header, then the pixel array. This is distinct from the in-header
@@ -543,10 +682,9 @@ mask block a V4 / V5 header carries — the masks sit **between** the
 layout the decoder already reads.
 
 ```rust
-use oxideav_bmp::{encode_bmp_bitfields, BmpBitfields, BmpEncodeOptions};
+use oxideav_bmp::{encode, BmpBitfields, EncodeOptions};
 
-let bytes = encode_bmp_bitfields(&image, BmpBitfields::BGRA8888,
-                                 BmpEncodeOptions::default())?;
+let bytes = encode(&image, &EncodeOptions::default().with_bitfields(BmpBitfields::BGRA8888))?;
 ```
 
 `BmpBitfields` carries the four channel masks plus the on-disk bit depth
@@ -560,7 +698,7 @@ let bytes = encode_bmp_bitfields(&image, BmpBitfields::BGRA8888,
 | `BGRA8888`  | 32  | `00FF0000` / `0000FF00` / `000000FF` / `FF000000`| 16 B | `BI_ALPHABITFIELDS` |
 | `BGRX8888`  | 32  | `00FF0000` / `0000FF00` / `000000FF` / —         | 12 B | `BI_BITFIELDS` |
 
-The source plane is `Rgba` or `Rgb24`; each 8-bit channel is requantised
+The source plane is `Rgba` / `Rgb24` / `Bgra` / `Bgr24`; each 8-bit channel is requantised
 to its mask width (the inverse of the decoder's shift-and-scale
 `expand`). A non-zero alpha mask selects the four-mask
 `BI_ALPHABITFIELDS` tail so alpha survives the round-trip; a zero alpha
@@ -578,13 +716,16 @@ inside `bpp` bits.
 
 ```rust
 // Headerless DIB (BITMAPINFOHEADER + pixels). No BITMAPFILEHEADER.
-let dib = oxideav_bmp::encode_dib(&frame, /* doubled */ false)?;
-let frame = oxideav_bmp::decode_dib(&dib, /* doubled */ false)?;
+let dib = oxideav_bmp::encode_dib(&image, /* doubled */ false)?;
+let image = oxideav_bmp::decode_dib(&dib, /* doubled */ false)?;   // native layout
 
 // ICO sub-image variant — height field is 2×, a 1-bpp AND mask is
 // appended after the XOR pixels, alpha-channel of the source drives
 // the mask (alpha==0 ⇒ mask bit set ⇒ transparent).
-let ico_sub = oxideav_bmp::encode_dib(&frame, /* doubled */ true)?;
+let ico_sub = oxideav_bmp::encode_dib(&image, /* doubled */ true)?;
+// Decoding a doubled-height DIB folds the AND mask into alpha, so the
+// result is always `Rgba`.
+let rgba = oxideav_bmp::decode_dib(&ico_sub, /* doubled */ true)?;
 ```
 
 ## Robustness — property tests + fuzzing
@@ -629,8 +770,11 @@ of bounds, or OOM-abort.
 
 Eight `cargo-fuzz` targets live in `fuzz/`:
 
-* `decode` — feeds arbitrary bytes to `decode_bmp` and to `decode_dib`
-  (both the plain and the doubled-height XOR+AND-mask modes). The
+* `decode` — feeds arbitrary bytes to the contract surface (`probe`,
+  `info`, `decode`, `decode_with` under tight strict limits,
+  `decode_rgb8`, `decode_rgba8`) and to `decode_dib` (both the plain
+  and the doubled-height XOR+AND-mask modes), running `to_rgba8` /
+  `to_rgb8` on everything that decodes. The
   seed corpus carries one valid BMP per header / depth / compression
   variant (32/24/16/8/4/1-bpp, RLE4/RLE8, top-down, minimal-palette,
   V4 bitfields header) plus a couple of degenerate framings.
@@ -644,22 +788,20 @@ Eight `cargo-fuzz` targets live in `fuzz/`:
 * `encode_roundtrip` — closes the symmetry by exercising
   the **encoder** with fuzzer-controlled pixels / palette / encode
   options, then decoding the output back. The first four input bytes
-  pick the pixel format (`Rgba` / `Rgb24` / `Rgb565` / `Indexed8` /
-  `Indexed4` / `Indexed2` / `Indexed1` / `Rgb555`, via `byte % 8`), the
-  `top_down` + `minimal_palette` option
+  pick the pixel format (all ten `PixelFormat`s, via `byte % 10`), the
+  `top_down` / `minimal_palette` / `rle` option
   flags, and the geometry (clamped to 1..=64 px per axis to keep each
   iteration under ~16 KiB of plane data). The remainder fills the
   pixel plane and, for indexed formats, the palette tail (three bytes
   per `[R, G, B]` entry, padded with zeros so every index resolves).
-  For the two direct-colour formats the harness additionally asserts
-  that every decoded pixel byte matches what the encoder was given
-  (R / G / B / alpha); indexed and `Rgb565` paths are panic-checked
-  only since the decoder materialises `Rgba` and a 1 B/px → 4 B/px
-  comparison would be apples-to-oranges. Six seed inputs (one per
-  format) live in `fuzz/corpus/encode_roundtrip/`.
-* `metadata` — fuzzes the `decode_bmp_with_metadata` /
-  `decode_dib_with_metadata` entry points, which are independent public
-  surfaces with their own attacker-controlled offset / slicing maths
+  The harness asserts the contract's lossless promise on every format:
+  `to_rgba8()` of the decoded image equals the source's, and the native
+  layouts (`Bgra` / `Bgr24` / `Rgb555` / `Rgb565` / `Pal8`) come back
+  with the same `format`, plane bytes and palette. Six seed inputs live
+  in `fuzz/corpus/encode_roundtrip/`.
+* `metadata` — fuzzes `BmpMetadata::from_bmp` / `from_dib` and the
+  `color` / `metadata.icc` the decoder stamps on the image, which are
+  independent surfaces with their own attacker-controlled offset / slicing maths
   that the pixel-only `decode` target never reaches: the V4 colour-space
   tail (`bV4CSType`, the nine-`i32` `CIEXYZTRIPLE` endpoints, the
   three-`u32` gamma triple), the V5 colour-management tail
@@ -671,33 +813,34 @@ Eight `cargo-fuzz` targets live in `fuzz/`:
   inputs (plain V3, V4 calibrated-RGB, V5 embedded ICC on direct-colour
   and indexed images, V5 linked ICC) live in `fuzz/corpus/metadata/`.
 * `bitfields_roundtrip` — drives the explicit-mask
-  `encode_bmp_bitfields` encoder with fuzzer-controlled pixels, a mask
+  `EncodeOptions::bitfields` encoder with fuzzer-controlled pixels, a mask
   preset (RGB565 / RGB555 / ARGB1555 / BGRA8888 / BGRX8888) or an
   arbitrary mask set that exercises `BmpBitfields::validate`'s reject
   path, plus the `top_down` option, then decodes the output. The
   byte-aligned 32-bpp presets additionally assert the documented exact
   round-trip (`BGRA8888` lossless including alpha; `BGRX8888`
-  colour-exact with alpha decoding opaque); the 16-bpp presets are
-  panic-checked only.
+  colour-exact with alpha decoding opaque) and the native `Bgra`
+  layout; the 16-bpp presets are shape-checked.
 * `header_forge` (round 383) — the fuzzer's bytes become raw DIB
   header *fields* (Core / Info / V2 / V3 / V4 / V5 / OS2-64 plus
   arbitrary `biSize`) wrapped in always-well-formed BMP + DIB framing
   (magic selector, wrapping `bfOffBits` delta, verbatim body), so the
   iteration budget lands inside the header-validation matrix instead
   of rediscovering signatures and offsets. Every forged file runs
-  through all six public parse surfaces. 15 seeds derived from the
+  through `info` / `decode` / `BmpMetadata::from_bmp` and the three
+  DIB parse surfaces. 15 seeds derived from the
   `decode` + `metadata` corpora.
 * `icc_roundtrip` (round 383) — drives the three colour-management
-  encode surfaces (`encode_bmp_with_icc_profile`, linked-profile,
-  calibrated-RGB) across 7 pixel formats × options × blob sizes, then
-  asserts via `decode_bmp_with_metadata` that the colour-space tag,
-  blob / path bytes, endpoints + gamma, and Rgba pixels return
-  verbatim. Encoder `Err` is accepted; undecodable encoder output is
+  encode modes (`metadata.icc` + `embed_icc`, `linked_icc`,
+  `calibrated_rgb`) across 9 pixel formats × options × blob sizes, then
+  asserts via `decode` + `BmpMetadata::from_bmp` that the colour-space
+  tag, blob / path bytes (header record and `metadata.icc`), endpoints +
+  gamma, and every pixel return verbatim. Encoder `Err` is accepted; undecodable encoder output is
   a crash.
 * `dib_roundtrip` (round 383) — drives `encode_dib` (the `.ico` /
-  `.cur` shared surface) across all 8 formats and both layouts (plain
+  `.cur` shared surface) across all 10 formats and both layouts (plain
   + doubled-height XOR/AND). Matching-flag decode must succeed with
-  exact geometry, plain-Rgba must be pixel-exact, and the same bytes
+  exact geometry, the plain layout must be pixel-exact, and the same bytes
   are decoded under the opposite mask flag as a panic-check — the
   classic hostile-`.ico` confusion.
 
@@ -770,11 +913,3 @@ amortises its build; the combined table is kept above that threshold.
 The encoder's BGR(A) packers walk `chunks_exact` for a bounds-check-free
 shuffle, and the indexed RLE size probe aborts as soon as the compressed
 stream exceeds the raw array on incompressible input.
-
-## Registration
-
-```rust
-let mut codecs = oxideav_codec::CodecRegistry::new();
-let mut containers = oxideav_container::ContainerRegistry::new();
-oxideav_bmp::register(&mut codecs, &mut containers);
-```

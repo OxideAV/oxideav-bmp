@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Image-crate API contract (`IMAGE_CRATE_API.md`)** — round 466. The
+  crate root now exposes the shared vocabulary: `probe`, `info ->
+  ImageInfo`, `decode -> BmpImage`, `decode_with(&DecodeOptions)`,
+  `decode_rgb8 -> RgbImage`, `decode_rgba8 -> RgbaImage`,
+  `decode_from<R: Read>`, `encode(&BmpImage, &EncodeOptions) -> Vec<u8>`,
+  `encode_rgb8`, `encode_rgba8`, `encode_to<W: Write>` (plus the
+  BMP-specific `encode_with_report`, which also returns the
+  `EncodedBmpFormat` written), and the shared records `Plane`,
+  `Palette { entries: Vec<[u8; 4]> }`, `ColorInfo` / `ColorRange`,
+  `Metadata`, `RgbImage` / `RgbaImage`, `ImageInfo`, `DecodeOptions`,
+  `EncodeOptions`, `PixelFormat` (= `BmpPixelFormat`), `Error`
+  (= `BmpError`).
+- `BmpImage` is now the contract shape — `#[non_exhaustive]`,
+  `{ width, height, format, planes, color, metadata, palette }` with
+  `new -> Result` (validated geometry), `packed`, `from_rgb8`,
+  `from_rgba8`, `with_color` / `with_metadata` / `with_palette`,
+  `width()` / `height()` / `format()`, `as_bytes`, `into_raw`,
+  `to_rgb8` / `to_rgba8` (exact for every layout: palette lookup, 5/6-bit
+  widening by bit replication, BGR swizzle) and `try_to_rgb8` /
+  `try_to_rgba8`. The `pts` field is gone (it belongs to the framework
+  frame) and `pixel_format` is now `format`.
+- **`decode` returns the native layout** instead of always expanding to
+  `Rgba`: 1 / 2 / 4 / 8-bit (`BI_RGB`, `BI_RLE4`, `BI_RLE8`) → `Pal8`
+  with the colour table in `palette` (sub-byte indices unpacked to one
+  byte per pixel), 16-bit 5-5-5 / 5-6-5 → `Rgb555` / `Rgb565` (packed
+  words verbatim), 24-bit → `Bgr24`, 32-bit → `Bgra` (byte-aligned
+  R,G,B(,A) masks → `Rgba`), any other mask set → expanded `Rgba`. Rows
+  stay top-down and tightly packed. `BmpImage::color` is filled from the
+  V4 / V5 colour-space tag (`LCS_sRGB` / `LCS_WINDOWS_COLOR_SPACE` →
+  sRGB, otherwise the documented full-range device-RGB default) and
+  `BmpImage::metadata.icc` from a V5 embedded profile.
+- `BmpPixelFormat` gained `Bgra`, `Bgr24` and `Pal8` (the core names;
+  `Indexed8` is a deprecated alias of `Pal8`) and is `#[non_exhaustive]`.
+  The encoder accepts every variant (`Bgra` / `Bgr24` on every path,
+  including bitfields, calibrated and ICC).
+- `EncodeOptions` (was `BmpEncodeOptions`) is `#[non_exhaustive]` with
+  `with_*` setters and now carries every behaviour variant as a field:
+  `top_down`, `minimal_palette`, `rle` (new; `false` forces raw indexed
+  output), `bitfields: Option<BmpBitfields>`, `embed_icc` (default
+  `true`: a V5 `PROFILE_EMBEDDED` header is written when the image has
+  `metadata.icc`), `linked_icc: Option<Vec<u8>>`, `rendering_intent`
+  (default `LCS_GM_IMAGES`), `calibrated_rgb: Option<CalibratedRgb>`.
+  Mutually exclusive header families are `Error::Unsupported`.
+- `BmpError` gained `LimitExceeded(String)` and `Io(std::io::Error)`
+  (+ `From<std::io::Error>`), is `#[non_exhaustive]`, and no longer
+  derives `Clone` / `PartialEq` / `Eq`.
+- `decode_dib` returns the native layout for a plain DIB; the
+  doubled-height `.ico` form folds the AND mask into alpha and therefore
+  returns `Rgba`. New `decode_dib_with(input, doubled, &DecodeOptions)`.
+- `register` now takes `&mut RuntimeContext` (fleet signature);
+  `register_codecs` / `register_containers` are unchanged. The crate
+  also installs itself through `oxideav_core::register!("bmp", ..)`.
+  The framework decoder keeps delivering `Rgba` frames (the container
+  declares `Rgba`) through `decode_with` + `to_rgba8`; the framework
+  encoder accepts `Rgba` / `Rgb24` / `Bgra` / `Bgr24` / `Pal8` frames
+  and parses `EncodeOptions` (`top_down`, `minimal_palette`, `rle`,
+  `embed_icc`) from `CodecParameters::options`.
+- `EncodedBmpFormat` is `#[non_exhaustive]` and gained `Bitfields` /
+  `AlphaBitfields` for the explicit-mask output.
+- The 4.4k-line `lib.rs` test corpus moved to `src/tests.rs`; the root
+  vocabulary lives in `src/api.rs`, the options in `src/options.rs`, the
+  framework `Decoder` / `Encoder` in `src/registry.rs` (behaviour
+  neutral — decoded samples are byte-identical through the deprecated
+  entry points).
+
+### Added
+
+- `BmpImage::from_video_frame(&VideoFrame, &CodecParameters)`,
+  `TryFrom<(&VideoFrame, &CodecParameters)>`, `From<BmpImage> for
+  VideoFrame` / `From<&BmpImage>` (palette and colour-signal
+  side-channels), `to_core_pixel_format` / `from_core_pixel_format`,
+  `to_color_signal` / `from_color_signal`, `BmpDecoder` / `BmpEncoder`
+  (`registry` feature).
+- `BmpMetadata::from_bmp` / `BmpMetadata::from_dib` — header-only parse
+  of the full V3 / V4 / V5 record (what the deprecated
+  `*_with_metadata` tuple entry points returned alongside the pixels).
+- `DecodeOptions::strict` rejects `bfOffBits` recovery and non-zero
+  `BITMAPFILEHEADER` reserved words.
+- `tests/contract.rs` pins the contract behaviour (lossless
+  `decode(encode(img))` for every layout, exact 16-bit widening, limits,
+  strict mode, colour / metadata, header-family exclusivity, no-panic
+  truncation / bit-flip sweeps). The `decode` fuzz target covers
+  `probe` / `info` / `decode` / `decode_with` / `decode_rgb8` /
+  `decode_rgba8`; the encode-side targets assert the lossless round trip
+  on every layout. The `ci-standalone` job now runs the whole test suite
+  and clippy under `--no-default-features`.
+- Root re-exports of `BI_RLE4`, `BI_RLE8`, `BI_JPEG`, `BI_PNG`.
+
+### Deprecated
+
+- `decode_bmp`, `decode_bmp_with_metadata`, `decode_dib_with_metadata`,
+  `encode_bmp`, `encode_bmp_with_options`, `encode_bmp_plane`,
+  `encode_bmp_plane_with_options`, `encode_bmp_bitfields`,
+  `encode_bmp_plane_bitfields`, `encode_bmp_with_icc_profile`,
+  `encode_bmp_with_linked_icc_profile`, `encode_bmp_with_calibrated_rgb`,
+  `encode_dib_plane`, `decode_bmp_videoframe` / `decode_dib_videoframe` /
+  `encode_bmp_videoframe` / `encode_dib_videoframe`, `BmpEncodeOptions`,
+  `BmpPlane`, `BmpPalette` (`[u8; 3]` entries, converts into `Palette`),
+  `BmpPixelFormat::Indexed8` — all kept for one release as thin wrappers
+  over the contract entry points (the `decode_bmp*` / `*_videoframe`
+  wrappers still widen to `Rgba`).
+
+
 ### Added
 
 - *(fuzz)* **Three new cargo-fuzz targets** (round 383, fuzz-hardening
