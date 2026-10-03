@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.6...v0.2.0) - 2026-10-03
+
+### Added
+
+- *(encode)* Windows CE 2-bit/pixel indexed output (Indexed2)
+
+### Other
+
+- README in the contract order + CHANGELOG for the image-crate API
+- contract regression suite + standalone CI runs the full suite and clippy
+- image-crate API contract — root vocabulary, native-layout BmpImage, EncodeOptions fields, registry adapter
+- hide internal pub surface from rustdoc/semver (fleet rule 2026-09-01)
+- *(README)* note round-404 decode/encode hot-path optimisations + BENCHMARKS.md link
+- BENCHMARKS.md — record RLE decode flat-plane wins (-36/-37%)
+- RLE8/RLE4 write one flat top-down plane, not per-row Vecs
+- BENCHMARKS.md — round-404 decode/encode hot-path before/after
+- abort the RLE size probe once it exceeds the raw array
+- reuse RLE4 nibble scratch + reserve RLE output capacity
+- chunks_exact BGR(A) packers drop per-pixel bounds checks
+- branch-free per-channel LUTs for bitfields + padded-palette indexing
+- add CI / crates.io / docs.rs / MIT-license badges
+- trim corpora to curated seeds only (round 383)
+- round-383 fuzz-hardening rollup — eight targets, four adversarial suites, ~19M-exec campaign (round 383)
+- deterministic replay of the committed fuzz corpora on every cargo test (round 383)
+- hostile bitfield masks, integer-overflow probes, RLE4 stream attacks (round 383)
+- adversarial V4/V5 metadata suite — truncation, bit-flips, hostile ICC slices (round 383)
+- header-less DIB round-trip target + seed the bitfields corpus (round 383)
+- V4/V5 colour-management encoder round-trip target (round 383)
+- structured header-forge target across all seven DIB header generations (round 383)
+- document round-366 RLE index-0 fill + top-down-RLE rejection
+- magick black-box cross-validation of RLE delta-skip index-0 fill (round 366)
+- reject top-down RLE + fix full-width bitfields mask panic (round 366)
+- RLE skipped pixels resolve to colour index 0 (round 366)
+- harden bitfields quantise against wide-mask shift underflow
+- explicit-mask bitfields encoder + OS/2 magic recognition
+- add bitfields_roundtrip target for the explicit-mask encoder
+- explicit-mask BI_BITFIELDS/BI_ALPHABITFIELDS V3 encoder
+- OS/2 file-magic recognition with precise named errors
+- cover Indexed2 in encode_roundtrip match arms + selector
+- Windows CE 2-bit/pixel indexed depth
+- recover canonical pixel offset when bfOffBits is 0 / inside header
+- recognise CMYK compression family (BI_CMYK/RLE8/RLE4) by name
+- honour V4/V5 in-header alpha mask on 32-bit BI_RGB
+- cover Rgb555 in encode_roundtrip (fix daily-fuzz E0004 build break)
+- accept Rgb555 on V4-calibrated + V5 ICC colour-managed paths
+- refresh to current status, drop per-round changelog cruft
+
 ### Changed
 
 - **Image-crate API contract (`IMAGE_CRATE_API.md`)** — round 466. The
