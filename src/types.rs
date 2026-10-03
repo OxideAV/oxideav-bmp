@@ -1565,18 +1565,14 @@ mod tests {
         // file: encode a 3×2 RGBA image, then read the DIB prefix at
         // byte 14 through BitmapInfoHeader and cross-check against
         // what the decode path produced.
-        let image = crate::image::BmpImage {
-            width: 3,
-            height: 2,
-            pixel_format: crate::image::BmpPixelFormat::Rgba,
-            planes: vec![crate::image::BmpPlane {
-                stride: 12,
-                data: vec![0x40; 24],
-            }],
-            palette: None,
-            pts: None,
-        };
-        let (bytes, _) = crate::encoder::encode_bmp(&image).unwrap();
+        let image = crate::image::BmpImage::new(
+            3,
+            2,
+            crate::image::BmpPixelFormat::Rgba,
+            vec![crate::image::Plane::new(12, vec![0x40; 24])],
+        )
+        .unwrap();
+        let bytes = crate::encode(&image, &crate::EncodeOptions::default()).unwrap();
         let h = BitmapInfoHeader::parse(&bytes[BitmapFileHeader::SIZE..]).unwrap();
         assert_eq!(h.kind(), Some(DibHeaderKind::Info));
         assert_eq!(h.width, 3);
@@ -1584,7 +1580,7 @@ mod tests {
         assert_eq!(h.bit_count, 32);
         assert_eq!(h.compression, BI_RGB);
         assert!(h.planes_is_valid());
-        let decoded = crate::decoder::decode_bmp(&bytes).unwrap();
+        let decoded = crate::decode(&bytes).unwrap();
         assert_eq!(decoded.width, h.absolute_width());
         assert_eq!(decoded.height, h.absolute_height());
     }

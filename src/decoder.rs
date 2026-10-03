@@ -1,111 +1,134 @@
-//! BMP + DIB decode. Always produces an [`BmpImage`] tagged
-//! [`BmpPixelFormat::Rgba`] — palette lookup and BGR→RGB swapping
-//! happen at decode time so consumers don't need to know the on-disk
-//! quirks.
+//! BMP + DIB decode into the native layout ([`BmpImage`]).
 //!
 //! Supports (enough to cover every common icon / texture / historical
 //! artifact you'd meet in the wild):
 //!
-//! * 1-bit monochrome + palette
-//! * 4-bit indexed + palette
-//! * 8-bit indexed + palette
-//! * 24-bit `BI_RGB` (BGR)
-//! * 32-bit `BI_RGB` (BGRA; the `A` byte is often 0 in older files —
-//!   we keep it as-is, callers who need "treat all-zero alpha as opaque"
-//!   handle that themselves)
-//! * 16/32-bit `BI_BITFIELDS` with masks read from the header tail (v3)
-//!   or body (v4/v5). Unusual mask combos are expanded via the mask
-//!   shift-and-scale routine below.
+//! * 1 / 2 / 4 / 8-bit indexed (`BI_RGB`, `BI_RLE4`, `BI_RLE8`) →
+//!   `Pal8` with the colour table attached
+//! * 16-bit `BI_RGB` (5-5-5) and `BI_BITFIELDS` 5-5-5 / 5-6-5 → `Rgb555`
+//!   / `Rgb565`, the packed words copied verbatim
+//! * 24-bit `BI_RGB` → `Bgr24`
+//! * 32-bit `BI_RGB` and byte-aligned `BI_BITFIELDS` → `Bgra` (or `Rgba`
+//!   for the R,G,B byte order); any other 16 / 32-bit mask set,
+//!   including 16-bit alpha masks, is expanded channel by channel to
+//!   `Rgba`
+//! * every header generation: OS/2 `BITMAPCOREHEADER`, truncated and
+//!   full OS/2 2.x headers, V3 `BITMAPINFOHEADER`, Adobe V2 / V3, V4,
+//!   V5 (with the colour-space tag and embedded ICC profile surfaced
+//!   on the image)
 //!
-//! * 8-bit indexed `BI_RLE8` — decoded bottom-up, then flipped to top-down.
-//! * 4-bit indexed `BI_RLE4` — same. Delta codes + absolute mode are
-//!   both supported.
+//! Rows are delivered top-down (bottom-up files are flipped while
+//! decoding) and tightly packed.
 //!
-//! Not supported: `BI_JPEG` / `BI_PNG` embedded payloads (those defeat
-//! the purpose of BMP wrapping).
+//! Not supported: `BI_JPEG` / `BI_PNG` embedded payloads and the CMYK
+//! compressions.
 //!
-//! With the default `registry` feature on, the gated `BmpDecoder` trait
-//! impl wraps [`decode_bmp`] for the `oxideav_core::Decoder` surface.
+//! The contract entry points live at the crate root ([`crate::decode`],
+//! [`crate::decode_with`], [`crate::info`], …); this module keeps the
+//! headerless-DIB helpers `oxideav-ico` uses and the deprecated
+//! pre-contract names.
 
 use crate::error::{BmpError as Error, Result};
-use crate::image::{BmpImage, BmpPixelFormat, BmpPlane};
+use crate::image::{BmpImage, BmpPixelFormat, ColorInfo, ImageInfo, Metadata, Palette, Plane};
 use crate::metadata::{BmpColorSpace, BmpMetadata};
+use crate::options::DecodeOptions;
 use crate::types::*;
 
+// The framework-side items that used to live in this module keep their
+// `decoder::` path for one release.
 #[cfg(feature = "registry")]
-use oxideav_core::Decoder;
+pub use crate::registry::make_decoder;
 #[cfg(feature = "registry")]
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPlane};
-
-/// Factory registered with the codec registry. Consumes one packet per
-/// whole BMP file and produces one `Rgba` frame. BMP is a single-image
-/// format, so `flush()` just drains the one pending frame.
-#[cfg(feature = "registry")]
-pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
-    Ok(Box::new(BmpDecoder {
-        codec_id: CodecId::new(crate::CODEC_ID_STR),
-        pending: None,
-        eof: false,
-    }))
-}
-
-#[cfg(feature = "registry")]
-struct BmpDecoder {
-    codec_id: CodecId,
-    pending: Option<VideoFrame>,
-    eof: bool,
-}
-
-#[cfg(feature = "registry")]
-impl Decoder for BmpDecoder {
-    fn codec_id(&self) -> &CodecId {
-        &self.codec_id
-    }
-    fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
-        let image = decode_bmp(&packet.data)?;
-        self.pending = Some(image_to_video_frame(image));
-        Ok(())
-    }
-    fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
-        match self.pending.take() {
-            Some(f) => Ok(Frame::Video(f)),
-            None => {
-                if self.eof {
-                    Err(oxideav_core::Error::Eof)
-                } else {
-                    Err(oxideav_core::Error::NeedMore)
-                }
-            }
-        }
-    }
-    fn flush(&mut self) -> oxideav_core::Result<()> {
-        self.eof = true;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "registry")]
-fn image_to_video_frame(image: BmpImage) -> VideoFrame {
-    VideoFrame {
-        pts: image.pts,
-        planes: image
-            .planes
-            .into_iter()
-            .map(|p| VideoPlane {
-                stride: p.stride,
-                data: p.data,
-            })
-            .collect(),
-    }
-}
+#[allow(deprecated)]
+pub use crate::registry::{decode_bmp_videoframe, decode_dib_videoframe};
 
 // ---------------------------------------------------------------------------
-// Public standalone API
+// Headerless-DIB surface (oxideav-ico) + pre-contract names
 // ---------------------------------------------------------------------------
 
-/// Decode a complete BMP file (`BM` signature + file header + DIB +
-/// pixels) into an `Rgba` [`BmpImage`].
+/// Decode a headerless DIB (`BITMAPINFOHEADER` + pixels, no
+/// `BITMAPFILEHEADER`) with the default [`DecodeOptions`]. Used by
+/// `oxideav-ico`; see [`decode_dib_with`].
+pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<BmpImage> {
+    decode_dib_with(
+        input,
+        dib_height_is_doubled_for_mask,
+        &DecodeOptions::default(),
+    )
+}
+
+/// Decode a headerless DIB (`BITMAPINFOHEADER` + pixels, no
+/// `BITMAPFILEHEADER`) into its native layout, like [`crate::decode_with`]
+/// does for a whole file.
+///
+/// When `dib_height_is_doubled_for_mask` is true, the incoming
+/// `biHeight` is 2× the real height (XOR mask + AND mask layout from
+/// `.ico` / `.cur`). The returned image dimensions are halved on the
+/// height axis, the result is re-laid as `Rgba`, and the 1-bpp AND
+/// mask following the XOR pixels is folded into the alpha channel — a
+/// 1-bit in the AND mask maps to `alpha = 0` (transparent), a 0-bit
+/// keeps whatever the XOR pixels carried.
+pub fn decode_dib_with(
+    input: &[u8],
+    dib_height_is_doubled_for_mask: bool,
+    opts: &DecodeOptions,
+) -> Result<BmpImage> {
+    let (header, _header_bytes) = parse_dib_header(input)?;
+    // For a "pure" DIB, pixel data starts right after the header (plus
+    // any bit-field masks and colour table) — the canonical layout
+    // `canonical_dib_pixel_offset` computes, shared with the file path.
+    let pixel_start = canonical_dib_pixel_offset(&header);
+    if dib_height_is_doubled_for_mask {
+        decode_dib_with_mask(&header, input, pixel_start, opts)
+    } else {
+        decode_dib_payload(&header, input, 0, pixel_start, opts)
+    }
+}
+
+/// Decode a complete BMP file into an `Rgba` [`BmpImage`] (the
+/// pre-contract shape: palette expanded, channels swizzled).
+#[deprecated(
+    note = "use oxideav_bmp::decode (IMAGE_CRATE_API); it returns the native layout, \
+                     to_rgba8() gives these bytes"
+)]
 pub fn decode_bmp(input: &[u8]) -> Result<BmpImage> {
+    Ok(decode_file(input, &DecodeOptions::default())?.into_rgba())
+}
+
+/// Decode a complete BMP file like the deprecated `decode_bmp` and also
+/// return the parsed V3 / V4 / V5 header metadata.
+#[deprecated(
+    note = "use oxideav_bmp::decode (color / metadata are on the image) and \
+                     BmpMetadata::from_bmp for the header fields (IMAGE_CRATE_API)"
+)]
+pub fn decode_bmp_with_metadata(input: &[u8]) -> Result<(BmpImage, BmpMetadata)> {
+    let image = decode_file(input, &DecodeOptions::default())?.into_rgba();
+    let metadata = BmpMetadata::from_bmp(input)?;
+    Ok((image, metadata))
+}
+
+/// Decode a headerless DIB like [`decode_dib`] (then re-laid as `Rgba`)
+/// and also return the parsed header metadata.
+#[deprecated(
+    note = "use oxideav_bmp::decode_dib (color / metadata are on the image) and \
+                     BmpMetadata::from_dib for the header fields (IMAGE_CRATE_API)"
+)]
+pub fn decode_dib_with_metadata(
+    input: &[u8],
+    dib_height_is_doubled_for_mask: bool,
+) -> Result<(BmpImage, BmpMetadata)> {
+    let image = decode_dib(input, dib_height_is_doubled_for_mask)?.into_rgba();
+    let metadata = BmpMetadata::from_dib(input)?;
+    Ok((image, metadata))
+}
+
+// ---------------------------------------------------------------------------
+// Crate-internal entry points behind the root vocabulary
+// ---------------------------------------------------------------------------
+
+/// Parse the file header + DIB header of a whole BMP file and resolve
+/// the pixel-array offset. Returns `(header, pixel_offset)`.
+pub(crate) fn parse_file(input: &[u8], strict: bool) -> Result<(DibHeader, usize)> {
     // Smallest legal DIB is the OS/2 1.x BITMAPCOREHEADER (12 B) on top
     // of the 14-byte BITMAPFILEHEADER. Larger DIB variants are checked
     // again inside `parse_dib_header` after reading the size field.
@@ -113,142 +136,124 @@ pub fn decode_bmp(input: &[u8]) -> Result<BmpImage> {
         return Err(Error::invalid("BMP: input shorter than header"));
     }
     let file_header = BitmapFileHeader::parse(input)?;
+    if strict && !file_header.reserved_is_clean() {
+        return Err(Error::invalid(
+            "BMP: BITMAPFILEHEADER reserved words must be zero (strict)",
+        ));
+    }
     let dib = &input[BITMAPFILEHEADER_SIZE as usize..];
     let (header, _) = parse_dib_header(dib)?;
     // Honour `bfOffBits` when it lands at/after the canonical pixel
     // position (so a writer's deliberate gap survives); recover the
     // canonical offset when it is 0 or points implausibly early.
-    let pixel_offset = resolve_file_pixel_offset(file_header.pixel_offset as usize, &header);
-    decode_dib_payload(&header, input, pixel_offset)
+    let stored = file_header.pixel_offset as usize;
+    let canonical = canonical_file_pixel_offset(&header);
+    if strict && stored < canonical {
+        return Err(Error::invalid(format!(
+            "BMP: bfOffBits {stored} points inside the header / colour table (canonical {canonical}; strict)"
+        )));
+    }
+    let pixel_offset = resolve_file_pixel_offset(stored, &header);
+    Ok((header, pixel_offset))
 }
 
-/// Decode a headerless DIB (`BITMAPINFOHEADER` + pixels, no
-/// `BITMAPFILEHEADER`) into an `Rgba` [`BmpImage`]. Used by
-/// `oxideav-ico`.
-///
-/// When `dib_height_is_doubled_for_mask` is true, the incoming
-/// `biHeight` is 2× the real height (XOR mask + AND mask layout from
-/// `.ico` / `.cur`). The returned image dimensions are halved on the
-/// height axis and the AND mask following the XOR pixels is read into
-/// the alpha channel — a 1-bit in the AND mask maps to `alpha = 0`
-/// (transparent), a 0-bit keeps whatever the XOR mask wrote.
-pub fn decode_dib(input: &[u8], dib_height_is_doubled_for_mask: bool) -> Result<BmpImage> {
-    let (header, _header_bytes) = parse_dib_header(input)?;
-    // For a "pure" DIB, pixel data starts right after the header (plus
-    // any bit-field masks and colour table) — the canonical layout
-    // `canonical_dib_pixel_offset` computes, shared with the file path.
-    let pixel_start = canonical_dib_pixel_offset(&header);
-    if dib_height_is_doubled_for_mask {
-        decode_dib_with_mask(&header, input, pixel_start)
-    } else {
-        decode_dib_payload(&header, input, pixel_start)
-    }
+/// [`crate::decode_with`]: whole file → native layout.
+pub(crate) fn decode_file(input: &[u8], opts: &DecodeOptions) -> Result<BmpImage> {
+    let (header, pixel_offset) = parse_file(input, opts.strict)?;
+    decode_dib_payload(
+        &header,
+        input,
+        BITMAPFILEHEADER_SIZE as usize,
+        pixel_offset,
+        opts,
+    )
 }
 
-/// Decode a complete BMP file like [`decode_bmp`] but also return the
-/// parsed V4 / V5 colour-space metadata (`bV4CSType` / `bV5CSType`,
-/// endpoints, gamma, rendering intent, embedded ICC profile bytes).
-///
-/// For BMPs that carry a V3 (40-byte) `BITMAPINFOHEADER` or OS/2
-/// `BITMAPCOREHEADER` the returned [`BmpMetadata`] has every optional
-/// field set to `None` and the embedded-profile slot is empty — those
-/// header variants pre-date the colour-management fields, so there is
-/// no metadata to surface. V4 (108 bytes) fills `color_space`,
-/// `endpoints`, and `gamma_rgb`. V5 (124 bytes) additionally fills
-/// `rendering_intent`; when the V5 `cs_type` is
-/// [`BmpColorSpace::ProfileEmbedded`], the ICC profile blob carried at
-/// `whole[BITMAPFILEHEADER_SIZE + bV5ProfileData..][..bV5ProfileSize]`
-/// is decoded into [`BmpMetadata::icc_profile`].
-///
-/// A V5 header that declares `PROFILE_EMBEDDED` but whose offset / size
-/// fall past the end of the buffer surfaces in `color_space` /
-/// `profile_data_offset` / `profile_size` as declared, with
-/// `icc_profile = None` — the metadata is informational and never
-/// makes the decode fail on its own. The pixel decode path is the same
-/// as [`decode_bmp`]; this entry point is purely additive.
-pub fn decode_bmp_with_metadata(input: &[u8]) -> Result<(BmpImage, BmpMetadata)> {
-    if input.len() < (BITMAPFILEHEADER_SIZE + BITMAPCOREHEADER_SIZE) as usize {
-        return Err(Error::invalid("BMP: input shorter than header"));
-    }
-    let file_header = BitmapFileHeader::parse(input)?;
-    let dib = &input[BITMAPFILEHEADER_SIZE as usize..];
-    let (header, _) = parse_dib_header(dib)?;
-    let pixel_offset = resolve_file_pixel_offset(file_header.pixel_offset as usize, &header);
-    let image = decode_dib_payload(&header, input, pixel_offset)?;
-    let mut metadata = BmpMetadata::from_header(&header);
+/// [`crate::info`]: header-only description of a whole file.
+pub(crate) fn info_file(input: &[u8]) -> Result<ImageInfo> {
+    let (header, _) = parse_file(input, false)?;
+    validate_header(&header)?;
+    let layout = classify(&header);
+    let mut info = ImageInfo::new(
+        header.absolute_width(),
+        header.absolute_height(),
+        layout.format,
+    );
+    info.color = color_from_header(&header);
+    info.has_icc = header.cs_type == Some(PROFILE_EMBEDDED) && header.profile_size.unwrap_or(0) > 0;
+    info.bits_per_pixel = header.bpp;
+    info.compression = header.compression;
+    info.header_size = header.header_size;
+    info.top_down = header.is_top_down();
+    Ok(info)
+}
+
+/// Header-only [`BmpMetadata`] for a whole file (used by
+/// [`BmpMetadata::from_bmp`]).
+pub(crate) fn bmp_metadata_file(input: &[u8]) -> Result<BmpMetadata> {
+    let (header, _) = parse_file(input, false)?;
+    Ok(bmp_metadata(&header, input, BITMAPFILEHEADER_SIZE as usize))
+}
+
+/// Header-only [`BmpMetadata`] for a headerless DIB (used by
+/// [`BmpMetadata::from_dib`]).
+pub(crate) fn bmp_metadata_dib(input: &[u8]) -> Result<BmpMetadata> {
+    let (header, _) = parse_dib_header(input)?;
+    Ok(bmp_metadata(&header, input, 0))
+}
+
+/// Build the full header metadata, slicing the V5 profile slot out of
+/// `whole` (`base` = 14 for a file, 0 for a headerless DIB).
+fn bmp_metadata(header: &DibHeader, whole: &[u8], base: usize) -> BmpMetadata {
+    let mut metadata = BmpMetadata::from_header(header);
     // Embedded ICC blobs sit after the pixel array. The offset is given
     // relative to the start of the DIB header (i.e. file_offset =
-    // BITMAPFILEHEADER_SIZE + bV5ProfileData). A linked profile carries
-    // a file-path bytestring at the same slot; we surface the offset +
-    // size but never load it.
+    // base + bV5ProfileData). A linked profile carries a file-path
+    // bytestring at the same slot; we surface the offset + size but
+    // never load it. Only the `bV5CSType` discriminator distinguishes
+    // path-bytes from ICC-bytes on the wire.
+    let slot = || {
+        read_profile_slot(
+            whole,
+            base,
+            header.profile_data_offset.unwrap_or(0) as usize,
+            header.profile_size.unwrap_or(0) as usize,
+        )
+    };
     if metadata.color_space == Some(BmpColorSpace::ProfileEmbedded) {
-        metadata.icc_profile = read_profile_slot(
-            input,
-            BITMAPFILEHEADER_SIZE as usize,
-            header.profile_data_offset.unwrap_or(0) as usize,
-            header.profile_size.unwrap_or(0) as usize,
-        );
+        metadata.icc_profile = slot();
     } else if metadata.color_space == Some(BmpColorSpace::ProfileLinked) {
-        // PROFILE_LINKED carries a path bytestring at the same
-        // bV5ProfileData / bV5ProfileSize slot the embedded variant
-        // uses for ICC bytes. The decoder surfaces the path verbatim
-        // and never opens the file it points at.
-        metadata.linked_profile_path = read_profile_slot(
-            input,
-            BITMAPFILEHEADER_SIZE as usize,
-            header.profile_data_offset.unwrap_or(0) as usize,
-            header.profile_size.unwrap_or(0) as usize,
-        );
+        metadata.linked_profile_path = slot();
     }
-    Ok((image, metadata))
+    metadata
 }
 
-/// Decode a headerless DIB like [`decode_dib`] but also return parsed
-/// V4 / V5 colour-space metadata. The ICC offset for embedded profiles
-/// is interpreted relative to the DIB start (i.e. `input[0..]`), matching
-/// the BMP spec's stored offset convention.
-pub fn decode_dib_with_metadata(
-    input: &[u8],
-    dib_height_is_doubled_for_mask: bool,
-) -> Result<(BmpImage, BmpMetadata)> {
-    let (header, _header_bytes) = parse_dib_header(input)?;
-    let pixel_start = canonical_dib_pixel_offset(&header);
-    let image = if dib_height_is_doubled_for_mask {
-        decode_dib_with_mask(&header, input, pixel_start)?
-    } else {
-        decode_dib_payload(&header, input, pixel_start)?
-    };
-    let mut metadata = BmpMetadata::from_header(&header);
-    if metadata.color_space == Some(BmpColorSpace::ProfileEmbedded) {
-        // DIB-relative offset: ICC bytes sit at `input[bV5ProfileData..]`
-        // with no file-header offset to add.
-        metadata.icc_profile = read_profile_slot(
-            input,
-            0,
-            header.profile_data_offset.unwrap_or(0) as usize,
-            header.profile_size.unwrap_or(0) as usize,
-        );
-    } else if metadata.color_space == Some(BmpColorSpace::ProfileLinked) {
-        // Same DIB-relative slot as the embedded variant; the
-        // bV5CSType discriminator is what distinguishes path-bytes
-        // from ICC-bytes on the wire.
-        metadata.linked_profile_path = read_profile_slot(
-            input,
-            0,
+/// The contract [`ColorInfo`] a header signals: `LCS_sRGB` /
+/// `LCS_WINDOWS_COLOR_SPACE` → sRGB, everything else → the BMP default.
+pub(crate) fn color_from_header(header: &DibHeader) -> ColorInfo {
+    match header.cs_type {
+        Some(LCS_S_RGB) | Some(LCS_WINDOWS_COLOR_SPACE) => ColorInfo::srgb(),
+        _ => ColorInfo::bmp_default(),
+    }
+}
+
+/// The contract [`Metadata`]: the embedded ICC profile when the V5
+/// header declares one that fits in the buffer.
+fn metadata_from_header(header: &DibHeader, whole: &[u8], base: usize) -> Metadata {
+    let mut m = Metadata::default();
+    if header.cs_type == Some(PROFILE_EMBEDDED) {
+        m.icc = read_profile_slot(
+            whole,
+            base,
             header.profile_data_offset.unwrap_or(0) as usize,
             header.profile_size.unwrap_or(0) as usize,
         );
     }
-    Ok((image, metadata))
+    m
 }
 
 /// Slice the V5 trailing-slot blob (embedded ICC bytes or the linked
 /// path bytestring) out of the input buffer.
-///
-/// The PROFILE_EMBEDDED and PROFILE_LINKED variants share the same
-/// `bV5ProfileData` / `bV5ProfileSize` slot layout — only the
-/// `bV5CSType` discriminator distinguishes them on the wire — so the
-/// slicing math is identical for both.
 ///
 /// `base` is the offset of the DIB header start within `input`
 /// (14 bytes for a BMP file, 0 for a headerless DIB). `data_offset` is
@@ -274,34 +279,724 @@ fn read_profile_slot(
     Some(input[start..end].to_vec())
 }
 
-/// Compatibility wrapper around [`decode_bmp`] returning an
-/// `oxideav_core::VideoFrame`. Only available with the default
-/// `registry` feature; intended for `oxideav-core`-using consumers
-/// (e.g. `oxideav-ico`) that haven't migrated to the standalone
-/// [`BmpImage`] shape.
-#[cfg(feature = "registry")]
-pub fn decode_bmp_videoframe(input: &[u8]) -> oxideav_core::Result<VideoFrame> {
-    Ok(image_to_video_frame(decode_bmp(input)?))
+// ---------------------------------------------------------------------------
+// Native-layout classification
+// ---------------------------------------------------------------------------
+
+/// Whether the fourth byte of a 32-bit pixel is alpha or padding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Alpha {
+    /// Keep the stored byte.
+    Stored,
+    /// The header declares no alpha: force `0xFF`.
+    Opaque,
 }
 
-/// Compatibility wrapper around [`decode_dib`] returning an
-/// `oxideav_core::VideoFrame`. Only available with the default
-/// `registry` feature; intended for `oxideav-core`-using consumers
-/// (e.g. `oxideav-ico`) that haven't migrated to the standalone
-/// [`BmpImage`] shape.
-#[cfg(feature = "registry")]
-pub fn decode_dib_videoframe(
-    input: &[u8],
-    dib_height_is_doubled_for_mask: bool,
-) -> oxideav_core::Result<VideoFrame> {
-    Ok(image_to_video_frame(decode_dib(
-        input,
-        dib_height_is_doubled_for_mask,
-    )?))
+/// How the pixel array is turned into the native plane.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kernel {
+    /// 1 / 2 / 4 / 8 bpp uncompressed → `Pal8` indices.
+    Indexed,
+    /// `BI_RLE8` → `Pal8` indices.
+    Rle8,
+    /// `BI_RLE4` → `Pal8` indices.
+    Rle4,
+    /// 16 bpp 5-5-5 / 5-6-5: copy the words.
+    Packed16,
+    /// 24 bpp: copy the B,G,R bytes.
+    Bgr24,
+    /// 32 bpp with B,G,R,(A) byte order.
+    Bgra(Alpha),
+    /// 32 bpp `BI_BITFIELDS` with R,G,B,(A) byte order.
+    RgbaBytes(Alpha),
+    /// Any other 16 / 32 bpp mask set: per-channel expansion to RGBA.
+    Expand { r: u32, g: u32, b: u32, a: u32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    format: BmpPixelFormat,
+    kernel: Kernel,
+}
+
+/// Decide the native layout for a validated header (see
+/// [`BmpPixelFormat`] for the table).
+fn classify(h: &DibHeader) -> Layout {
+    let bitfields = h.compression == BI_BITFIELDS || h.compression == BI_ALPHABITFIELDS;
+    match h.bpp {
+        1 | 2 | 4 | 8 => {
+            let kernel = match h.compression {
+                BI_RLE8 => Kernel::Rle8,
+                BI_RLE4 => Kernel::Rle4,
+                _ => Kernel::Indexed,
+            };
+            Layout {
+                format: BmpPixelFormat::Pal8,
+                kernel,
+            }
+        }
+        16 => {
+            // Default BI_RGB mapping is 5-5-5 with the high bit
+            // reserved. BI_BITFIELDS / BI_ALPHABITFIELDS let the file
+            // declare its own layout (e.g. 5-6-5; the alpha-bitfields
+            // flavour additionally carries an alpha mask in the V3
+            // header tail).
+            let (r, g, b, a) = if bitfields {
+                (
+                    h.mask_r.unwrap_or(0x7C00),
+                    h.mask_g.unwrap_or(0x03E0),
+                    h.mask_b.unwrap_or(0x001F),
+                    h.mask_a.unwrap_or(0),
+                )
+            } else {
+                (0x7C00, 0x03E0, 0x001F, 0)
+            };
+            match (r, g, b, a) {
+                (0x7C00, 0x03E0, 0x001F, 0) => Layout {
+                    format: BmpPixelFormat::Rgb555,
+                    kernel: Kernel::Packed16,
+                },
+                (0xF800, 0x07E0, 0x001F, 0) => Layout {
+                    format: BmpPixelFormat::Rgb565,
+                    kernel: Kernel::Packed16,
+                },
+                _ => Layout {
+                    format: BmpPixelFormat::Rgba,
+                    kernel: Kernel::Expand { r, g, b, a },
+                },
+            }
+        }
+        24 => Layout {
+            format: BmpPixelFormat::Bgr24,
+            kernel: Kernel::Bgr24,
+        },
+        _ => {
+            // 32 bpp. Default BI_RGB is BGRA; BI_BITFIELDS /
+            // BI_ALPHABITFIELDS may declare otherwise.
+            if bitfields && (h.mask_r.is_some() || h.mask_g.is_some() || h.mask_b.is_some()) {
+                let r = h.mask_r.unwrap_or(0x00FF_0000);
+                let g = h.mask_g.unwrap_or(0x0000_FF00);
+                let b = h.mask_b.unwrap_or(0x0000_00FF);
+                let a = h.mask_a.unwrap_or(0);
+                let alpha = match a {
+                    0 => Some(Alpha::Opaque),
+                    0xFF00_0000 => Some(Alpha::Stored),
+                    _ => None,
+                };
+                match ((r, g, b), alpha) {
+                    ((0x00FF_0000, 0x0000_FF00, 0x0000_00FF), Some(alpha)) => Layout {
+                        format: BmpPixelFormat::Bgra,
+                        kernel: Kernel::Bgra(alpha),
+                    },
+                    ((0x0000_00FF, 0x0000_FF00, 0x00FF_0000), Some(alpha)) => Layout {
+                        format: BmpPixelFormat::Rgba,
+                        kernel: Kernel::RgbaBytes(alpha),
+                    },
+                    _ => Layout {
+                        format: BmpPixelFormat::Rgba,
+                        kernel: Kernel::Expand { r, g, b, a },
+                    },
+                }
+            } else if h.compression == BI_RGB && h.mask_a.is_some() {
+                // V4 / V5 BI_RGB carries the alpha mask in the header body.
+                // R / G / B stay at the default BGRA byte positions (the
+                // R/G/B masks are *not* valid under BI_RGB), but a non-zero
+                // in-header alpha mask makes the alpha sample valid. A zero
+                // alpha mask means "no alpha", so the pixel is opaque —
+                // which also fixes the otherwise-transparent decode of a
+                // V4 / V5 BI_RGB bitmap whose reserved high bytes are all
+                // zero.
+                match h.mask_a.unwrap_or(0) {
+                    0 => Layout {
+                        format: BmpPixelFormat::Bgra,
+                        kernel: Kernel::Bgra(Alpha::Opaque),
+                    },
+                    0xFF00_0000 => Layout {
+                        format: BmpPixelFormat::Bgra,
+                        kernel: Kernel::Bgra(Alpha::Stored),
+                    },
+                    a => Layout {
+                        format: BmpPixelFormat::Rgba,
+                        kernel: Kernel::Expand {
+                            r: 0x00FF_0000,
+                            g: 0x0000_FF00,
+                            b: 0x0000_00FF,
+                            a,
+                        },
+                    },
+                }
+            } else {
+                // Plain V3 BI_RGB: the fourth byte is kept as stored (it
+                // is often 0 in older files; callers who want "treat
+                // all-zero alpha as opaque" handle that themselves).
+                Layout {
+                    format: BmpPixelFormat::Bgra,
+                    kernel: Kernel::Bgra(Alpha::Stored),
+                }
+            }
+        }
+    }
+}
+
+/// Reject compressions, depths and geometries the decoder does not
+/// handle, before any allocation.
+fn validate_header(h: &DibHeader) -> Result<()> {
+    match h.compression {
+        BI_RGB | BI_BITFIELDS | BI_ALPHABITFIELDS | BI_RLE4 | BI_RLE8 => {}
+        BI_JPEG => return Err(Error::invalid("BMP: embedded JPEG not supported")),
+        BI_PNG => return Err(Error::invalid("BMP: embedded PNG not supported")),
+        // The CMYK family (compression 11 / 12 / 13, "only Windows Metafile
+        // CMYK") stores CMYK samples whose channel layout and CMYK→RGB
+        // conversion are defined by the WMF spec, not the BMP file-format
+        // material available to this crate. Recognise them by name and reject
+        // with a distinct message rather than the generic "unknown
+        // compression" path, so a CMYK bitmap is reported as a known-but-
+        // unsupported format instead of looking like a corrupt header.
+        BI_CMYK => return Err(Error::invalid("BMP: CMYK (BI_CMYK) not supported")),
+        BI_CMYKRLE8 => {
+            return Err(Error::invalid(
+                "BMP: CMYK RLE-8 (BI_CMYKRLE8) not supported",
+            ))
+        }
+        BI_CMYKRLE4 => {
+            return Err(Error::invalid(
+                "BMP: CMYK RLE-4 (BI_CMYKRLE4) not supported",
+            ))
+        }
+        c => return Err(Error::invalid(format!("BMP: unknown compression {c}"))),
+    }
+
+    if h.absolute_width() == 0 || h.absolute_height() == 0 {
+        return Err(Error::invalid("BMP: zero dimension"));
+    }
+
+    // Validate bpp before any per-row allocation. A header with `bpp = 0`
+    // (legal only for BI_JPEG / BI_PNG, both rejected above) yields a
+    // zero row stride, so the "pixel array truncated" length check would
+    // pass for any height and the destination allocation would be
+    // attacker-sized. Reject unsupported depths here so a non-zero stride
+    // always bounds the height against the available bytes.
+    if !matches!(h.bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
+        return Err(Error::invalid(format!(
+            "BMP: unsupported bit depth {}",
+            h.bpp
+        )));
+    }
+
+    // For compressed formats `biHeight` must be positive "regardless of
+    // image orientation" (BITMAPINFOHEADER remarks): an RLE stream
+    // describes a bottom-up scan with end-of-line / delta / end-of-bitmap
+    // escapes that have no defined meaning under a top-down (negative
+    // height) layout. A negative `biHeight` on an RLE bitmap is malformed
+    // — reject it rather than silently decoding the |height| rows as if
+    // they were bottom-up.
+    if (h.compression == BI_RLE8 || h.compression == BI_RLE4) && h.is_top_down() {
+        return Err(Error::invalid(
+            "BMP: RLE compression requires a positive biHeight (top-down RLE is illegal)",
+        ));
+    }
+    if h.compression == BI_RLE8 && h.bpp != 8 {
+        return Err(Error::invalid("BMP: BI_RLE8 requires bpp=8"));
+    }
+    if h.compression == BI_RLE4 && h.bpp != 4 {
+        return Err(Error::invalid("BMP: BI_RLE4 requires bpp=4"));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Internals
+// Payload decode
+// ---------------------------------------------------------------------------
+
+/// Decode the pixel array described by `h` into its native layout.
+/// `base` is where the DIB header starts inside `whole` (14 for a file,
+/// 0 for a headerless DIB); `pixel_offset` is where the pixel array
+/// starts.
+fn decode_dib_payload(
+    h: &DibHeader,
+    whole: &[u8],
+    base: usize,
+    pixel_offset: usize,
+    opts: &DecodeOptions,
+) -> Result<BmpImage> {
+    validate_header(h)?;
+    let layout = classify(h);
+    let width = h.absolute_width();
+    let height = h.absolute_height();
+    let bpp_bytes = layout.format.bytes_per_pixel();
+
+    // Limits are checked against the native plane size before the
+    // palette is read or any pixel buffer exists.
+    opts.check(
+        width,
+        height,
+        u64::from(width) * u64::from(height) * bpp_bytes as u64,
+    )?;
+
+    let palette = read_palette(h, whole, pixel_offset)?;
+    let w = width as usize;
+    let hgt = height as usize;
+    let out_stride = w * bpp_bytes;
+
+    let data = match layout.kernel {
+        Kernel::Rle8 => {
+            let rle_data = rle_input(whole, pixel_offset, width as u64, height as u64)?;
+            decode_rle8(rle_data, w, hgt)?
+        }
+        Kernel::Rle4 => {
+            let rle_data = rle_input(whole, pixel_offset, width as u64, height as u64)?;
+            decode_rle4(rle_data, w, hgt)?
+        }
+        kernel => {
+            let pixels = pixel_array(h, whole, pixel_offset)?;
+            decode_pixels(h, pixels, kernel, out_stride)
+        }
+    };
+
+    let palette = if layout.format.is_indexed() {
+        let mut entries = palette;
+        entries.truncate(256);
+        Some(Palette::new(entries))
+    } else {
+        None
+    };
+
+    Ok(BmpImage {
+        width,
+        height,
+        format: layout.format,
+        planes: vec![Plane::new(out_stride, data)],
+        color: color_from_header(h),
+        metadata: metadata_from_header(h, whole, base),
+        palette,
+    })
+}
+
+/// Bounds-check and slice the uncompressed pixel array.
+fn pixel_array<'a>(h: &DibHeader, whole: &'a [u8], pixel_offset: usize) -> Result<&'a [u8]> {
+    let height = h.absolute_height() as usize;
+    let stride = h.row_stride();
+    // `stride`, `height` and `pixel_offset` are all bounded only by the
+    // attacker-supplied header, so size the pixel array with saturating
+    // arithmetic. An overflowing `stride * height` would otherwise wrap
+    // to a small value, pass the bounds check, then panic on the slice;
+    // saturating to `usize::MAX` keeps the truncation check sound.
+    let pixel_bytes = stride.saturating_mul(height);
+    let pixel_end = pixel_offset.saturating_add(pixel_bytes);
+    if whole.len() < pixel_end {
+        return Err(Error::invalid("BMP: pixel array truncated"));
+    }
+    Ok(&whole[pixel_offset..pixel_end])
+}
+
+/// Decode an uncompressed pixel array straight into a single flat
+/// top-down plane of the native layout.
+///
+/// The destination is allocated once and each source scanline is
+/// written to its final top-down position: a bottom-up DIB places
+/// source row `y` at destination row `height-1-y`, a top-down DIB at
+/// row `y`.
+fn decode_pixels(h: &DibHeader, pixels: &[u8], kernel: Kernel, out_stride: usize) -> Vec<u8> {
+    let width = h.absolute_width() as usize;
+    let height = h.absolute_height() as usize;
+    let stride = h.row_stride();
+    let mut out = vec![0u8; out_stride.saturating_mul(height)];
+    let top_down = h.is_top_down();
+    let row_dst = |y: usize| -> usize {
+        if top_down {
+            y
+        } else {
+            height - 1 - y
+        }
+    };
+
+    match kernel {
+        Kernel::Indexed => {
+            // Unpack 1 / 2 / 4-bit indices to one byte per pixel (MSB =
+            // leftmost pixel in every sub-byte layout); 8 bpp is a copy.
+            let bpp = h.bpp as usize;
+            for y in 0..height {
+                let row = &pixels[y * stride..y * stride + stride];
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + width];
+                match bpp {
+                    8 => dst.copy_from_slice(&row[..width]),
+                    4 => {
+                        for (x, px) in dst.iter_mut().enumerate() {
+                            let byte = row[x / 2];
+                            *px = if x & 1 == 0 { byte >> 4 } else { byte & 0x0F };
+                        }
+                    }
+                    2 => {
+                        for (x, px) in dst.iter_mut().enumerate() {
+                            let byte = row[x / 4];
+                            let shift = 6 - 2 * (x % 4);
+                            *px = (byte >> shift) & 0x03;
+                        }
+                    }
+                    _ => {
+                        for (x, px) in dst.iter_mut().enumerate() {
+                            let byte = row[x / 8];
+                            *px = (byte >> (7 - (x % 8))) & 1;
+                        }
+                    }
+                }
+            }
+        }
+        Kernel::Packed16 | Kernel::Bgr24 | Kernel::Bgra(Alpha::Stored) => {
+            // Byte-for-byte copy of the visible row (the DWORD padding is
+            // dropped).
+            for y in 0..height {
+                let row = &pixels[y * stride..y * stride + out_stride];
+                let d = row_dst(y) * out_stride;
+                out[d..d + out_stride].copy_from_slice(row);
+            }
+        }
+        Kernel::Bgra(Alpha::Opaque) => {
+            for y in 0..height {
+                let row = &pixels[y * stride..y * stride + out_stride];
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                dst.copy_from_slice(row);
+                for px in dst.chunks_exact_mut(4) {
+                    px[3] = 0xFF;
+                }
+            }
+        }
+        Kernel::RgbaBytes(alpha) => {
+            for y in 0..height {
+                let row = &pixels[y * stride..y * stride + out_stride];
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                dst.copy_from_slice(row);
+                if alpha == Alpha::Opaque {
+                    for px in dst.chunks_exact_mut(4) {
+                        px[3] = 0xFF;
+                    }
+                }
+            }
+        }
+        Kernel::Expand { r, g, b, a } => expand_masked(
+            pixels,
+            width,
+            height,
+            stride,
+            h.bpp,
+            (r, g, b, a),
+            &mut out,
+            row_dst,
+        ),
+        Kernel::Rle8 | Kernel::Rle4 => unreachable!("RLE kernels take the RLE path"),
+    }
+    out
+}
+
+/// Per-channel mask expansion of a 16- or 32-bit pixel array into RGBA.
+///
+/// Below the size where a 65 536-entry combined value→RGBA table
+/// amortises its 256 KiB build, four 256-byte per-channel tables (1 KiB
+/// total, L1-resident) decode each pixel with three/four branch-free
+/// loads. At or above the threshold (16 bpp only) the combined table's
+/// single indexed load per pixel still edges ahead, so it is retained.
+/// Both paths emit bit-identical bytes.
+#[allow(clippy::too_many_arguments)]
+fn expand_masked(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    bpp: u16,
+    (mr, mg, mb, ma): (u32, u32, u32, u32),
+    out: &mut [u8],
+    row_dst: impl Fn(usize) -> usize,
+) {
+    let out_stride = width * 4;
+    if bpp == 16 {
+        let total_px = width.saturating_mul(height);
+        if total_px >= 1 << 18 {
+            let (rs, rn) = shift_len(mr);
+            let (gs, gn) = shift_len(mg);
+            let (bs, bn) = shift_len(mb);
+            let (as_, an) = shift_len(ma);
+            let mut lut = vec![0u8; 65_536 * 4];
+            for (v, slot) in lut.chunks_exact_mut(4).enumerate() {
+                let v = v as u32;
+                slot[0] = expand(((v & mr) >> rs) as u8, rn);
+                slot[1] = expand(((v & mg) >> gs) as u8, gn);
+                slot[2] = expand(((v & mb) >> bs) as u8, bn);
+                slot[3] = if an > 0 {
+                    expand(((v & ma) >> as_) as u8, an)
+                } else {
+                    0xFF
+                };
+            }
+            for y in 0..height {
+                let row = &pixels[y * stride..y * stride + width * 2];
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                for (x, px) in dst.chunks_exact_mut(4).enumerate() {
+                    let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as usize;
+                    px.copy_from_slice(&lut[v * 4..v * 4 + 4]);
+                }
+            }
+        } else {
+            let rl = ChannelLut::new(mr);
+            let gl = ChannelLut::new(mg);
+            let bl = ChannelLut::new(mb);
+            let al = ChannelLut::new(ma);
+            let has_alpha = ma != 0;
+            for y in 0..height {
+                let row = &pixels[y * stride..y * stride + width * 2];
+                let d = row_dst(y) * out_stride;
+                let dst = &mut out[d..d + out_stride];
+                for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(2)) {
+                    let v = u16::from_le_bytes([src[0], src[1]]) as u32;
+                    px[0] = rl.get(v);
+                    px[1] = gl.get(v);
+                    px[2] = bl.get(v);
+                    px[3] = if has_alpha { al.get(v) } else { 0xFF };
+                }
+            }
+        }
+    } else {
+        let rl = ChannelLut::new(mr);
+        let gl = ChannelLut::new(mg);
+        let bl = ChannelLut::new(mb);
+        let al = ChannelLut::new(ma);
+        let has_alpha = ma != 0;
+        for y in 0..height {
+            let row = &pixels[y * stride..y * stride + width * 4];
+            let d = row_dst(y) * out_stride;
+            let dst = &mut out[d..d + out_stride];
+            for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                let v = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
+                px[0] = rl.get(v);
+                px[1] = gl.get(v);
+                px[2] = bl.get(v);
+                px[3] = if has_alpha { al.get(v) } else { 0xFF };
+            }
+        }
+    }
+}
+
+/// `.ico` / `.cur` sub-image: XOR pixels (native layout) followed by a
+/// 1-bpp AND mask. The result is re-laid as `Rgba` so the mask can be
+/// folded into alpha.
+fn decode_dib_with_mask(
+    h: &DibHeader,
+    whole: &[u8],
+    pixel_offset: usize,
+    opts: &DecodeOptions,
+) -> Result<BmpImage> {
+    // Height in the DIB is doubled to cover the AND mask; actual
+    // pixel height is the real image size.
+    let mut xor_header = *h;
+    xor_header.height = h.height / 2;
+    let mut image = decode_dib_payload(&xor_header, whole, 0, pixel_offset, opts)?.into_rgba();
+
+    // The AND mask is 1bpp, bottom-up, width-padded to 4 bytes, placed
+    // immediately after the XOR pixel array. The XOR decode above already
+    // proved the pixel array fits in `whole`, but the mask offsets are
+    // still derived from attacker-supplied dimensions, so saturate the
+    // additions: any overflow lands past `whole.len()` and falls through
+    // to the "no AND mask" early-return below rather than wrapping into a
+    // small in-bounds index.
+    let xor_stride = row_stride(xor_header.absolute_width() as usize, h.bpp as usize);
+    let xor_bytes = xor_stride.saturating_mul(xor_header.absolute_height() as usize);
+    let and_start = pixel_offset.saturating_add(xor_bytes);
+    let and_stride = row_stride(xor_header.absolute_width() as usize, 1);
+    let and_bytes = and_stride.saturating_mul(xor_header.absolute_height() as usize);
+    if whole.len() < and_start.saturating_add(and_bytes) {
+        // Some icons lie about the AND mask size. Warn-by-ignore: if
+        // there's no AND mask we just keep the XOR alpha as-is.
+        return Ok(image);
+    }
+    let and = &whole[and_start..and_start + and_bytes];
+
+    let w = xor_header.absolute_width() as usize;
+    let abs_h = xor_header.absolute_height() as usize;
+    // AND mask is bottom-up regardless of the XOR flip: the convention
+    // for ICO is fixed. Apply it row-by-row, remembering that the XOR
+    // image is already top-down.
+    for y in 0..abs_h {
+        let src_row = abs_h - 1 - y; // bottom-up
+        let row = &and[src_row * and_stride..src_row * and_stride + and_stride];
+        for x in 0..w {
+            let byte = row[x / 8];
+            let bit = (byte >> (7 - (x % 8))) & 1;
+            if bit == 1 {
+                // AND-mask bit set ⇒ transparent.
+                let rgba_off = y * w * 4 + x * 4;
+                image.planes[0].data[rgba_off + 3] = 0;
+            }
+        }
+    }
+    Ok(image)
+}
+
+// ---------------------------------------------------------------------------
+// RLE decoders (→ Pal8 index planes)
+// ---------------------------------------------------------------------------
+
+/// Decode a BI_RLE8 stream straight into a single flat top-down index
+/// plane (one byte per pixel).
+///
+/// The stream encodes 8-bit indices bottom-up (stream row 0 = bottom of
+/// image); each pixel is written to its already-flipped destination row
+/// `(height - 1 - y)`. Pixels the stream never writes — the cells a
+/// `delta` jumps over, the tail of a short row after an end-of-line
+/// escape, and every cell past an early end-of-bitmap — take **colour
+/// index 0**, the first colour-table entry, exactly like any
+/// explicitly-coded index-0 pixel. (The BMP *Bitmap Compression*
+/// material defines the escape semantics but is silent on the fill
+/// colour; Windows fills index 0, the canonical background.)
+fn decode_rle8(data: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; width.saturating_mul(height)];
+    let mut x = 0usize;
+    // RLE8 bitmaps are bottom-up: row 0 in the stream is the bottom row.
+    let mut y = 0usize;
+    let mut i = 0usize;
+
+    macro_rules! put_pixel {
+        ($idx:expr) => {
+            if x < width && y < height {
+                out[(height - 1 - y) * width + x] = $idx;
+                x += 1;
+            }
+        };
+    }
+
+    while i + 1 < data.len() {
+        let b0 = data[i];
+        let b1 = data[i + 1];
+        i += 2;
+
+        if b0 != 0 {
+            // Encoded run: b0 pixels of palette index b1.
+            for _ in 0..b0 {
+                put_pixel!(b1);
+            }
+        } else {
+            match b1 {
+                0x00 => {
+                    // End of line.
+                    x = 0;
+                    y += 1;
+                }
+                0x01 => {
+                    // End of bitmap.
+                    break;
+                }
+                0x02 => {
+                    // Delta: move cursor.
+                    if i + 2 > data.len() {
+                        return Err(Error::invalid("BMP RLE8: delta truncated"));
+                    }
+                    x += data[i] as usize;
+                    y += data[i + 1] as usize;
+                    i += 2;
+                }
+                count => {
+                    // Absolute mode: `count` pixels follow.
+                    let count = count as usize;
+                    if i + count > data.len() {
+                        return Err(Error::invalid("BMP RLE8: absolute run truncated"));
+                    }
+                    for k in 0..count {
+                        put_pixel!(data[i + k]);
+                    }
+                    i += count;
+                    // Padded to word boundary.
+                    if count & 1 != 0 {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Decode a BI_RLE4 stream straight into a single flat top-down index
+/// plane (see [`decode_rle8`] for the bottom-up flip and the index-0
+/// background; here the index is a 4-bit nibble).
+fn decode_rle4(data: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; width.saturating_mul(height)];
+    let mut x = 0usize;
+    let mut y = 0usize;
+    let mut i = 0usize;
+
+    macro_rules! put_pixel {
+        ($idx:expr) => {
+            if x < width && y < height {
+                out[(height - 1 - y) * width + x] = $idx & 0x0F;
+                x += 1;
+            }
+        };
+    }
+
+    while i + 1 < data.len() {
+        let b0 = data[i];
+        let b1 = data[i + 1];
+        i += 2;
+
+        if b0 != 0 {
+            // Encoded run: b0 pixels alternating between hi/lo nibble of b1.
+            let hi = b1 >> 4;
+            let lo = b1 & 0x0F;
+            for k in 0..b0 {
+                if k & 1 == 0 {
+                    put_pixel!(hi);
+                } else {
+                    put_pixel!(lo);
+                }
+            }
+        } else {
+            match b1 {
+                0x00 => {
+                    // End of line.
+                    x = 0;
+                    y += 1;
+                }
+                0x01 => {
+                    // End of bitmap.
+                    break;
+                }
+                0x02 => {
+                    // Delta.
+                    if i + 2 > data.len() {
+                        return Err(Error::invalid("BMP RLE4: delta truncated"));
+                    }
+                    x += data[i] as usize;
+                    y += data[i + 1] as usize;
+                    i += 2;
+                }
+                count => {
+                    // Absolute mode: `count` nibbles follow in packed bytes.
+                    let count = count as usize;
+                    let packed_bytes = count.div_ceil(2);
+                    if i + packed_bytes > data.len() {
+                        return Err(Error::invalid("BMP RLE4: absolute run truncated"));
+                    }
+                    for k in 0..count {
+                        let byte = data[i + k / 2];
+                        let nib = if k & 1 == 0 { byte >> 4 } else { byte & 0x0F };
+                        put_pixel!(nib);
+                    }
+                    i += packed_bytes;
+                    // Padded to word boundary (in bytes).
+                    if packed_bytes & 1 != 0 {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Header parsers + offset arithmetic (unchanged)
 // ---------------------------------------------------------------------------
 
 fn parse_dib_header(input: &[u8]) -> Result<(DibHeader, usize)> {
@@ -696,178 +1391,6 @@ fn parse_truncated_os22x_header(input: &[u8], header_size: u32) -> Result<(DibHe
     ))
 }
 
-fn decode_dib_payload(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Result<BmpImage> {
-    // Reject compressions we don't handle before we go any further.
-    match h.compression {
-        BI_RGB | BI_BITFIELDS | BI_ALPHABITFIELDS | BI_RLE4 | BI_RLE8 => {}
-        BI_JPEG => return Err(Error::invalid("BMP: embedded JPEG not supported")),
-        BI_PNG => return Err(Error::invalid("BMP: embedded PNG not supported")),
-        // The CMYK family (compression 11 / 12 / 13, "only Windows Metafile
-        // CMYK") stores CMYK samples whose channel layout and CMYK→RGB
-        // conversion are defined by the WMF spec, not the BMP file-format
-        // material available to this crate. Recognise them by name and reject
-        // with a distinct message rather than the generic "unknown
-        // compression" path, so a CMYK bitmap is reported as a known-but-
-        // unsupported format instead of looking like a corrupt header.
-        BI_CMYK => return Err(Error::invalid("BMP: CMYK (BI_CMYK) not supported")),
-        BI_CMYKRLE8 => {
-            return Err(Error::invalid(
-                "BMP: CMYK RLE-8 (BI_CMYKRLE8) not supported",
-            ))
-        }
-        BI_CMYKRLE4 => {
-            return Err(Error::invalid(
-                "BMP: CMYK RLE-4 (BI_CMYKRLE4) not supported",
-            ))
-        }
-        c => return Err(Error::invalid(format!("BMP: unknown compression {c}"))),
-    }
-
-    let width = h.absolute_width();
-    let height = h.absolute_height();
-    if width == 0 || height == 0 {
-        return Err(Error::invalid("BMP: zero dimension"));
-    }
-
-    // Validate bpp before any per-row allocation. The per-bpp decode
-    // arms below already reject unknown depths, but only *after*
-    // `decode_pixels` has sized its row vector with
-    // `Vec::with_capacity(height)`. A header with `bpp = 0` (legal only
-    // for BI_JPEG / BI_PNG, both rejected above) yields a zero row
-    // stride, so the "pixel array truncated" length check passes for any
-    // height — then `with_capacity(height)` tries to reserve an
-    // attacker-chosen 134-million-element vector and OOM-aborts. Reject
-    // unsupported depths here so a non-zero stride always bounds the
-    // height against the available bytes.
-    if !matches!(h.bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
-        return Err(Error::invalid(format!(
-            "BMP: unsupported bit depth {}",
-            h.bpp
-        )));
-    }
-
-    let palette = read_palette(h, whole, pixel_offset)?;
-
-    // For compressed formats `biHeight` must be positive "regardless of
-    // image orientation" (BITMAPINFOHEADER remarks): an RLE stream
-    // describes a bottom-up scan with end-of-line / delta / end-of-bitmap
-    // escapes that have no defined meaning under a top-down (negative
-    // height) layout. A negative `biHeight` on an RLE bitmap is malformed
-    // — reject it rather than silently decoding the |height| rows as if
-    // they were bottom-up.
-    if (h.compression == BI_RLE8 || h.compression == BI_RLE4) && h.is_top_down() {
-        return Err(Error::invalid(
-            "BMP: RLE compression requires a positive biHeight (top-down RLE is illegal)",
-        ));
-    }
-
-    // RLE-compressed bitmaps have a special decode path.
-    if h.compression == BI_RLE8 {
-        if h.bpp != 8 {
-            return Err(Error::invalid("BMP: BI_RLE8 requires bpp=8"));
-        }
-        let rle_data = rle_input(whole, pixel_offset, width as u64, height as u64)?;
-        // `decode_rle8` writes a single flat top-down RGBA plane (it
-        // resolves the bottom-up flip internally), so no row reversal or
-        // concatenation pass is needed here.
-        let flat = decode_rle8(rle_data, width as usize, height as usize, &palette)?;
-        return Ok(BmpImage {
-            width,
-            height,
-            pixel_format: BmpPixelFormat::Rgba,
-            planes: vec![BmpPlane {
-                stride: width as usize * 4,
-                data: flat,
-            }],
-            palette: None,
-            pts: None,
-        });
-    }
-    if h.compression == BI_RLE4 {
-        if h.bpp != 4 {
-            return Err(Error::invalid("BMP: BI_RLE4 requires bpp=4"));
-        }
-        let rle_data = rle_input(whole, pixel_offset, width as u64, height as u64)?;
-        // Same: `decode_rle4` writes the flat top-down plane directly.
-        let flat = decode_rle4(rle_data, width as usize, height as usize, &palette)?;
-        return Ok(BmpImage {
-            width,
-            height,
-            pixel_format: BmpPixelFormat::Rgba,
-            planes: vec![BmpPlane {
-                stride: width as usize * 4,
-                data: flat,
-            }],
-            palette: None,
-            pts: None,
-        });
-    }
-
-    // `decode_pixels` already writes a single flat top-down RGBA plane
-    // (it resolves the bottom-up flip internally), so no row reversal or
-    // concatenation pass is needed here.
-    let flat = decode_pixels(h, whole, pixel_offset, &palette)?;
-
-    Ok(BmpImage {
-        width,
-        height,
-        pixel_format: BmpPixelFormat::Rgba,
-        planes: vec![BmpPlane {
-            stride: width as usize * 4,
-            data: flat,
-        }],
-        palette: None,
-        pts: None,
-    })
-}
-
-fn decode_dib_with_mask(h: &DibHeader, whole: &[u8], pixel_offset: usize) -> Result<BmpImage> {
-    // Height in the DIB is doubled to cover the AND mask; actual
-    // pixel height is the real image size.
-    let mut xor_header = *h;
-    xor_header.height = h.height / 2;
-    let mut image = decode_dib_payload(&xor_header, whole, pixel_offset)?;
-
-    // The AND mask is 1bpp, bottom-up, width-padded to 4 bytes, placed
-    // immediately after the XOR pixel array. The XOR decode above already
-    // proved the pixel array fits in `whole`, but the mask offsets are
-    // still derived from attacker-supplied dimensions, so saturate the
-    // additions: any overflow lands past `whole.len()` and falls through
-    // to the "no AND mask" early-return below rather than wrapping into a
-    // small in-bounds index.
-    let xor_stride = row_stride(xor_header.absolute_width() as usize, h.bpp as usize);
-    let xor_bytes = xor_stride.saturating_mul(xor_header.absolute_height() as usize);
-    let and_start = pixel_offset.saturating_add(xor_bytes);
-    let and_stride = row_stride(xor_header.absolute_width() as usize, 1);
-    let and_bytes = and_stride.saturating_mul(xor_header.absolute_height() as usize);
-    if whole.len() < and_start.saturating_add(and_bytes) {
-        // Some icons lie about the AND mask size. Warn-by-ignore: if
-        // there's no AND mask we just keep the XOR alpha as-is.
-        return Ok(image);
-    }
-    let and = &whole[and_start..and_start + and_bytes];
-
-    let w = xor_header.absolute_width() as usize;
-    let abs_h = xor_header.absolute_height() as usize;
-    // AND mask is bottom-up regardless of the XOR flip: the convention
-    // for ICO is fixed. Apply it row-by-row, remembering that
-    // `decode_dib_payload` has already flipped the XOR to top-down.
-    for y in 0..abs_h {
-        let src_row = abs_h - 1 - y; // bottom-up
-        let row = &and[src_row * and_stride..src_row * and_stride + and_stride];
-        for x in 0..w {
-            let byte = row[x / 8];
-            let bit = (byte >> (7 - (x % 8))) & 1;
-            if bit == 1 {
-                // AND-mask bit set ⇒ transparent.
-                let rgba_off = y * w * 4 + x * 4;
-                image.planes[0].data[rgba_off + 3] = 0;
-            }
-        }
-    }
-    Ok(image)
-}
-
 /// Bytes-per-palette-entry for a parsed DIB header.
 ///
 /// V3+ headers store 4-byte `RGBQUAD` (B, G, R, reserved). The OS/2 1.x
@@ -973,296 +1496,6 @@ fn read_palette(h: &DibHeader, whole: &[u8], _pixel_offset: usize) -> Result<Vec
     Ok(out)
 }
 
-/// Decode the uncompressed pixel array straight into a single flat
-/// top-down RGBA buffer.
-///
-/// Earlier revisions built a `Vec<Vec<u8>>` (one heap allocation per
-/// scanline) and pushed every pixel with `extend_from_slice(&[r,g,b,a])`,
-/// then the caller reversed the row vector and concatenated it into one
-/// flat plane — three passes over the pixels plus `height + 1` separate
-/// allocations. We now allocate the destination plane once and write each
-/// source scanline directly to its final top-down position: a bottom-up
-/// DIB places source row `y` at destination row `height-1-y`, a top-down
-/// DIB at row `y`. Each pixel is written as a fixed 4-byte slice into a
-/// `chunks_exact_mut(4)` cursor, so there is no per-pixel capacity check
-/// and no second copy. Output bytes are identical to the previous path.
-fn decode_pixels(
-    h: &DibHeader,
-    whole: &[u8],
-    pixel_offset: usize,
-    palette: &[[u8; 4]],
-) -> Result<Vec<u8>> {
-    let width = h.absolute_width() as usize;
-    let height = h.absolute_height() as usize;
-    let stride = h.row_stride();
-    // `stride`, `height` and `pixel_offset` are all bounded only by the
-    // attacker-supplied header, so size the pixel array with saturating
-    // arithmetic. An overflowing `stride * height` would otherwise wrap
-    // to a small value, pass the bounds check, then panic on the slice;
-    // saturating to `usize::MAX` keeps the truncation check sound.
-    let pixel_bytes = stride.saturating_mul(height);
-    let pixel_end = pixel_offset.saturating_add(pixel_bytes);
-    if whole.len() < pixel_end {
-        return Err(Error::invalid("BMP: pixel array truncated"));
-    }
-    let pixels = &whole[pixel_offset..pixel_end];
-
-    // Reject unsupported depths before the destination allocation so a
-    // bogus `bpp` never reserves the full RGBA plane. (`decode_dib_payload`
-    // already filters bpp upstream, but keeping the guard here makes the
-    // function self-contained against future direct callers.)
-    if !matches!(h.bpp, 1 | 2 | 4 | 8 | 16 | 24 | 32) {
-        return Err(Error::invalid(format!(
-            "BMP: unsupported bit depth {}",
-            h.bpp
-        )));
-    }
-
-    // Single destination allocation: width × height × 4 RGBA bytes, laid
-    // out top-down. `row_dst(y)` maps a source scanline index to its
-    // destination scanline index (the flip happens here instead of via a
-    // later `rev()` + concat pass).
-    let out_stride = width * 4;
-    let mut out = vec![0u8; out_stride.saturating_mul(height)];
-    let top_down = h.is_top_down();
-    let row_dst = |y: usize| -> usize {
-        if top_down {
-            y
-        } else {
-            height - 1 - y
-        }
-    };
-
-    match h.bpp {
-        1 => {
-            // A 1bpp index is a single bit, so a two-entry padded palette
-            // (`[idx as usize]`, `idx` masked to `0..2`) resolves each
-            // pixel with a bounds-check-free load.
-            let pal = padded_palette::<2>(palette);
-            for y in 0..height {
-                let row = &pixels[y * stride..y * stride + stride];
-                let d = row_dst(y) * out_stride;
-                let dst = &mut out[d..d + out_stride];
-                for (x, px) in dst.chunks_exact_mut(4).enumerate() {
-                    let byte = row[x / 8];
-                    let bit = (byte >> (7 - (x % 8))) & 1;
-                    px.copy_from_slice(&pal[bit as usize]);
-                }
-            }
-        }
-        2 => {
-            // Windows CE 2-bit/pixel: four pixels packed per byte, the
-            // left-most pixel in the two most-significant bits, each a
-            // 2-bit index into a 4-entry colour table.
-            let pal = padded_palette::<4>(palette);
-            for y in 0..height {
-                let row = &pixels[y * stride..y * stride + stride];
-                let d = row_dst(y) * out_stride;
-                let dst = &mut out[d..d + out_stride];
-                for (x, px) in dst.chunks_exact_mut(4).enumerate() {
-                    let byte = row[x / 4];
-                    let shift = 6 - 2 * (x % 4);
-                    let idx = (byte >> shift) & 0x03;
-                    px.copy_from_slice(&pal[idx as usize]);
-                }
-            }
-        }
-        4 => {
-            let pal = padded_palette::<16>(palette);
-            for y in 0..height {
-                let row = &pixels[y * stride..y * stride + stride];
-                let d = row_dst(y) * out_stride;
-                let dst = &mut out[d..d + out_stride];
-                for (x, px) in dst.chunks_exact_mut(4).enumerate() {
-                    let byte = row[x / 2];
-                    let idx = if x & 1 == 0 { byte >> 4 } else { byte & 0x0F };
-                    px.copy_from_slice(&pal[idx as usize]);
-                }
-            }
-        }
-        8 => {
-            // A full 256-entry padded palette lets the inner loop index
-            // with the raw `u8` sample — the compiler drops the per-pixel
-            // bounds check that the `.get().unwrap_or()` form forced.
-            let pal = padded_palette::<256>(palette);
-            for y in 0..height {
-                let row = &pixels[y * stride..y * stride + width];
-                let d = row_dst(y) * out_stride;
-                let dst = &mut out[d..d + out_stride];
-                for (px, &idx) in dst.chunks_exact_mut(4).zip(row.iter()) {
-                    px.copy_from_slice(&pal[idx as usize]);
-                }
-            }
-        }
-        16 => {
-            // Default BI_RGB mapping is 5-5-5 with the high bit
-            // reserved. BI_BITFIELDS / BI_ALPHABITFIELDS let the file
-            // declare its own layout (e.g. 5-6-5; the alpha-bitfields
-            // flavour additionally carries an alpha mask in the V3
-            // header tail). We honour any of those.
-            let (mr, mg, mb, ma) =
-                if h.compression == BI_BITFIELDS || h.compression == BI_ALPHABITFIELDS {
-                    (
-                        h.mask_r.unwrap_or(0x7C00),
-                        h.mask_g.unwrap_or(0x03E0),
-                        h.mask_b.unwrap_or(0x001F),
-                        h.mask_a.unwrap_or(0),
-                    )
-                } else {
-                    (0x7C00, 0x03E0, 0x001F, 0)
-                };
-            // Below the size where a 65 536-entry combined value→RGBA
-            // table amortises its 256 KiB build, four 256-byte per-channel
-            // tables (1 KiB total, L1-resident) decode each pixel with
-            // three/four branch-free loads — a large win over the old
-            // per-pixel `expand()` match (≈ −56 % at 320×240, where the big
-            // table never paid for itself). At or above the threshold the
-            // combined table's single indexed load per pixel still edges
-            // ahead, so it is retained. Both paths emit bit-identical bytes.
-            let total_px = width.saturating_mul(height);
-            if total_px >= 1 << 18 {
-                let (rs, rn) = shift_len(mr);
-                let (gs, gn) = shift_len(mg);
-                let (bs, bn) = shift_len(mb);
-                let (as_, an) = shift_len(ma);
-                let mut lut = vec![0u8; 65_536 * 4];
-                for (v, slot) in lut.chunks_exact_mut(4).enumerate() {
-                    let v = v as u32;
-                    slot[0] = expand(((v & mr) >> rs) as u8, rn);
-                    slot[1] = expand(((v & mg) >> gs) as u8, gn);
-                    slot[2] = expand(((v & mb) >> bs) as u8, bn);
-                    slot[3] = if an > 0 {
-                        expand(((v & ma) >> as_) as u8, an)
-                    } else {
-                        0xFF
-                    };
-                }
-                for y in 0..height {
-                    let row = &pixels[y * stride..y * stride + width * 2];
-                    let d = row_dst(y) * out_stride;
-                    let dst = &mut out[d..d + out_stride];
-                    for (x, px) in dst.chunks_exact_mut(4).enumerate() {
-                        let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as usize;
-                        px.copy_from_slice(&lut[v * 4..v * 4 + 4]);
-                    }
-                }
-            } else {
-                let rl = ChannelLut::new(mr);
-                let gl = ChannelLut::new(mg);
-                let bl = ChannelLut::new(mb);
-                let al = ChannelLut::new(ma);
-                let has_alpha = ma != 0;
-                for y in 0..height {
-                    let row = &pixels[y * stride..y * stride + width * 2];
-                    let d = row_dst(y) * out_stride;
-                    let dst = &mut out[d..d + out_stride];
-                    for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(2)) {
-                        let v = u16::from_le_bytes([src[0], src[1]]) as u32;
-                        px[0] = rl.get(v);
-                        px[1] = gl.get(v);
-                        px[2] = bl.get(v);
-                        px[3] = if has_alpha { al.get(v) } else { 0xFF };
-                    }
-                }
-            }
-        }
-        24 => {
-            for y in 0..height {
-                let row = &pixels[y * stride..y * stride + width * 3];
-                let d = row_dst(y) * out_stride;
-                let dst = &mut out[d..d + out_stride];
-                for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(3)) {
-                    px[0] = src[2];
-                    px[1] = src[1];
-                    px[2] = src[0];
-                    px[3] = 0xFF;
-                }
-            }
-        }
-        32 => {
-            // Default BI_RGB for 32bpp is BGRA. BI_BITFIELDS or
-            // BI_ALPHABITFIELDS may declare otherwise; handle both.
-            if (h.compression == BI_BITFIELDS || h.compression == BI_ALPHABITFIELDS)
-                && (h.mask_r.is_some() || h.mask_g.is_some() || h.mask_b.is_some())
-            {
-                let mr = h.mask_r.unwrap_or(0x00FF_0000);
-                let mg = h.mask_g.unwrap_or(0x0000_FF00);
-                let mb = h.mask_b.unwrap_or(0x0000_00FF);
-                let ma = h.mask_a.unwrap_or(0);
-                // Per-channel expansion tables (see the 16bpp path): four
-                // branch-free L1 loads per pixel, bit-identical output.
-                let rl = ChannelLut::new(mr);
-                let gl = ChannelLut::new(mg);
-                let bl = ChannelLut::new(mb);
-                let al = ChannelLut::new(ma);
-                let has_alpha = ma != 0;
-                for y in 0..height {
-                    let row = &pixels[y * stride..y * stride + width * 4];
-                    let d = row_dst(y) * out_stride;
-                    let dst = &mut out[d..d + out_stride];
-                    for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
-                        let v = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
-                        px[0] = rl.get(v);
-                        px[1] = gl.get(v);
-                        px[2] = bl.get(v);
-                        px[3] = if has_alpha { al.get(v) } else { 0xFF };
-                    }
-                }
-            } else if h.compression == BI_RGB && h.mask_a.is_some() {
-                // V4 / V5 BI_RGB carries the alpha mask in the header body.
-                // R / G / B stay at the default BGRA byte positions (the
-                // R/G/B masks are *not* valid under BI_RGB per spec), but a
-                // non-zero in-header alpha mask makes the alpha sample valid
-                // — extract it through the mask. A zero alpha mask means "no
-                // alpha", so the pixel is opaque (the same convention the
-                // BI_ALPHABITFIELDS / V3-zero-alpha paths use), which also
-                // fixes the otherwise-transparent decode of a V4 / V5
-                // BI_RGB bitmap whose reserved high bytes are all zero.
-                let ma = h.mask_a.unwrap_or(0);
-                let (as_, an) = shift_len(ma);
-                for y in 0..height {
-                    let row = &pixels[y * stride..y * stride + width * 4];
-                    let d = row_dst(y) * out_stride;
-                    let dst = &mut out[d..d + out_stride];
-                    for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
-                        px[0] = src[2];
-                        px[1] = src[1];
-                        px[2] = src[0];
-                        px[3] = if an > 0 {
-                            let v = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
-                            expand(((v & ma) >> as_) as u8, an)
-                        } else {
-                            0xFF
-                        };
-                    }
-                }
-            } else {
-                for y in 0..height {
-                    let row = &pixels[y * stride..y * stride + width * 4];
-                    let d = row_dst(y) * out_stride;
-                    let dst = &mut out[d..d + out_stride];
-                    for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
-                        px[0] = src[2];
-                        px[1] = src[1];
-                        px[2] = src[0];
-                        px[3] = src[3];
-                    }
-                }
-            }
-        }
-        other => {
-            return Err(Error::invalid(format!(
-                "BMP: unsupported bit depth {other}"
-            )))
-        }
-    }
-    Ok(out)
-}
-
-// ---------------------------------------------------------------------------
-// RLE decoders
-// ---------------------------------------------------------------------------
-
 /// Slice the RLE stream out of `whole` at `pixel_offset`, after proving
 /// the header's `width × height` grid can actually be backed by the
 /// available bytes.
@@ -1297,194 +1530,6 @@ fn rle_input(whole: &[u8], pixel_offset: usize, width: u64, height: u64) -> Resu
         ));
     }
     Ok(rle_data)
-}
-
-/// The RGBA every RLE pixel the stream never writes resolves to.
-///
-/// An RLE bitmap is an *indexed* image: pixels left untouched by the
-/// stream — the cells a `delta` jumps over, the tail of a short row
-/// after an end-of-line escape, and every cell past an early
-/// end-of-bitmap — take **colour index 0**, the first colour-table
-/// entry, exactly like any explicitly-coded index-0 pixel. (The BMP
-/// *Bitmap Compression* material defines the escape semantics but is
-/// silent on the fill colour; Windows fills index 0, the canonical
-/// background.) Resolving through the palette here means a non-`(0,0,0)`
-/// index-0 colour — and its opaque `0xFF` alpha — survives, instead of
-/// the transparent black a bare zero-fill would leave behind.
-fn rle_background(palette: &[[u8; 4]]) -> [u8; 4] {
-    palette.first().copied().unwrap_or([0, 0, 0, 0xFF])
-}
-
-/// Allocate a flat RGBA plane pre-filled with the index-0 background so
-/// every cell the RLE stream never writes resolves to colour index 0.
-fn rle_background_plane(width: usize, height: usize, bg: [u8; 4]) -> Vec<u8> {
-    let out_stride = width.saturating_mul(4);
-    let mut out = vec![0u8; out_stride.saturating_mul(height)];
-    for px in out.chunks_exact_mut(4) {
-        px.copy_from_slice(&bg);
-    }
-    out
-}
-
-/// Decode a BI_RLE8 stream straight into a single flat top-down RGBA
-/// plane.
-///
-/// The stream encodes 8-bit indices bottom-up (stream row 0 = bottom of
-/// image); each pixel is written to its already-flipped destination row
-/// `(height - 1 - y)`, so the caller needs no reversal or concatenation
-/// pass. The palette is looked up through a 256-entry padded table so
-/// the index load carries no per-pixel bounds check.
-fn decode_rle8(data: &[u8], width: usize, height: usize, palette: &[[u8; 4]]) -> Result<Vec<u8>> {
-    let bg = rle_background(palette);
-    let pal = padded_palette::<256>(palette);
-    let out_stride = width.saturating_mul(4);
-    let mut out = rle_background_plane(width, height, bg);
-    let mut x = 0usize;
-    // RLE8 bitmaps are bottom-up: row 0 in the stream is the bottom row.
-    let mut y = 0usize;
-    let mut i = 0usize;
-
-    macro_rules! put_pixel {
-        ($idx:expr) => {
-            if x < width && y < height {
-                let off = (height - 1 - y) * out_stride + x * 4;
-                out[off..off + 4].copy_from_slice(&pal[$idx as usize]);
-                x += 1;
-            }
-        };
-    }
-
-    while i + 1 < data.len() {
-        let b0 = data[i];
-        let b1 = data[i + 1];
-        i += 2;
-
-        if b0 != 0 {
-            // Encoded run: b0 pixels of palette index b1.
-            for _ in 0..b0 {
-                put_pixel!(b1);
-            }
-        } else {
-            match b1 {
-                0x00 => {
-                    // End of line.
-                    x = 0;
-                    y += 1;
-                }
-                0x01 => {
-                    // End of bitmap.
-                    break;
-                }
-                0x02 => {
-                    // Delta: move cursor.
-                    if i + 2 > data.len() {
-                        return Err(Error::invalid("BMP RLE8: delta truncated"));
-                    }
-                    x += data[i] as usize;
-                    y += data[i + 1] as usize;
-                    i += 2;
-                }
-                count => {
-                    // Absolute mode: `count` pixels follow.
-                    let count = count as usize;
-                    if i + count > data.len() {
-                        return Err(Error::invalid("BMP RLE8: absolute run truncated"));
-                    }
-                    for k in 0..count {
-                        put_pixel!(data[i + k]);
-                    }
-                    i += count;
-                    // Padded to word boundary.
-                    if count & 1 != 0 {
-                        i += 1;
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-/// Decode a BI_RLE4 stream straight into a single flat top-down RGBA
-/// plane (see [`decode_rle8`] for the bottom-up flip + padded-palette
-/// details; here the index is a 4-bit nibble into a 16-entry table).
-fn decode_rle4(data: &[u8], width: usize, height: usize, palette: &[[u8; 4]]) -> Result<Vec<u8>> {
-    let bg = rle_background(palette);
-    let pal = padded_palette::<16>(palette);
-    let out_stride = width.saturating_mul(4);
-    let mut out = rle_background_plane(width, height, bg);
-    let mut x = 0usize;
-    let mut y = 0usize;
-    let mut i = 0usize;
-
-    macro_rules! put_pixel {
-        ($idx:expr) => {
-            if x < width && y < height {
-                let off = (height - 1 - y) * out_stride + x * 4;
-                out[off..off + 4].copy_from_slice(&pal[($idx & 0x0F) as usize]);
-                x += 1;
-            }
-        };
-    }
-
-    while i + 1 < data.len() {
-        let b0 = data[i];
-        let b1 = data[i + 1];
-        i += 2;
-
-        if b0 != 0 {
-            // Encoded run: b0 pixels alternating between hi/lo nibble of b1.
-            let hi = b1 >> 4;
-            let lo = b1 & 0x0F;
-            for k in 0..b0 {
-                if k & 1 == 0 {
-                    put_pixel!(hi);
-                } else {
-                    put_pixel!(lo);
-                }
-            }
-        } else {
-            match b1 {
-                0x00 => {
-                    // End of line.
-                    x = 0;
-                    y += 1;
-                }
-                0x01 => {
-                    // End of bitmap.
-                    break;
-                }
-                0x02 => {
-                    // Delta.
-                    if i + 2 > data.len() {
-                        return Err(Error::invalid("BMP RLE4: delta truncated"));
-                    }
-                    x += data[i] as usize;
-                    y += data[i + 1] as usize;
-                    i += 2;
-                }
-                count => {
-                    // Absolute mode: `count` nibbles follow in packed bytes.
-                    let count = count as usize;
-                    let packed_bytes = count.div_ceil(2);
-                    if i + packed_bytes > data.len() {
-                        return Err(Error::invalid("BMP RLE4: absolute run truncated"));
-                    }
-                    for k in 0..count {
-                        let byte = data[i + k / 2];
-                        let nib = if k & 1 == 0 { byte >> 4 } else { byte & 0x0F };
-                        put_pixel!(nib);
-                    }
-                    i += packed_bytes;
-                    // Padded to word boundary (in bytes).
-                    if packed_bytes & 1 != 0 {
-                        i += 1;
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// Locate a channel mask's bit position + bit length so we can scale
@@ -1560,21 +1605,4 @@ impl ChannelLut {
         // in `0..256` and the bounds check is elided.
         self.table[((v & self.mask) >> self.shift) as u8 as usize]
     }
-}
-
-/// Copy a decoded palette into a fixed-size RGBA lookup array padded to
-/// the full `2^bpp` index space so the indexed decode loops can address
-/// it with a masked index whose range the compiler already knows — the
-/// per-pixel `.get(idx).unwrap_or(…)` bounds check drops out.
-///
-/// Entries the (possibly short — `biClrUsed` may be below `2^bpp`)
-/// palette does not cover keep the canonical opaque-black fallback
-/// `[0, 0, 0, 0xFF]`, exactly what the old `.unwrap_or([0, 0, 0, 0xFF])`
-/// produced for an out-of-range index.
-fn padded_palette<const N: usize>(palette: &[[u8; 4]]) -> [[u8; 4]; N] {
-    let mut out = [[0u8, 0, 0, 0xFF]; N];
-    for (o, p) in out.iter_mut().zip(palette.iter()) {
-        *o = *p;
-    }
-    out
 }

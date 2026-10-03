@@ -1,84 +1,49 @@
 //! BMP + DIB encode.
 //!
-//! Supported output variants:
+//! Output variants, chosen by the image's [`BmpPixelFormat`]:
 //!
-//! | Format                | Compression  | Header |
-//! | --------------------- | ------------ | ------ |
-//! | 32-bit BGRA           | `BI_RGB`     | V3     |
-//! | 24-bit BGR            | `BI_RGB`     | V3     |
-//! | 16-bit RGB 5-5-5      | `BI_RGB`     | V3     |
-//! | 16-bit RGB 5-6-5      | `BI_BITFIELDS` | V4   |
-//! | 8-bit indexed         | `BI_RGB`     | V3     |
-//! | 4-bit indexed         | `BI_RGB`     | V3     |
-//! | 1-bit indexed         | `BI_RGB`     | V3     |
-//! | 8-bit indexed RLE     | `BI_RLE8`    | V3     |
-//! | 4-bit indexed RLE     | `BI_RLE4`    | V3     |
+//! | Input layout | On disk | Compression | Header |
+//! | --- | --- | --- | --- |
+//! | `Rgba`, `Bgra` | 32-bit BGRA | `BI_RGB` | V3 |
+//! | `Rgb24`, `Bgr24` | 24-bit BGR | `BI_RGB` | V3 |
+//! | `Rgb555` | 16-bit RGB 5-5-5 | `BI_RGB` | V3 |
+//! | `Rgb565` | 16-bit RGB 5-6-5 | `BI_BITFIELDS` (in-header masks) | V4 |
+//! | `Pal8` | 8-bit indexed | `BI_RGB` or `BI_RLE8` (smaller wins) | V3 |
+//! | `Indexed4` | 4-bit indexed | `BI_RGB` or `BI_RLE4` (smaller wins) | V3 |
+//! | `Indexed2` | 2-bit indexed (Windows CE) | `BI_RGB` | V3 |
+//! | `Indexed1` | 1-bit indexed | `BI_RGB` | V3 |
 //!
-//! For RLE variants the encoder first tries the compressed form and falls
-//! back to uncompressed indexed when the compressed output is not smaller.
-//! BMP has no RLE flavour at 1 bpp, so the [`BmpPixelFormat::Indexed1`]
-//! path is always emitted as uncompressed `BI_RGB`.
+//! [`EncodeOptions`] switches the header family: explicit-mask
+//! `BI_BITFIELDS` / `BI_ALPHABITFIELDS` (V3 + mask tail), V4
+//! `LCS_CALIBRATED_RGB`, V5 `PROFILE_EMBEDDED` (from the image's ICC
+//! profile) or V5 `PROFILE_LINKED`. The indexed layouts need a
+//! [`Palette`] on the image. Every option is honoured on every path
+//! where it is meaningful (top-down disables RLE, which is illegal for a
+//! negative `biHeight`).
 //!
-//! Input [`BmpPixelFormat::Rgba`] is accepted directly;
-//! [`BmpPixelFormat::Rgb24`] is written as 24-bit BGR.
-//! [`BmpPixelFormat::Rgb555`] is written as 16-bit BI_RGB 5-5-5 (V3 header).
-//! [`BmpPixelFormat::Rgb565`] is written as 16-bit BI_BITFIELDS (V4 header).
-//! [`BmpPixelFormat::Indexed8`] / [`BmpPixelFormat::Indexed4`] /
-//! [`BmpPixelFormat::Indexed1`] require a [`BmpPalette`] in the
-//! accompanying [`BmpImage`]; optional RLE is chosen automatically when
-//! it compresses (8/4-bit only).
+//! The contract entry points live at the crate root ([`crate::encode`],
+//! [`crate::encode_rgb8`], …); this module keeps the headerless-DIB
+//! helpers `oxideav-ico` uses, the [`BmpBitfields`] mask presets and
+//! the deprecated pre-contract names.
 
 use crate::error::{BmpError as Error, Result};
-use crate::image::{BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
+use crate::image::{BmpImage, BmpPixelFormat, Palette, Plane};
+use crate::options::EncodeOptions;
 use crate::types::*;
 
+// The items that used to live in this module keep their `encoder::` path
+// for one release.
+#[allow(deprecated)]
+pub use crate::options::BmpEncodeOptions;
 #[cfg(feature = "registry")]
-use oxideav_core::Encoder;
+pub use crate::registry::make_encoder;
 #[cfg(feature = "registry")]
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, PixelFormat, TimeBase};
+#[allow(deprecated)]
+pub use crate::registry::{encode_bmp_videoframe, encode_dib_videoframe};
 
-/// Options that tune the BMP encoder beyond the format-picking that
-/// [`encode_bmp`] / [`encode_bmp_plane`] derive from
-/// [`BmpPixelFormat`]. Pass via [`encode_bmp_with_options`] or
-/// [`encode_bmp_plane_with_options`].
-///
-/// Defaults match the classic BMP convention: rows bottom-up,
-/// `biHeight` positive. Setting [`top_down`](Self::top_down) inverts
-/// the layout: rows are written top-down (no in-encoder flip) and
-/// the encoded `biHeight` field is the negative of the height per
-/// the BMP spec's signed-height convention. Top-down output is
-/// compatible with `BI_RGB` only (uncompressed direct-colour /
-/// uncompressed indexed and 16-bit `BI_BITFIELDS`); RLE-compressed
-/// payloads with negative heights are explicitly disallowed by the
-/// spec, so requesting top-down on `Indexed8` / `Indexed4` forces
-/// the uncompressed fall-back.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BmpEncodeOptions {
-    /// Emit a top-down DIB (rows stored top-to-bottom, encoded
-    /// `biHeight` is negative). Default: `false` (classic bottom-up).
-    pub top_down: bool,
-    /// Write only as many colour-table entries as the supplied palette
-    /// actually carries, recording the count in the header's
-    /// `biClrUsed` field, instead of zero-padding the table out to the
-    /// full `2^bpp` entries with `biClrUsed = 0`.
-    ///
-    /// Only affects the indexed paths (`Indexed8` / `Indexed4`); the
-    /// direct-colour and 16-bit bitfields paths carry no colour table.
-    /// A palette with `n` entries shrinks the on-disk table from
-    /// `2^bpp × 4` bytes to `n × 4` bytes — meaningful for the common
-    /// 2-/4-colour images that would otherwise carry a full 256-entry
-    /// (1 KiB) or 16-entry table. The decoder's `biClrUsed`-aware
-    /// palette reader consumes the shorter table transparently.
-    ///
-    /// Default: `false` (full `2^bpp` table, `biClrUsed = 0`) for
-    /// byte-for-byte compatibility with prior output.
-    pub minimal_palette: bool,
-}
-
-/// Opaque token returned by [`encode_bmp`] and [`encode_bmp_plane`]
-/// that carries the actual compression used. Inspect with
-/// [`EncodedBmpFormat::compression`].
+/// Which on-disk variant [`crate::encode_with_report`] actually wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EncodedBmpFormat {
     /// 32-bit BGRA `BI_RGB`.
     Rgb32,
@@ -100,141 +65,107 @@ pub enum EncodedBmpFormat {
     Rle4,
     /// 1-bit uncompressed indexed `BI_RGB` (monochrome).
     Indexed1,
+    /// Explicit-mask 16- or 32-bit `BI_BITFIELDS` (no alpha mask;
+    /// [`EncodeOptions::bitfields`]).
+    Bitfields,
+    /// Explicit-mask 16- or 32-bit `BI_ALPHABITFIELDS` (alpha mask set;
+    /// [`EncodeOptions::bitfields`]).
+    AlphaBitfields,
 }
 
-#[cfg(feature = "registry")]
-pub fn make_encoder(params: &CodecParameters) -> oxideav_core::Result<Box<dyn Encoder>> {
-    let mut out_params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
-    out_params.width = params.width;
-    out_params.height = params.height;
-    out_params.pixel_format = params.pixel_format;
-    Ok(Box::new(BmpEncoder {
-        codec_id: CodecId::new(crate::CODEC_ID_STR),
-        out_params,
-        pending: None,
-        eof: false,
-    }))
-}
-
-#[cfg(feature = "registry")]
-struct BmpEncoder {
-    codec_id: CodecId,
-    out_params: CodecParameters,
-    pending: Option<Vec<u8>>,
-    eof: bool,
-}
-
-#[cfg(feature = "registry")]
-impl Encoder for BmpEncoder {
-    fn codec_id(&self) -> &CodecId {
-        &self.codec_id
-    }
-    fn output_params(&self) -> &CodecParameters {
-        &self.out_params
-    }
-    fn send_frame(&mut self, frame: &Frame) -> oxideav_core::Result<()> {
-        let vf = match frame {
-            Frame::Video(v) => v,
-            _ => {
-                return Err(oxideav_core::Error::invalid(
-                    "BMP encoder: expected video frame",
-                ))
-            }
-        };
-        let format = self.out_params.pixel_format.ok_or_else(|| {
-            oxideav_core::Error::invalid("BMP encoder: pixel_format missing in CodecParameters")
-        })?;
-        let width = self.out_params.width.ok_or_else(|| {
-            oxideav_core::Error::invalid("BMP encoder: width missing in CodecParameters")
-        })?;
-        let height = self.out_params.height.ok_or_else(|| {
-            oxideav_core::Error::invalid("BMP encoder: height missing in CodecParameters")
-        })?;
-        let bmp_format = match format {
-            PixelFormat::Rgba => BmpPixelFormat::Rgba,
-            PixelFormat::Rgb24 => BmpPixelFormat::Rgb24,
-            other => {
-                return Err(oxideav_core::Error::invalid(format!(
-                    "BMP encoder: unsupported pixel format {other:?}"
-                )))
-            }
-        };
-        if vf.planes.is_empty() {
-            return Err(oxideav_core::Error::invalid(
-                "BMP encoder: empty frame plane",
-            ));
+impl EncodedBmpFormat {
+    /// The `biCompression` value the variant carries.
+    pub fn compression(self) -> u32 {
+        match self {
+            Self::Rle8 => BI_RLE8,
+            Self::Rle4 => BI_RLE4,
+            Self::Rgb16Bitfields | Self::Bitfields => BI_BITFIELDS,
+            Self::AlphaBitfields => BI_ALPHABITFIELDS,
+            _ => BI_RGB,
         }
-        let plane = BmpPlane {
-            stride: vf.planes[0].stride,
-            data: vf.planes[0].data.clone(),
-        };
-        let (bytes, _) = encode_bmp_plane(&plane, bmp_format, None, width, height)?;
-        self.pending = Some(bytes);
-        Ok(())
-    }
-    fn receive_packet(&mut self) -> oxideav_core::Result<Packet> {
-        match self.pending.take() {
-            Some(bytes) => {
-                let mut pkt = Packet::new(0, TimeBase::new(1, 1), bytes);
-                pkt.flags.keyframe = true;
-                Ok(pkt)
-            }
-            None => {
-                if self.eof {
-                    Err(oxideav_core::Error::Eof)
-                } else {
-                    Err(oxideav_core::Error::NeedMore)
-                }
-            }
-        }
-    }
-    fn flush(&mut self) -> oxideav_core::Result<()> {
-        self.eof = true;
-        Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Public standalone API
+// Crate-internal dispatcher behind the root vocabulary
 // ---------------------------------------------------------------------------
 
-/// Encode a [`BmpImage`] into a complete BMP file (with the 14-byte
-/// `BITMAPFILEHEADER`). The output format is chosen from
-/// [`BmpImage::pixel_format`]:
-///
-/// * `Rgba` → 32-bit BGRA `BI_RGB` (V3 header)
-/// * `Rgb24` → 24-bit BGR `BI_RGB` (V3 header)
-/// * `Rgb565` → 16-bit `BI_BITFIELDS` RGB 5-6-5 (V4 header)
-/// * `Indexed8` → 8-bit indexed `BI_RGB` or `BI_RLE8` (whichever is
-///   smaller); requires `image.palette`.
-/// * `Indexed4` → 4-bit indexed `BI_RGB` or `BI_RLE4` (whichever is
-///   smaller); requires `image.palette`.
-///
-/// Rows are written bottom-up per the classic BMP convention.
-///
-/// Returns the encoded bytes and which format was actually emitted.
-pub fn encode_bmp(image: &BmpImage) -> Result<(Vec<u8>, EncodedBmpFormat)> {
-    encode_bmp_with_options(image, BmpEncodeOptions::default())
-}
-
-/// Same as [`encode_bmp`] but takes a [`BmpEncodeOptions`] so callers
-/// can request a top-down DIB layout (negative `biHeight`).
-///
-/// Top-down output is BMP-spec-compliant for uncompressed `BI_RGB` and
-/// `BI_BITFIELDS` only. When `options.top_down == true` and the chosen
-/// format would otherwise be `BI_RLE8` / `BI_RLE4`, the encoder falls
-/// back to the uncompressed indexed form regardless of which is
-/// smaller, since RLE + negative height is illegal per the spec.
-pub fn encode_bmp_with_options(
+/// [`crate::encode_with_report`]: write `image` as a complete BMP file
+/// honouring every [`EncodeOptions`] field.
+pub(crate) fn encode_image(
     image: &BmpImage,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
     if image.planes.is_empty() {
         return Err(Error::invalid("BMP encoder: empty frame plane"));
     }
-    encode_bmp_plane_with_options(
-        &image.planes[0],
-        image.pixel_format,
+    if image.width == 0 || image.height == 0 {
+        return Err(Error::invalid("BMP encoder: zero dimension"));
+    }
+    if image.format.is_indexed() && image.palette.is_none() {
+        return Err(Error::invalid(format!(
+            "BMP encoder: {:?} requires a palette",
+            image.format
+        )));
+    }
+    let embedded_icc = if options.embed_icc {
+        image.metadata.icc.as_deref()
+    } else {
+        None
+    };
+    let v5 = options.linked_icc.is_some() || embedded_icc.is_some();
+    let requested = usize::from(options.bitfields.is_some())
+        + usize::from(options.calibrated_rgb.is_some())
+        + usize::from(v5);
+    if requested > 1 {
+        return Err(Error::unsupported(
+            "BMP encoder: bitfields, calibrated_rgb and the V5 profile modes are mutually exclusive",
+        ));
+    }
+    let plane = &image.planes[0];
+    if let Some(masks) = options.bitfields {
+        let bytes = encode_bitfields_plane(
+            plane,
+            image.format,
+            masks,
+            image.width,
+            image.height,
+            options,
+        )?;
+        let token = if masks.has_alpha() {
+            EncodedBmpFormat::AlphaBitfields
+        } else {
+            EncodedBmpFormat::Bitfields
+        };
+        return Ok((bytes, token));
+    }
+    if let Some(cal) = options.calibrated_rgb {
+        let bytes = encode_v4_calibrated(image, cal.endpoints, cal.gamma, options)?;
+        return Ok((bytes, plain_token(image.format)));
+    }
+    if let Some(path) = options.linked_icc.as_deref() {
+        let bytes = encode_v5_profile(
+            image,
+            path,
+            PROFILE_LINKED,
+            options.rendering_intent,
+            options,
+        )?;
+        return Ok((bytes, plain_token(image.format)));
+    }
+    if let Some(icc) = embedded_icc {
+        let bytes = encode_v5_profile(
+            image,
+            icc,
+            PROFILE_EMBEDDED,
+            options.rendering_intent,
+            options,
+        )?;
+        return Ok((bytes, plain_token(image.format)));
+    }
+    encode_plane_plain(
+        plane,
+        image.format,
         image.palette.as_ref(),
         image.width,
         image.height,
@@ -242,46 +173,36 @@ pub fn encode_bmp_with_options(
     )
 }
 
-/// Encode a single [`BmpPlane`] (width × height pixels in `format`)
-/// into a BMP file. Lower-level than [`encode_bmp`] for callers that
-/// already have plane bytes laid out without a wrapping [`BmpImage`].
-///
-/// `palette` is required for [`BmpPixelFormat::Indexed8`] and
-/// [`BmpPixelFormat::Indexed4`]; ignored otherwise.
-///
-/// Returns the encoded bytes and which format was actually emitted.
-pub fn encode_bmp_plane(
-    plane: &BmpPlane,
-    format: BmpPixelFormat,
-    palette: Option<&BmpPalette>,
-    width: u32,
-    height: u32,
-) -> Result<(Vec<u8>, EncodedBmpFormat)> {
-    encode_bmp_plane_with_options(
-        plane,
-        format,
-        palette,
-        width,
-        height,
-        BmpEncodeOptions::default(),
-    )
+/// The uncompressed token a layout maps to (the V4 / V5 paths never
+/// use RLE).
+fn plain_token(format: BmpPixelFormat) -> EncodedBmpFormat {
+    match format {
+        BmpPixelFormat::Rgba | BmpPixelFormat::Bgra => EncodedBmpFormat::Rgb32,
+        BmpPixelFormat::Rgb24 | BmpPixelFormat::Bgr24 => EncodedBmpFormat::Rgb24,
+        BmpPixelFormat::Rgb555 => EncodedBmpFormat::Rgb16Rgb,
+        BmpPixelFormat::Rgb565 => EncodedBmpFormat::Rgb16Bitfields,
+        BmpPixelFormat::Pal8 => EncodedBmpFormat::Indexed8,
+        BmpPixelFormat::Indexed4 => EncodedBmpFormat::Indexed4,
+        BmpPixelFormat::Indexed2 => EncodedBmpFormat::Indexed2,
+        BmpPixelFormat::Indexed1 => EncodedBmpFormat::Indexed1,
+    }
 }
 
-/// Plane-level variant of [`encode_bmp_with_options`].
-pub fn encode_bmp_plane_with_options(
-    plane: &BmpPlane,
+/// Plain-header path: V3 (V4 for `Rgb565`), RLE where allowed.
+fn encode_plane_plain(
+    plane: &Plane,
     format: BmpPixelFormat,
-    palette: Option<&BmpPalette>,
+    palette: Option<&Palette>,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
     match format {
-        BmpPixelFormat::Rgba => {
+        BmpPixelFormat::Rgba | BmpPixelFormat::Bgra => {
             let bytes = encode_direct(plane, format, width, height, BI_RGB, None, options)?;
             Ok((bytes, EncodedBmpFormat::Rgb32))
         }
-        BmpPixelFormat::Rgb24 => {
+        BmpPixelFormat::Rgb24 | BmpPixelFormat::Bgr24 => {
             let bytes = encode_direct(plane, format, width, height, BI_RGB, None, options)?;
             Ok((bytes, EncodedBmpFormat::Rgb24))
         }
@@ -293,9 +214,9 @@ pub fn encode_bmp_plane_with_options(
             let bytes = encode_rgb565(plane, width, height, options)?;
             Ok((bytes, EncodedBmpFormat::Rgb16Bitfields))
         }
-        BmpPixelFormat::Indexed8 => {
-            let pal = palette
-                .ok_or_else(|| Error::invalid("BMP encoder: Indexed8 requires a palette"))?;
+        BmpPixelFormat::Pal8 => {
+            let pal =
+                palette.ok_or_else(|| Error::invalid("BMP encoder: Pal8 requires a palette"))?;
             encode_indexed8_auto(plane, pal, width, height, options)
         }
         BmpPixelFormat::Indexed4 => {
@@ -318,6 +239,148 @@ pub fn encode_bmp_plane_with_options(
             Ok((file, EncodedBmpFormat::Indexed1))
         }
     }
+}
+
+/// Wrap a bare plane + palette into a validated [`BmpImage`] (the
+/// deprecated plane-level entry points funnel through this).
+#[allow(deprecated)]
+fn plane_image(
+    plane: &Plane,
+    format: BmpPixelFormat,
+    palette: Option<&crate::image::BmpPalette>,
+    width: u32,
+    height: u32,
+) -> Result<BmpImage> {
+    Ok(BmpImage::new(width, height, format, vec![plane.clone()])?
+        .with_palette(palette.map(Palette::from)))
+}
+
+// ---------------------------------------------------------------------------
+// Deprecated pre-contract names
+// ---------------------------------------------------------------------------
+
+/// Encode a [`BmpImage`] with the default options.
+#[deprecated(note = "use oxideav_bmp::encode / encode_with_report (IMAGE_CRATE_API)")]
+pub fn encode_bmp(image: &BmpImage) -> Result<(Vec<u8>, EncodedBmpFormat)> {
+    encode_image(image, &EncodeOptions::default())
+}
+
+/// Encode a [`BmpImage`] with explicit options.
+#[deprecated(note = "use oxideav_bmp::encode_with_report(image, &opts) (IMAGE_CRATE_API)")]
+pub fn encode_bmp_with_options(
+    image: &BmpImage,
+    options: EncodeOptions,
+) -> Result<(Vec<u8>, EncodedBmpFormat)> {
+    encode_image(image, &options)
+}
+
+/// Encode a bare plane with the default options.
+#[deprecated(
+    note = "build a BmpImage (BmpImage::new / with_palette) and use oxideav_bmp::encode_with_report (IMAGE_CRATE_API)"
+)]
+#[allow(deprecated)]
+pub fn encode_bmp_plane(
+    plane: &Plane,
+    format: BmpPixelFormat,
+    palette: Option<&crate::image::BmpPalette>,
+    width: u32,
+    height: u32,
+) -> Result<(Vec<u8>, EncodedBmpFormat)> {
+    let image = plane_image(plane, format, palette, width, height)?;
+    encode_image(&image, &EncodeOptions::default())
+}
+
+/// Encode a bare plane with explicit options.
+#[deprecated(
+    note = "build a BmpImage (BmpImage::new / with_palette) and use oxideav_bmp::encode_with_report (IMAGE_CRATE_API)"
+)]
+#[allow(deprecated)]
+pub fn encode_bmp_plane_with_options(
+    plane: &Plane,
+    format: BmpPixelFormat,
+    palette: Option<&crate::image::BmpPalette>,
+    width: u32,
+    height: u32,
+    options: EncodeOptions,
+) -> Result<(Vec<u8>, EncodedBmpFormat)> {
+    let image = plane_image(plane, format, palette, width, height)?;
+    encode_image(&image, &options)
+}
+
+/// Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` encode.
+#[deprecated(note = "use oxideav_bmp::encode with EncodeOptions::with_bitfields (IMAGE_CRATE_API)")]
+pub fn encode_bmp_bitfields(
+    image: &BmpImage,
+    masks: BmpBitfields,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    Ok(encode_image(image, &options.with_bitfields(masks))?.0)
+}
+
+/// Plane-level explicit-mask encode.
+#[deprecated(
+    note = "build a BmpImage and use oxideav_bmp::encode with EncodeOptions::with_bitfields (IMAGE_CRATE_API)"
+)]
+pub fn encode_bmp_plane_bitfields(
+    plane: &Plane,
+    format: BmpPixelFormat,
+    masks: BmpBitfields,
+    width: u32,
+    height: u32,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    let image = plane_image(plane, format, None, width, height)?;
+    Ok(encode_image(&image, &options.with_bitfields(masks))?.0)
+}
+
+/// V5 `PROFILE_EMBEDDED` encode with the given ICC profile bytes.
+#[deprecated(
+    note = "put the profile in BmpImage::metadata.icc and use oxideav_bmp::encode (EncodeOptions::embed_icc / with_rendering_intent) (IMAGE_CRATE_API)"
+)]
+pub fn encode_bmp_with_icc_profile(
+    image: &BmpImage,
+    icc_profile: &[u8],
+    rendering_intent: u32,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    let mut image = image.clone();
+    image.metadata.icc = Some(icc_profile.to_vec());
+    let options = options
+        .with_embed_icc(true)
+        .with_linked_icc(None)
+        .with_rendering_intent(rendering_intent);
+    Ok(encode_image(&image, &options)?.0)
+}
+
+/// V5 `PROFILE_LINKED` encode with the given path bytestring.
+#[deprecated(
+    note = "use oxideav_bmp::encode with EncodeOptions::with_linked_icc / with_rendering_intent (IMAGE_CRATE_API)"
+)]
+pub fn encode_bmp_with_linked_icc_profile(
+    image: &BmpImage,
+    linked_path: &[u8],
+    rendering_intent: u32,
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    let options = options
+        .with_linked_icc(linked_path.to_vec())
+        .with_rendering_intent(rendering_intent);
+    Ok(encode_image(image, &options)?.0)
+}
+
+/// V4 `LCS_CALIBRATED_RGB` encode.
+#[deprecated(
+    note = "use oxideav_bmp::encode with EncodeOptions::with_calibrated_rgb (IMAGE_CRATE_API)"
+)]
+pub fn encode_bmp_with_calibrated_rgb(
+    image: &BmpImage,
+    endpoints: [i32; 9],
+    gamma_rgb: [u32; 3],
+    options: EncodeOptions,
+) -> Result<Vec<u8>> {
+    let options =
+        options.with_calibrated_rgb(crate::options::CalibratedRgb::new(endpoints, gamma_rgb));
+    Ok(encode_image(image, &options)?.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -475,48 +538,24 @@ impl BmpBitfields {
     }
 }
 
-/// Encode a [`BmpImage`] as an explicit-mask `BI_BITFIELDS` /
-/// `BI_ALPHABITFIELDS` BMP using a 40-byte `BITMAPINFOHEADER` (V3) with
-/// the per-channel masks written as a 12-byte (RGB) or 16-byte (RGBA)
-/// tail immediately after the header — the classic Windows in-file mask
-/// layout, distinct from the V4/V5 in-header mask block the
-/// [`encode_bmp`] `Rgb565` path emits.
+/// Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` BMP using a
+/// 40-byte `BITMAPINFOHEADER` (V3) with the per-channel masks written
+/// as a 12-byte (RGB) or 16-byte (RGBA) tail immediately after the
+/// header — the classic Windows in-file mask layout, distinct from the
+/// V4 in-header mask block the `Rgb565` path emits.
 ///
-/// The source plane must be [`BmpPixelFormat::Rgba`] or
-/// [`BmpPixelFormat::Rgb24`]; each 8-bit channel is requantised down to
-/// the width of its mask and shifted into place. For a byte-aligned
-/// 32-bpp mask set ([`BmpBitfields::BGRA8888`] /
-/// [`BmpBitfields::BGRX8888`]) every channel keeps its full 8 bits so the
-/// round-trip through [`decode_bmp`] is bit-exact.
-///
-/// [`BmpEncodeOptions::top_down`] is honoured (negative `biHeight`);
-/// `minimal_palette` is irrelevant to direct-colour bitfields.
-pub fn encode_bmp_bitfields(
-    image: &BmpImage,
-    masks: BmpBitfields,
-    options: BmpEncodeOptions,
-) -> Result<Vec<u8>> {
-    if image.planes.is_empty() {
-        return Err(Error::invalid("BMP encoder: empty frame plane"));
-    }
-    encode_bmp_plane_bitfields(
-        &image.planes[0],
-        image.pixel_format,
-        masks,
-        image.width,
-        image.height,
-        options,
-    )
-}
-
-/// Plane-level variant of [`encode_bmp_bitfields`].
-pub fn encode_bmp_plane_bitfields(
-    plane: &BmpPlane,
+/// The source plane must be `Rgba` / `Rgb24` / `Bgra` / `Bgr24`; each
+/// 8-bit channel is requantised down to the width of its mask and
+/// shifted into place. For a byte-aligned 32-bpp mask set
+/// ([`BmpBitfields::BGRA8888`] / [`BmpBitfields::BGRX8888`]) every
+/// channel keeps its full 8 bits so the round-trip is bit-exact.
+fn encode_bitfields_plane(
+    plane: &Plane,
     format: BmpPixelFormat,
     masks: BmpBitfields,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     masks.validate()?;
     let pixels = pack_bitfields(plane, format, masks, width, height, options)?;
@@ -547,35 +586,31 @@ pub fn encode_bmp_plane_bitfields(
     Ok(out)
 }
 
-/// Pack `Rgba` / `Rgb24` source pixels into the on-disk word layout
-/// declared by `masks`, with 4-byte-aligned rows and the row order
-/// `options.top_down` requests.
-///
-/// Each source channel is an 8-bit sample. It is requantised to the bit
-/// width of its mask (`v >> (8 - n)`, the inverse of the decoder's
-/// `expand` shift-and-scale) and shifted up by the mask's trailing-zero
-/// count. A zero mask drops the channel. `Rgb24` input has no alpha, so
-/// an alpha mask receives the fully-opaque value `(1 << n) - 1`.
+/// Quantise `Rgba` / `Rgb24` / `Bgra` / `Bgr24` rows into the masked
+/// word layout, 4-byte row aligned, honouring `options.top_down`.
 fn pack_bitfields(
-    plane: &BmpPlane,
+    plane: &Plane,
     format: BmpPixelFormat,
     masks: BmpBitfields,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = plane.stride;
-    let in_bpp = match format {
-        BmpPixelFormat::Rgba => 4,
-        BmpPixelFormat::Rgb24 => 3,
+    let (in_bpp, bgr) = match format {
+        BmpPixelFormat::Rgba => (4, false),
+        BmpPixelFormat::Rgb24 => (3, false),
+        BmpPixelFormat::Bgra => (4, true),
+        BmpPixelFormat::Bgr24 => (3, true),
         other => {
-            return Err(Error::invalid(format!(
-                "BMP bitfields: source must be Rgba or Rgb24, got {other:?}"
+            return Err(Error::unsupported(format!(
+                "BMP bitfields: source must be Rgba / Rgb24 / Bgra / Bgr24, got {other:?}"
             )))
         }
     };
+    let (ri, bi) = if bgr { (2, 0) } else { (0, 2) };
     if plane.data.len() < in_stride * h {
         return Err(Error::invalid(
             "BMP encoder: frame plane truncated (bitfields)",
@@ -593,9 +628,9 @@ fn pack_bitfields(
         let src = &plane.data[src_y * in_stride..src_y * in_stride + w * in_bpp];
         let dst = &mut out[y * out_stride..y * out_stride + w * out_bpp_bytes];
         for x in 0..w {
-            let r = src[x * in_bpp];
+            let r = src[x * in_bpp + ri];
             let g = src[x * in_bpp + 1];
-            let b = src[x * in_bpp + 2];
+            let b = src[x * in_bpp + bi];
             let a = if in_bpp == 4 {
                 src[x * in_bpp + 3]
             } else {
@@ -603,16 +638,16 @@ fn pack_bitfields(
             };
             let mut word: u32 = 0;
             if rn > 0 {
-                word |= (quantise(r, rn) as u32) << rs;
+                word |= quantise(r, rn) << rs;
             }
             if gn > 0 {
-                word |= (quantise(g, gn) as u32) << gs;
+                word |= quantise(g, gn) << gs;
             }
             if bn > 0 {
-                word |= (quantise(b, bn) as u32) << bs;
+                word |= quantise(b, bn) << bs;
             }
             if an > 0 {
-                word |= (quantise(a, an) as u32) << as_;
+                word |= quantise(a, an) << as_;
             }
             let bytes = word.to_le_bytes();
             dst[x * out_bpp_bytes..x * out_bpp_bytes + out_bpp_bytes]
@@ -663,60 +698,28 @@ fn quantise(sample: u8, n: u32) -> u32 {
     }
 }
 
-/// Encode a `BmpImage` into a complete BMP file with a V5 header that
-/// declares an embedded ICC profile (`PROFILE_EMBEDDED`).
-///
-/// The V5 header (124 bytes) replaces the V3/V4 header the standard
-/// [`encode_bmp`] path would emit; `bV5CSType` is set to
-/// [`PROFILE_EMBEDDED`], `bV5ProfileData` points at the byte offset of
-/// the ICC blob from the start of the DIB (i.e. immediately after the
-/// pixel array), and `bV5ProfileSize` records the blob's length. The
-/// ICC bytes are written verbatim — no parsing or validation happens on
-/// the encoder side; the caller is responsible for supplying a real ICC
-/// 1.x / 2.x / 4.x profile.
-///
-/// Supported pixel formats:
-///
-/// * Direct-colour: [`BmpPixelFormat::Rgba`] (32-bit BGRA),
-///   [`BmpPixelFormat::Rgb24`] (24-bit BGR), [`BmpPixelFormat::Rgb555`]
-///   (16-bit `BI_RGB` 5-5-5 — high bit reserved, no mask block; the V5
-///   header's four-mask region stays zero), and [`BmpPixelFormat::Rgb565`]
-///   (16-bit `BI_BITFIELDS` 5-6-5 — the V5 header's four-mask region at
-///   offsets 40..56 carries the canonical R=0xF800 / G=0x07E0 / B=0x001F
-///   quadruple so no separate 12-byte mask tail is written before the
-///   pixel array).
-/// * Indexed: [`BmpPixelFormat::Indexed8`], [`BmpPixelFormat::Indexed4`],
-///   [`BmpPixelFormat::Indexed1`] — emitted always as uncompressed
-///   `BI_RGB` (V5 + RLE is not a documented pairing), with the colour
-///   table written between the 124-byte V5 header and the pixel array
-///   and `biClrUsed` set per [`BmpEncodeOptions::minimal_palette`]. The
-///   ICC blob still rides at `bV5ProfileData` immediately after the
-///   pixel array; `bfOffBits` skips the V5 header + palette to point at
-///   the pixels exactly the same way a V3 indexed BMP advertises its
-///   pixel-array offset.
-///
-/// `rendering_intent` is the V5 `bV5Intent` field. Use 0 for
-/// "unspecified" or one of the [`LCS_GM_*`](crate::LCS_GM_BUSINESS)
-/// constants. The encoder honours [`BmpEncodeOptions::top_down`]
-/// (negative `biHeight`) on every path and honours
-/// [`BmpEncodeOptions::minimal_palette`] on the indexed paths.
-///
-/// Roundtrips: [`decode_bmp_with_metadata`](crate::decode_bmp_with_metadata)
-/// reads the ICC blob back into [`BmpMetadata::icc_profile`](crate::BmpMetadata::icc_profile).
-pub fn encode_bmp_with_icc_profile(
+/// V5 header (124 bytes) with `bV5CSType = cs_type` (`PROFILE_EMBEDDED`
+/// or `PROFILE_LINKED`), `bV5ProfileData` pointing at `blob` placed
+/// immediately after the pixel array (and colour table for indexed
+/// input), `bV5ProfileSize = blob.len()`, `bV5Intent = rendering_intent`.
+/// Direct-colour input keeps its plain layout (32 / 24 / 16 bpp, the
+/// 5-6-5 masks in the V5 mask block); indexed input is written
+/// uncompressed with the colour table between header and pixels.
+fn encode_v5_profile(
     image: &BmpImage,
-    icc_profile: &[u8],
+    blob: &[u8],
+    cs_type: u32,
     rendering_intent: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     if image.planes.is_empty() {
         return Err(Error::invalid("BMP encoder: empty frame plane"));
     }
-    if image.pixel_format.is_indexed() {
+    if image.format.is_indexed() {
         return encode_bmp_v5_indexed_with_profile_blob(
             image,
-            icc_profile,
-            PROFILE_EMBEDDED,
+            blob,
+            cs_type,
             rendering_intent,
             options,
         );
@@ -724,13 +727,13 @@ pub fn encode_bmp_with_icc_profile(
     let plane = &image.planes[0];
     let width = image.width;
     let height = image.height;
-    let (pixels, bpp, compression, masks) = match image.pixel_format {
-        BmpPixelFormat::Rgba => {
-            let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
+    let (pixels, bpp, compression, masks) = match image.format {
+        BmpPixelFormat::Rgba | BmpPixelFormat::Bgra => {
+            let (p, _) = pack_rgba(plane, image.format, width, height, options)?;
             (p, 32u16, BI_RGB, RGBA32_ALPHA_MASK_V4_V5)
         }
-        BmpPixelFormat::Rgb24 => {
-            let (p, _) = pack_rgb24(plane, width, height, options)?;
+        BmpPixelFormat::Rgb24 | BmpPixelFormat::Bgr24 => {
+            let (p, _) = pack_rgb24(plane, image.format, width, height, options)?;
             (p, 24u16, BI_RGB, [0u32; 4])
         }
         BmpPixelFormat::Rgb555 => {
@@ -743,15 +746,15 @@ pub fn encode_bmp_with_icc_profile(
         }
         other => {
             return Err(Error::unsupported(format!(
-                "BMP encoder: V5 + ICC profile not yet supported for {other:?}",
+                "BMP encoder: V5 profile header not supported for {other:?}",
             )))
         }
     };
     // Layout:
     //   [BITMAPFILEHEADER 14 B]
-    //   [BITMAPV5HEADER 124 B]   ← `cs_type = PROFILE_EMBEDDED`
+    //   [BITMAPV5HEADER 124 B]   ← `cs_type`
     //   [pixel array]
-    //   [ICC blob, `icc_profile.len()` bytes]
+    //   [ICC blob, `blob.len()` bytes]
     //
     // `bV5ProfileData` is DIB-relative (i.e. 124 + pixel_bytes), and
     // `bV5ProfileSize` is the ICC blob length. The on-disk pixel
@@ -763,7 +766,7 @@ pub fn encode_bmp_with_icc_profile(
     // out of the header body and never needs a 12-byte tail before
     // the pixel array.
     let pixel_bytes = pixels.len() as u32;
-    let icc_bytes = icc_profile.len() as u32;
+    let icc_bytes = blob.len() as u32;
     let dib_size = BITMAPV5HEADER_SIZE + pixel_bytes + icc_bytes;
     let file_size = BITMAPFILEHEADER_SIZE + dib_size;
     let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE;
@@ -779,187 +782,42 @@ pub fn encode_bmp_with_icc_profile(
         pixel_bytes,
         compression,
         masks,
-        PROFILE_EMBEDDED,
+        cs_type,
         rendering_intent,
         profile_data_offset,
         icc_bytes,
     );
     out.extend_from_slice(&pixels);
-    out.extend_from_slice(icc_profile);
+    out.extend_from_slice(blob);
     Ok(out)
 }
 
-/// Encode a `BmpImage` into a complete BMP file with a V5 header that
-/// declares a *linked* ICC profile (`PROFILE_LINKED`) — the V5 header
-/// records the offset + length of a caller-supplied path-string blob
-/// rather than embedding the ICC bytes themselves.
-///
-/// The V5 layout matches [`encode_bmp_with_icc_profile`] byte-for-byte
-/// except that `bV5CSType` is set to [`PROFILE_LINKED`] (the four-byte
-/// `'LINK'` tag) and the blob that lives at
-/// `bV5ProfileData / bV5ProfileSize` carries the path of an external
-/// ICC profile file rather than the profile bytes themselves. The path
-/// encoding is system-dependent per the BMP spec — typically null-
-/// terminated ANSI on Windows; we surface the buffer the caller supplies
-/// verbatim so callers that need a different transport (UTF-16, URL)
-/// can pass whatever blob they choose. The decoder side already
-/// distinguishes `PROFILE_LINKED` from `PROFILE_EMBEDDED` in
-/// [`BmpMetadata::color_space`](crate::BmpMetadata::color_space) and
-/// surfaces the `profile_data_offset` / `profile_size` fields so the
-/// caller can resolve the path itself; the decoder never auto-loads
-/// the linked file.
-///
-/// Supported pixel formats: every format accepted by
-/// [`encode_bmp_with_icc_profile`] — [`BmpPixelFormat::Rgba`],
-/// [`BmpPixelFormat::Rgb24`], [`BmpPixelFormat::Rgb555`] (16-bit
-/// `BI_RGB` 5-5-5), [`BmpPixelFormat::Rgb565`], plus
-/// [`BmpPixelFormat::Indexed8`] / [`BmpPixelFormat::Indexed4`] /
-/// [`BmpPixelFormat::Indexed1`] (always written as uncompressed
-/// `BI_RGB`, with the colour table sitting between the V5 header and
-/// the pixel array). `rendering_intent`,
-/// [`BmpEncodeOptions::top_down`], and
-/// [`BmpEncodeOptions::minimal_palette`] all have the same meaning as on
-/// the embedded path. The linked-path blob is written verbatim; the
-/// caller is responsible for the path-string encoding and any null
-/// terminator the consumer expects.
-pub fn encode_bmp_with_linked_icc_profile(
-    image: &BmpImage,
-    linked_path: &[u8],
-    rendering_intent: u32,
-    options: BmpEncodeOptions,
-) -> Result<Vec<u8>> {
-    if image.planes.is_empty() {
-        return Err(Error::invalid("BMP encoder: empty frame plane"));
-    }
-    if image.pixel_format.is_indexed() {
-        return encode_bmp_v5_indexed_with_profile_blob(
-            image,
-            linked_path,
-            PROFILE_LINKED,
-            rendering_intent,
-            options,
-        );
-    }
-    let plane = &image.planes[0];
-    let width = image.width;
-    let height = image.height;
-    let (pixels, bpp, compression, masks) = match image.pixel_format {
-        BmpPixelFormat::Rgba => {
-            let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
-            (p, 32u16, BI_RGB, RGBA32_ALPHA_MASK_V4_V5)
-        }
-        BmpPixelFormat::Rgb24 => {
-            let (p, _) = pack_rgb24(plane, width, height, options)?;
-            (p, 24u16, BI_RGB, [0u32; 4])
-        }
-        BmpPixelFormat::Rgb555 => {
-            let (p, _) = pack_rgb555(plane, width, height, options)?;
-            (p, 16u16, BI_RGB, [0u32; 4])
-        }
-        BmpPixelFormat::Rgb565 => {
-            let (p, _) = pack_rgb565(plane, width, height, options)?;
-            (p, 16u16, BI_BITFIELDS, RGB565_MASKS_V5)
-        }
-        other => {
-            return Err(Error::unsupported(format!(
-                "BMP encoder: V5 + linked ICC profile not yet supported for {other:?}",
-            )))
-        }
-    };
-    // Same layout shape as the PROFILE_EMBEDDED path: the path blob
-    // sits where the ICC bytes would. `bV5CSType` distinguishes the
-    // two on the wire. The 16-bpp BI_BITFIELDS arm reuses the V5
-    // header's four-mask region (offsets 40..56) for the canonical
-    // R / G / B / A 5-6-5 layout — no separate 12-byte mask tail.
-    let pixel_bytes = pixels.len() as u32;
-    let path_bytes = linked_path.len() as u32;
-    let dib_size = BITMAPV5HEADER_SIZE + pixel_bytes + path_bytes;
-    let file_size = BITMAPFILEHEADER_SIZE + dib_size;
-    let pixel_offset = BITMAPFILEHEADER_SIZE + BITMAPV5HEADER_SIZE;
-    let profile_data_offset = BITMAPV5HEADER_SIZE + pixel_bytes;
-
-    let mut out = Vec::with_capacity(file_size as usize);
-    write_file_header(&mut out, file_size, pixel_offset);
-    write_dib_header_v5_with_profile(
-        &mut out,
-        width,
-        signed_stored_height(height, options),
-        bpp,
-        pixel_bytes,
-        compression,
-        masks,
-        PROFILE_LINKED,
-        rendering_intent,
-        profile_data_offset,
-        path_bytes,
-    );
-    out.extend_from_slice(&pixels);
-    out.extend_from_slice(linked_path);
-    Ok(out)
-}
-
-/// Encode a [`BmpImage`] into a complete BMP file carrying a 108-byte
-/// `BITMAPV4HEADER` with `bV4CSType = LCS_CALIBRATED_RGB` and the
-/// caller-supplied CIE endpoints + per-channel gamma.
-///
-/// `LCS_CALIBRATED_RGB` (value `0`) is the V4 colour-space mode in
-/// which the endpoint + gamma fields — rather than a named colour
-/// space (`LCS_sRGB`, …) or an embedded/linked ICC profile — define
-/// the bitmap's colour. Per the `BITMAPV4HEADER` documentation the
-/// `bV4Endpoints` `CIEXYZTRIPLE` carries the x / y / z coordinates of
-/// the red, green, and blue endpoints (nine `FXPT2DOT30` `LONG`s,
-/// packed R.x R.y R.z G.x G.y G.z B.x B.y B.z) and each of
-/// `bV4GammaRed` / `bV4GammaGreen` / `bV4GammaBlue` is the tone-
-/// response curve in unsigned 16.16 fixed point (upper 16 bits
-/// integer, lower 16 bits fraction). Both are ignored by a reader
-/// unless `bV4CSType == LCS_CALIBRATED_RGB`; this entry point always
-/// writes that tag.
-///
-/// `endpoints` is the nine-`i32` `CIEXYZTRIPLE` in the same packing
-/// the decoder surfaces as [`BmpMetadata::endpoints`](crate::BmpMetadata::endpoints);
-/// `gamma_rgb` is the `[GammaRed, GammaGreen, GammaBlue]` triple the
-/// decoder surfaces as [`BmpMetadata::gamma_rgb`](crate::BmpMetadata::gamma_rgb).
-/// A caller that only wants to *tag* the bitmap as calibrated without
-/// asserting specific primaries may pass all-zero endpoints + gamma.
-///
-/// Supported pixel formats: [`BmpPixelFormat::Rgba`] (32-bit BGRA
-/// `BI_RGB`), [`BmpPixelFormat::Rgb24`] (24-bit BGR `BI_RGB`),
-/// [`BmpPixelFormat::Rgb555`] (16-bit `BI_RGB` 5-5-5, high bit reserved,
-/// no mask block), [`BmpPixelFormat::Rgb565`] (16-bit `BI_BITFIELDS`
-/// 5-6-5, masks in the V4 four-mask region), and the indexed
-/// [`BmpPixelFormat::Indexed8`] / `Indexed4` / `Indexed1` (uncompressed
-/// `BI_RGB` with the colour table sitting between the V4 header and the
-/// pixel array). RLE is never chosen — like the V5 + ICC paths, the
-/// V4-calibrated path keeps the pixel array uncompressed so the header
-/// shape is deterministic. [`BmpEncodeOptions::top_down`] and
-/// [`BmpEncodeOptions::minimal_palette`] have the same meaning as on
-/// every other encode path.
-///
-/// The decoder round-trips this header: `decode_bmp_with_metadata`
-/// reports [`BmpColorSpace::Calibrated`](crate::BmpColorSpace::Calibrated)
-/// and returns the same endpoints + gamma the encoder was given.
-pub fn encode_bmp_with_calibrated_rgb(
+/// V4 header (108 bytes) with `bV4CSType = LCS_CALIBRATED_RGB`, the
+/// CIE endpoints and gamma triple written verbatim. Direct-colour input
+/// keeps its plain layout; indexed input is written uncompressed with
+/// the colour table between header and pixels.
+fn encode_v4_calibrated(
     image: &BmpImage,
     endpoints: [i32; 9],
     gamma_rgb: [u32; 3],
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     if image.planes.is_empty() {
         return Err(Error::invalid("BMP encoder: empty frame plane"));
     }
-    if image.pixel_format.is_indexed() {
+    if image.format.is_indexed() {
         return encode_bmp_v4_indexed_calibrated(image, endpoints, gamma_rgb, options);
     }
     let plane = &image.planes[0];
     let width = image.width;
     let height = image.height;
-    let (pixels, bpp, compression, masks) = match image.pixel_format {
-        BmpPixelFormat::Rgba => {
-            let (p, _) = pack_rgba(plane, image.pixel_format, width, height, options)?;
+    let (pixels, bpp, compression, masks) = match image.format {
+        BmpPixelFormat::Rgba | BmpPixelFormat::Bgra => {
+            let (p, _) = pack_rgba(plane, image.format, width, height, options)?;
             (p, 32u16, BI_RGB, RGBA32_ALPHA_MASK_V4_V5)
         }
-        BmpPixelFormat::Rgb24 => {
-            let (p, _) = pack_rgb24(plane, width, height, options)?;
+        BmpPixelFormat::Rgb24 | BmpPixelFormat::Bgr24 => {
+            let (p, _) = pack_rgb24(plane, image.format, width, height, options)?;
             (p, 24u16, BI_RGB, [0u32; 4])
         }
         BmpPixelFormat::Rgb555 => {
@@ -1003,7 +861,7 @@ pub fn encode_bmp_with_calibrated_rgb(
 }
 
 /// Indexed arm of [`encode_bmp_with_calibrated_rgb`]
-/// ([`BmpPixelFormat::Indexed8`] / `Indexed4` / `Indexed1`).
+/// ([`BmpPixelFormat::Pal8`] / `Indexed4` / `Indexed1`).
 ///
 /// Layout (file-byte offsets):
 /// * 0..14 `BITMAPFILEHEADER`
@@ -1018,13 +876,13 @@ fn encode_bmp_v4_indexed_calibrated(
     image: &BmpImage,
     endpoints: [i32; 9],
     gamma_rgb: [u32; 3],
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let plane = &image.planes[0];
     let width = image.width;
     let height = image.height;
-    let bpp: u16 = match image.pixel_format {
-        BmpPixelFormat::Indexed8 => 8,
+    let bpp: u16 = match image.format {
+        BmpPixelFormat::Pal8 => 8,
         BmpPixelFormat::Indexed4 => 4,
         BmpPixelFormat::Indexed2 => 2,
         BmpPixelFormat::Indexed1 => 1,
@@ -1079,7 +937,7 @@ fn encode_bmp_v4_indexed_calibrated(
 }
 
 /// Shared V5 + profile-blob assembler for the indexed encode paths
-/// ([`BmpPixelFormat::Indexed8`] / `Indexed4` / `Indexed1`). Both the
+/// ([`BmpPixelFormat::Pal8`] / `Indexed4` / `Indexed1`). Both the
 /// embedded (`PROFILE_EMBEDDED`) and linked (`PROFILE_LINKED`) public
 /// entry points dispatch here when the input carries a palette; the
 /// only thing that changes between the two is the `cs_type` tag and
@@ -1107,13 +965,13 @@ fn encode_bmp_v5_indexed_with_profile_blob(
     blob: &[u8],
     cs_type: u32,
     rendering_intent: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let plane = &image.planes[0];
     let width = image.width;
     let height = image.height;
-    let bpp: u16 = match image.pixel_format {
-        BmpPixelFormat::Indexed8 => 8,
+    let bpp: u16 = match image.format {
+        BmpPixelFormat::Pal8 => 8,
         BmpPixelFormat::Indexed4 => 4,
         BmpPixelFormat::Indexed2 => 2,
         BmpPixelFormat::Indexed1 => 1,
@@ -1180,18 +1038,27 @@ fn encode_bmp_v5_indexed_with_profile_blob(
 /// * Append a 1-bit AND mask derived from the frame's alpha channel:
 ///   alpha == 0 ⇒ 1 (transparent), alpha != 0 ⇒ 0 (opaque).
 ///
-/// When `false`, the output is a plain 32bpp DIB suitable for embedding
+/// When `false`, the output is a plain DIB suitable for embedding
 /// wherever someone expects a Windows DIB (clipboard, registry blob, …).
 ///
-/// For indexed and 16-bit formats the DIB path always uses the
-/// uncompressed form (RLE + ICO mask interaction is undefined).
+/// `Rgba` / `Rgb24` / `Bgra` / `Bgr24` input is written as 32-bit BGRA;
+/// the 16-bit and indexed layouts keep their depth. The DIB path is
+/// always bottom-up and uncompressed (RLE + ICO mask interaction is
+/// undefined) and never writes the V4 / V5 colour fields; the indexed
+/// layouts need a palette on the image.
 pub fn encode_dib(image: &BmpImage, double_height_for_ico_mask: bool) -> Result<Vec<u8>> {
     if image.planes.is_empty() {
         return Err(Error::invalid("BMP encoder: empty frame plane"));
     }
-    encode_dib_plane(
+    if image.format.is_indexed() && image.palette.is_none() {
+        return Err(Error::invalid(format!(
+            "BMP encoder: {:?} requires a palette",
+            image.format
+        )));
+    }
+    encode_dib_impl(
         &image.planes[0],
-        image.pixel_format,
+        image.format,
         image.palette.as_ref(),
         image.width,
         image.height,
@@ -1199,100 +1066,41 @@ pub fn encode_dib(image: &BmpImage, double_height_for_ico_mask: bool) -> Result<
     )
 }
 
-/// Encode a `VideoFrame` into a complete BMP file. Compatibility
-/// wrapper around [`encode_bmp_plane`] for `oxideav-core`-using
-/// callers (e.g. `oxideav-ico`); only available with the default
-/// `registry` feature.
-#[cfg(feature = "registry")]
-pub fn encode_bmp_videoframe(
-    frame: &oxideav_core::VideoFrame,
-    format: PixelFormat,
-    width: u32,
-    height: u32,
-) -> oxideav_core::Result<Vec<u8>> {
-    let bmp_format = match format {
-        PixelFormat::Rgba => BmpPixelFormat::Rgba,
-        PixelFormat::Rgb24 => BmpPixelFormat::Rgb24,
-        other => {
-            return Err(oxideav_core::Error::invalid(format!(
-                "BMP encoder: unsupported pixel format {other:?}"
-            )))
-        }
-    };
-    if frame.planes.is_empty() {
-        return Err(oxideav_core::Error::invalid(
-            "BMP encoder: empty frame plane",
-        ));
-    }
-    let plane = BmpPlane {
-        stride: frame.planes[0].stride,
-        data: frame.planes[0].data.clone(),
-    };
-    let (bytes, _) = encode_bmp_plane(&plane, bmp_format, None, width, height)?;
-    Ok(bytes)
-}
-
-/// Encode a `VideoFrame` into a headerless DIB. Compatibility wrapper
-/// around [`encode_dib_plane`] for `oxideav-core`-using callers (e.g.
-/// `oxideav-ico`); only available with the default `registry` feature.
-#[cfg(feature = "registry")]
-pub fn encode_dib_videoframe(
-    frame: &oxideav_core::VideoFrame,
-    format: PixelFormat,
+/// Plane-level headerless-DIB encode.
+#[deprecated(
+    note = "build a BmpImage (BmpImage::new / with_palette) and use oxideav_bmp::encode_dib (IMAGE_CRATE_API)"
+)]
+#[allow(deprecated)]
+pub fn encode_dib_plane(
+    plane: &Plane,
+    format: BmpPixelFormat,
+    palette: Option<&crate::image::BmpPalette>,
     width: u32,
     height: u32,
     double_height_for_ico_mask: bool,
-) -> oxideav_core::Result<Vec<u8>> {
-    let bmp_format = match format {
-        PixelFormat::Rgba => BmpPixelFormat::Rgba,
-        PixelFormat::Rgb24 => BmpPixelFormat::Rgb24,
-        other => {
-            return Err(oxideav_core::Error::invalid(format!(
-                "BMP encoder: unsupported pixel format {other:?}"
-            )))
-        }
-    };
-    if frame.planes.is_empty() {
-        return Err(oxideav_core::Error::invalid(
-            "BMP encoder: empty frame plane",
-        ));
-    }
-    let plane = BmpPlane {
-        stride: frame.planes[0].stride,
-        data: frame.planes[0].data.clone(),
-    };
-    Ok(encode_dib_plane(
-        &plane,
-        bmp_format,
-        None,
-        width,
-        height,
-        double_height_for_ico_mask,
-    )?)
+) -> Result<Vec<u8>> {
+    let image = plane_image(plane, format, palette, width, height)?;
+    encode_dib(&image, double_height_for_ico_mask)
 }
 
-/// Encode a single [`BmpPlane`] into a headerless DIB. Lower-level
-/// than [`encode_dib`] for callers that already have plane bytes laid
-/// out without a wrapping [`BmpImage`].
-///
-/// `palette` is required for [`BmpPixelFormat::Indexed8`] and
-/// [`BmpPixelFormat::Indexed4`]; ignored otherwise.
-///
-/// For indexed formats the DIB is always written uncompressed (no RLE)
-/// since RLE + ICO AND-mask interaction is undefined.
-pub fn encode_dib_plane(
-    plane: &BmpPlane,
+/// Headerless DIB: `BITMAPINFOHEADER` (V4 for `Rgb565`) + colour table +
+/// pixels (+ AND mask).
+fn encode_dib_impl(
+    plane: &Plane,
     format: BmpPixelFormat,
-    palette: Option<&BmpPalette>,
+    palette: Option<&Palette>,
     width: u32,
     height: u32,
     double_height_for_ico_mask: bool,
 ) -> Result<Vec<u8>> {
     // DIB path is always bottom-up (the AND-mask convention assumes
     // bottom-up XOR pixels; nothing in `oxideav-ico` requests top-down).
-    let opts = BmpEncodeOptions::default();
+    let opts = &EncodeOptions::default();
     match format {
-        BmpPixelFormat::Rgba | BmpPixelFormat::Rgb24 => {
+        BmpPixelFormat::Rgba
+        | BmpPixelFormat::Rgb24
+        | BmpPixelFormat::Bgra
+        | BmpPixelFormat::Bgr24 => {
             // Classic 32-bpp BGRA DIB path (used by oxideav-ico).
             let (pixels, _) = pack_rgba(plane, format, width, height, opts)?;
             let w = width;
@@ -1345,7 +1153,7 @@ pub fn encode_dib_plane(
             out.extend_from_slice(&pixels);
             Ok(out)
         }
-        BmpPixelFormat::Indexed8 => {
+        BmpPixelFormat::Pal8 => {
             let pal = palette
                 .ok_or_else(|| Error::invalid("BMP encoder: Indexed8 requires a palette"))?;
             let (pixels, _) = pack_indexed(plane, 8, width, height, opts)?;
@@ -1415,7 +1223,7 @@ pub fn encode_dib_plane(
 /// Stored signed `biHeight` for a given output height + layout choice.
 /// Bottom-up DIBs encode the absolute height; top-down DIBs encode its
 /// negation per the BMP spec's signed-height convention.
-fn signed_stored_height(h: u32, options: BmpEncodeOptions) -> i32 {
+fn signed_stored_height(h: u32, options: &EncodeOptions) -> i32 {
     if options.top_down {
         -(h as i32)
     } else {
@@ -1425,21 +1233,21 @@ fn signed_stored_height(h: u32, options: BmpEncodeOptions) -> i32 {
 
 /// Encode 32-bit BGRA or 24-bit BGR `BI_RGB` BMP (no palette).
 fn encode_direct(
-    plane: &BmpPlane,
+    plane: &Plane,
     format: BmpPixelFormat,
     width: u32,
     height: u32,
     compression: u32,
-    _palette: Option<&BmpPalette>,
-    options: BmpEncodeOptions,
+    _palette: Option<&Palette>,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let (pixels, bpp) = match format {
-        BmpPixelFormat::Rgba => {
+        BmpPixelFormat::Rgba | BmpPixelFormat::Bgra => {
             let (p, _) = pack_rgba(plane, format, width, height, options)?;
             (p, 32u16)
         }
-        BmpPixelFormat::Rgb24 => {
-            let (p, _) = pack_rgb24(plane, width, height, options)?;
+        BmpPixelFormat::Rgb24 | BmpPixelFormat::Bgr24 => {
+            let (p, _) = pack_rgb24(plane, format, width, height, options)?;
             (p, 24u16)
         }
         _ => return Err(Error::invalid("BMP encode_direct: unsupported format")),
@@ -1476,10 +1284,10 @@ fn encode_direct(
 /// per pixel, so the packer only re-strides them to the 4-byte-aligned
 /// on-disk row pitch.
 fn encode_rgb555(
-    plane: &BmpPlane,
+    plane: &Plane,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let (pixels, _) = pack_rgb555(plane, width, height, options)?;
     let pixel_bytes = pixels.len() as u32;
@@ -1501,10 +1309,10 @@ fn encode_rgb555(
 
 /// Encode 16-bit RGB 5-6-5 BI_BITFIELDS (V4 header) BMP.
 fn encode_rgb565(
-    plane: &BmpPlane,
+    plane: &Plane,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<Vec<u8>> {
     let (pixels, _) = pack_rgb565(plane, width, height, options)?;
     let pixel_bytes = pixels.len() as u32;
@@ -1527,15 +1335,15 @@ fn encode_rgb565(
 /// under a negative `biHeight`. Fall back to the uncompressed indexed
 /// path so the output stays spec-compliant.
 fn encode_indexed8_auto(
-    plane: &BmpPlane,
-    palette: &BmpPalette,
+    plane: &Plane,
+    palette: &Palette,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
     let (raw_pixels, _) = pack_indexed(plane, 8, width, height, options)?;
 
-    if !options.top_down {
+    if options.rle && !options.top_down {
         // Try RLE8 only when bottom-up. `rle8_encode` returns `Some` only
         // when the stream came out strictly smaller than the raw array.
         if let Some(rle_pixels) = rle8_encode(&raw_pixels, width, height, raw_pixels.len()) {
@@ -1552,15 +1360,15 @@ fn encode_indexed8_auto(
 /// Top-down skips RLE for the same reason as
 /// [`encode_indexed8_auto`].
 fn encode_indexed4_auto(
-    plane: &BmpPlane,
-    palette: &BmpPalette,
+    plane: &Plane,
+    palette: &Palette,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
     let (raw_pixels, _) = pack_indexed(plane, 4, width, height, options)?;
 
-    if !options.top_down {
+    if options.rle && !options.top_down {
         if let Some(rle_pixels) = rle4_encode(&raw_pixels, width, height, raw_pixels.len()) {
             let file = build_indexed_bmp(width, height, 4, BI_RLE4, palette, &rle_pixels, options);
             return Ok((file, EncodedBmpFormat::Rle4));
@@ -1578,7 +1386,7 @@ fn encode_indexed4_auto(
 /// index space); otherwise the classic full `2^bpp` table is emitted.
 /// A `minimal_palette` table is never shrunk below 1 entry — a
 /// zero-entry colour table is meaningless for an indexed bitmap.
-fn written_palette_entries(bpp: u16, palette: &BmpPalette, options: BmpEncodeOptions) -> usize {
+fn written_palette_entries(bpp: u16, palette: &Palette, options: &EncodeOptions) -> usize {
     let full = palette_entry_count(bpp);
     if options.minimal_palette {
         palette.entries.len().clamp(1, full)
@@ -1593,9 +1401,9 @@ fn build_indexed_bmp(
     height: u32,
     bpp: u16,
     compression: u32,
-    palette: &BmpPalette,
+    palette: &Palette,
     pixel_data: &[u8],
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Vec<u8> {
     let entries = written_palette_entries(bpp, palette, options);
     let palette_bytes = (entries * 4) as u32;
@@ -1626,7 +1434,7 @@ fn build_indexed_bmp(
 /// in the BMP file holds the bottom of the picture. Top-down DIBs
 /// preserve source ordering — destination row 0 IS source row 0.
 #[inline]
-fn source_row(y: usize, h: usize, options: BmpEncodeOptions) -> usize {
+fn source_row(y: usize, h: usize, options: &EncodeOptions) -> usize {
     if options.top_down {
         y
     } else {
@@ -1638,19 +1446,25 @@ fn source_row(y: usize, h: usize, options: BmpEncodeOptions) -> usize {
 /// matches the layout requested by `options` — bottom-up by default,
 /// top-down when `options.top_down` is set.
 fn pack_rgba(
-    plane: &BmpPlane,
+    plane: &Plane,
     format: BmpPixelFormat,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = plane.stride;
-    let in_bpp = match format {
-        BmpPixelFormat::Rgba => 4,
-        BmpPixelFormat::Rgb24 => 3,
-        _ => return Err(Error::invalid("pack_rgba: format is not Rgba or Rgb24")),
+    let (in_bpp, bgr) = match format {
+        BmpPixelFormat::Rgba => (4, false),
+        BmpPixelFormat::Rgb24 => (3, false),
+        BmpPixelFormat::Bgra => (4, true),
+        BmpPixelFormat::Bgr24 => (3, true),
+        _ => {
+            return Err(Error::invalid(
+                "pack_rgba: format is not Rgba / Rgb24 / Bgra / Bgr24",
+            ))
+        }
     };
     if plane.data.len() < in_stride * h {
         return Err(Error::invalid("BMP encoder: frame plane truncated"));
@@ -1664,19 +1478,29 @@ fn pack_rgba(
         // Hoist the format branch out of the per-pixel loop and iterate
         // with `chunks_exact` so the compiler drops the per-byte bounds
         // checks (and can vectorise the fixed 3/4-byte shuffle).
-        if in_bpp == 4 {
-            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                d[0] = s[2];
-                d[1] = s[1];
-                d[2] = s[0];
-                d[3] = s[3];
+        match (in_bpp, bgr) {
+            (4, false) => {
+                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                    d[0] = s[2];
+                    d[1] = s[1];
+                    d[2] = s[0];
+                    d[3] = s[3];
+                }
             }
-        } else {
-            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
-                d[0] = s[2];
-                d[1] = s[1];
-                d[2] = s[0];
-                d[3] = 0xFF;
+            (4, true) => dst.copy_from_slice(src),
+            (_, false) => {
+                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+                    d[0] = s[2];
+                    d[1] = s[1];
+                    d[2] = s[0];
+                    d[3] = 0xFF;
+                }
+            }
+            (_, true) => {
+                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+                    d[..3].copy_from_slice(s);
+                    d[3] = 0xFF;
+                }
             }
         }
     }
@@ -1686,17 +1510,26 @@ fn pack_rgba(
 /// Pack RGBA or RGB24 input to 24-bit BGR rows (4-byte row aligned).
 /// Row order honours `options.top_down`.
 fn pack_rgb24(
-    plane: &BmpPlane,
+    plane: &Plane,
+    format: BmpPixelFormat,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
     let in_stride = plane.stride;
-    // Input may be Rgba (4 bpp) or Rgb24 (3 bpp) — detect from stride.
-    // We accept any stride >= w*3.
-    let in_bpp = if in_stride >= w * 4 { 4 } else { 3 };
+    let (in_bpp, bgr) = match format {
+        BmpPixelFormat::Rgba => (4, false),
+        BmpPixelFormat::Rgb24 => (3, false),
+        BmpPixelFormat::Bgra => (4, true),
+        BmpPixelFormat::Bgr24 => (3, true),
+        _ => {
+            return Err(Error::invalid(
+                "pack_rgb24: format is not Rgba / Rgb24 / Bgra / Bgr24",
+            ))
+        }
+    };
     if plane.data.len() < in_stride * h {
         return Err(Error::invalid("BMP encoder: frame plane truncated (rgb24)"));
     }
@@ -1708,10 +1541,16 @@ fn pack_rgb24(
         let dst = &mut out[y * out_stride..y * out_stride + w * 3];
         // `chunks_exact` on both sides elides the per-byte bounds checks;
         // the source step is `in_bpp` (3 or 4), the dest step a packed 3.
-        for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(in_bpp)) {
-            d[0] = s[2];
-            d[1] = s[1];
-            d[2] = s[0];
+        if bgr {
+            for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(in_bpp)) {
+                d.copy_from_slice(&s[..3]);
+            }
+        } else {
+            for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(in_bpp)) {
+                d[0] = s[2];
+                d[1] = s[1];
+                d[2] = s[0];
+            }
         }
     }
     Ok((out, out_stride))
@@ -1721,10 +1560,10 @@ fn pack_rgb24(
 /// output rows. Row order honours `options.top_down`. Passes through
 /// the 16-bit pixels verbatim.
 fn pack_rgb555(
-    plane: &BmpPlane,
+    plane: &Plane,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
@@ -1750,10 +1589,10 @@ fn pack_rgb555(
 }
 
 fn pack_rgb565(
-    plane: &BmpPlane,
+    plane: &Plane,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
@@ -1787,11 +1626,11 @@ fn pack_rgb565(
 /// For 1-bit: input is 1 byte per pixel (index 0 or 1, treated as
 ///   `byte & 1`); packing into MSB-first bytes is done here.
 fn pack_indexed(
-    plane: &BmpPlane,
+    plane: &Plane,
     bpp: usize,
     width: u32,
     height: u32,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) -> Result<(Vec<u8>, usize)> {
     let w = width as usize;
     let h = height as usize;
@@ -2087,7 +1926,7 @@ fn write_dib_header_v3_indexed(
     stored_height: i32,
     bpp: u16,
     compression: u32,
-    palette: &BmpPalette,
+    palette: &Palette,
     entries: usize,
 ) {
     let image_size: u32 = 0; // valid for BI_RGB; RLE size is embedded in the pixel data
@@ -2362,7 +2201,7 @@ fn write_dib_header_v5_indexed_with_profile(
 /// under this one in the XOR mask is TRANSPARENT", matching every
 /// `ICO` file you'll find in the wild.
 fn build_and_mask_from_alpha(
-    plane: &BmpPlane,
+    plane: &Plane,
     format: BmpPixelFormat,
     width: u32,
     height: u32,
@@ -2373,17 +2212,9 @@ fn build_and_mask_from_alpha(
     let mut mask = vec![0u8; stride * h];
     let in_stride = plane.stride;
     let bpp = match format {
-        BmpPixelFormat::Rgba => 4,
-        BmpPixelFormat::Rgb24 | BmpPixelFormat::Rgb555 | BmpPixelFormat::Rgb565 => {
-            // No alpha → fully opaque → all-zero AND mask. Short-circuit.
-            return Ok(mask);
-        }
-        BmpPixelFormat::Indexed8
-        | BmpPixelFormat::Indexed4
-        | BmpPixelFormat::Indexed2
-        | BmpPixelFormat::Indexed1 => {
-            return Ok(mask);
-        }
+        BmpPixelFormat::Rgba | BmpPixelFormat::Bgra => 4,
+        // No alpha → fully opaque → all-zero AND mask. Short-circuit.
+        _ => return Ok(mask),
     };
     for y in 0..h {
         let src_y = h - 1 - y; // match the bottom-up XOR layout

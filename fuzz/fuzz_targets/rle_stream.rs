@@ -3,7 +3,7 @@
 //! Focused fuzz target for the BI_RLE8 / BI_RLE4 state machines.
 //!
 //! The existing `decode` target feeds arbitrary bytes into the full
-//! `decode_bmp` surface, which means a large fraction of every fuzz
+//! `decode` surface, which means a large fraction of every fuzz
 //! iteration is spent satisfying the `BM` signature, the 14-byte
 //! BITMAPFILEHEADER, and the 40-byte BITMAPINFOHEADER before the
 //! fuzzer ever reaches the RLE pixel payload. That dilutes coverage of
@@ -37,7 +37,7 @@
 //! chosen compression / bpp / dimensions + a maximal colour table
 //! (256 × `RGBQUAD` for RLE8, 16 × `RGBQUAD` for RLE4) so palette
 //! lookups never go out of bounds for any byte the fuzzer feeds. The
-//! result is fed through the public `decode_bmp` exactly like a real
+//! result is fed through the public `decode` exactly like a real
 //! file would be, so any panic / index OOB / debug-mode integer
 //! overflow / OOM-abort surfaces as a crash.
 //!
@@ -46,7 +46,7 @@
 //! generic `decode` target.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::decode_bmp;
+use oxideav_bmp::decode;
 
 const BITMAPFILEHEADER_SIZE: usize = 14;
 const BITMAPINFOHEADER_SIZE: usize = 40;
@@ -126,5 +126,8 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let bmp = build_bmp(compression, bpp, width, height, payload);
-    let _ = decode_bmp(&bmp);
+    if let Ok(img) = decode(&bmp) {
+        // RLE decodes to `Pal8`; expand through the palette too.
+        let _ = img.to_rgba8();
+    }
 });

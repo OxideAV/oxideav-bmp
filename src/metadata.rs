@@ -8,12 +8,11 @@
 //! pair of fields that point at an external ICC profile (`PROFILE_LINKED`)
 //! or an embedded one (`PROFILE_EMBEDDED`) carried after the pixel array.
 //!
-//! Decoder consumers can keep using [`crate::decode_bmp`] /
-//! [`crate::decode_dib`] when they only want pixels. Callers that want
-//! the V4/V5 colour-space tail too use [`crate::decode_bmp_with_metadata`]
-//! / [`crate::decode_dib_with_metadata`] instead — those return both the
-//! same [`crate::BmpImage`] *and* the parsed [`BmpMetadata`] alongside it,
-//! so the metadata path stays additive to the existing API surface.
+//! [`crate::decode`] puts the contract view of this on the image
+//! ([`crate::BmpImage::color`] / [`crate::BmpImage::metadata`]). The
+//! full header record is a separate header-only parse:
+//! [`BmpMetadata::from_bmp`] for a file, [`BmpMetadata::from_dib`] for
+//! a headerless DIB.
 
 use crate::types::{
     DibHeader, Os2Header2Raw, BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE, LCS_CALIBRATED_RGB,
@@ -310,9 +309,9 @@ pub struct BmpMetadata {
     /// Embedded ICC profile bytes when [`color_space`](Self::color_space)
     /// is [`BmpColorSpace::ProfileEmbedded`]. Decoded from
     /// `whole[BITMAPFILEHEADER_SIZE + profile_data_offset..][..profile_size]`
-    /// for [`crate::decode_bmp_with_metadata`] and from
+    /// for [`BmpMetadata::from_bmp`] and from
     /// `dib[profile_data_offset..][..profile_size]` for
-    /// [`crate::decode_dib_with_metadata`]. `None` for every other CS
+    /// [`BmpMetadata::from_dib`]. `None` for every other CS
     /// type (and for `ProfileEmbedded` cases where the bytes lie about
     /// the offset / size and the slice falls past EOF — the metadata
     /// fields are still populated so callers can inspect what was
@@ -381,11 +380,25 @@ pub struct BmpMetadata {
 }
 
 impl BmpMetadata {
+    /// Parse the header metadata of a complete BMP file (`BM` signature,
+    /// file header, DIB header) without decoding pixels. The V5 profile
+    /// slot is sliced out of `input` when it fits (see
+    /// [`Self::icc_profile`] / [`Self::linked_profile_path`]).
+    pub fn from_bmp(input: &[u8]) -> crate::error::Result<Self> {
+        crate::decoder::bmp_metadata_file(input)
+    }
+
+    /// Parse the header metadata of a headerless DIB (`BITMAPINFOHEADER`
+    /// followed by pixels) without decoding pixels. The V5 profile offset
+    /// is interpreted relative to the DIB start (`input[0..]`).
+    pub fn from_dib(input: &[u8]) -> crate::error::Result<Self> {
+        crate::decoder::bmp_metadata_dib(input)
+    }
+
     /// Build a [`BmpMetadata`] from a parsed [`DibHeader`] *without*
     /// populating the embedded ICC profile bytes. Used by both the
-    /// `decode_bmp_with_metadata` and `decode_dib_with_metadata` paths,
-    /// which then fill `icc_profile` from the input slice the caller
-    /// passed in.
+    /// [`Self::from_bmp`] and [`Self::from_dib`] paths, which then fill
+    /// `icc_profile` from the input slice the caller passed in.
     pub(crate) fn from_header(header: &DibHeader) -> Self {
         // V4+ headers always carry the cs_type / endpoints / gamma
         // fields (even if the cs_type says "embedded profile", at which

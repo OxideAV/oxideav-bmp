@@ -23,9 +23,14 @@
 //! decoder contract is "return a `Result`, never panic, never
 //! allocate what the input cannot back".
 
+// The pre-contract entry points exercised here are the deprecated
+// wrappers (IMAGE_CRATE_API migration); this file is their regression
+// gate until they are removed.
+#![allow(deprecated)]
+
 use oxideav_bmp::types::{BI_RLE4, BI_RLE8};
 use oxideav_bmp::{
-    decode_bmp, decode_dib, encode_bmp, BmpImage, BmpPixelFormat, BmpPlane, BITMAPFILEHEADER_SIZE,
+    decode_bmp, decode_dib, encode_bmp, BmpImage, BmpPixelFormat, Plane, BITMAPFILEHEADER_SIZE,
     BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BI_ALPHABITFIELDS, BI_BITFIELDS,
 };
 
@@ -172,17 +177,13 @@ fn alphabitfields_hostile_alpha_does_not_panic() {
 /// in-header masks: no combination may panic.
 #[test]
 fn v4_inheader_hostile_masks_do_not_panic() {
-    let img = BmpImage {
-        width: 6,
-        height: 4,
-        pixel_format: BmpPixelFormat::Rgb565,
-        planes: vec![BmpPlane {
-            stride: 12,
-            data: (0..48u8).collect(),
-        }],
-        palette: None,
-        pts: None,
-    };
+    let img = BmpImage::new(
+        6,
+        4,
+        BmpPixelFormat::Rgb565,
+        vec![Plane::new(12, (0..48u8).collect())],
+    )
+    .unwrap();
     let baseline = encode_bmp(&img).unwrap().0;
     assert_eq!(
         u32::from_le_bytes(baseline[14..18].try_into().unwrap()),

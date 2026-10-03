@@ -25,11 +25,39 @@
 //!     XOR+AND layout, which halves the height and walks a trailing
 //!     1bpp AND mask.
 
+//!
+//! Contract surface (IMAGE_CRATE_API): `probe` is total, `info` is
+//! header-only, `decode` / `decode_with` return the native layout and
+//! `decode_rgb8` / `decode_rgba8` exercise every `to_rgb8` / `to_rgba8`
+//! kernel on whatever the decoder produced. A tight `DecodeOptions`
+//! limit set runs alongside the defaults so the limit checks see the
+//! same hostile headers.
+
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::{decode_bmp, decode_dib};
+use oxideav_bmp::{
+    decode, decode_dib, decode_dib_with, decode_rgb8, decode_rgba8, decode_with, info, probe,
+    DecodeOptions,
+};
 
 fuzz_target!(|data: &[u8]| {
-    let _ = decode_bmp(data);
+    let _ = probe(data);
+    let _ = info(data);
+    if let Ok(img) = decode(data) {
+        let rgba = img.to_rgba8();
+        assert_eq!(rgba.len(), img.width as usize * img.height as usize * 4);
+        let rgb = img.to_rgb8();
+        assert_eq!(rgb.len(), img.width as usize * img.height as usize * 3);
+    }
+    let tight = DecodeOptions::default()
+        .with_max_width(512u32)
+        .with_max_height(512u32)
+        .with_max_pixels(1u64 << 16)
+        .with_max_bytes(1u64 << 20)
+        .with_strict(true);
+    let _ = decode_with(data, &tight);
+    let _ = decode_rgb8(data);
+    let _ = decode_rgba8(data);
     let _ = decode_dib(data, false);
     let _ = decode_dib(data, true);
+    let _ = decode_dib_with(data, true, &tight);
 });

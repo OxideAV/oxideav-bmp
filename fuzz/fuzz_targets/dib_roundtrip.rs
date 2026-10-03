@@ -43,35 +43,32 @@
 //!     palette entries (3 B each) for indexed formats.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::{decode_dib, encode_dib, BmpImage, BmpPalette, BmpPixelFormat, BmpPlane};
+use oxideav_bmp::{decode_dib, encode_dib, BmpImage, Palette, BmpPixelFormat, Plane};
 
 const MAX_DIM: u32 = 64;
 
 fn pick_format(byte: u8) -> BmpPixelFormat {
-    match byte % 8 {
+    match byte % 10 {
         0 => BmpPixelFormat::Rgba,
         1 => BmpPixelFormat::Rgb24,
         2 => BmpPixelFormat::Rgb555,
         3 => BmpPixelFormat::Rgb565,
-        4 => BmpPixelFormat::Indexed8,
+        4 => BmpPixelFormat::Pal8,
         5 => BmpPixelFormat::Indexed4,
         6 => BmpPixelFormat::Indexed2,
+        7 => BmpPixelFormat::Bgra,
+        8 => BmpPixelFormat::Bgr24,
         _ => BmpPixelFormat::Indexed1,
     }
 }
 
 fn bytes_per_pixel(format: BmpPixelFormat) -> usize {
-    match format {
-        BmpPixelFormat::Rgba => 4,
-        BmpPixelFormat::Rgb24 => 3,
-        BmpPixelFormat::Rgb555 | BmpPixelFormat::Rgb565 => 2,
-        _ => 1,
-    }
+    format.bytes_per_pixel()
 }
 
 fn palette_cap(format: BmpPixelFormat) -> usize {
     match format {
-        BmpPixelFormat::Indexed8 => 256,
+        BmpPixelFormat::Pal8 => 256,
         BmpPixelFormat::Indexed4 => 16,
         BmpPixelFormat::Indexed2 => 4,
         BmpPixelFormat::Indexed1 => 2,
@@ -113,21 +110,11 @@ fuzz_target!(|data: &[u8]| {
             while entries.len() < cap {
                 entries.push([0, 0, 0]);
             }
-            Some(BmpPalette { entries })
+            Some(Palette::from_rgb(&entries))
         }
     };
 
-    let image = BmpImage {
-        width,
-        height,
-        pixel_format: format,
-        planes: vec![BmpPlane {
-            stride,
-            data: pixels,
-        }],
-        palette,
-        pts: None,
-    };
+    let image = BmpImage::new(width, height, format, vec![Plane::new(stride, pixels)]).unwrap().with_palette(palette);
 
     let encoded = match encode_dib(&image, ico_mask) {
         Ok(bytes) => bytes,
@@ -138,13 +125,16 @@ fuzz_target!(|data: &[u8]| {
     let decoded = decode_dib(&encoded, ico_mask).expect("encode_dib output must decode back");
     assert_eq!(decoded.width, width, "decoded width mismatch");
     assert_eq!(decoded.height, height, "decoded height mismatch");
-    assert_eq!(decoded.pixel_format, BmpPixelFormat::Rgba);
-
-    // Plain 32-bpp BGRA keeps every byte.
-    if format == BmpPixelFormat::Rgba && !ico_mask {
+    if ico_mask {
+        // The AND mask is folded into alpha, so the result is `Rgba`.
+        assert_eq!(decoded.format, BmpPixelFormat::Rgba);
+    } else {
+        // Plain DIB: the picture round-trips exactly (the 32-bpp path
+        // keeps every byte, the others store their words verbatim).
         assert_eq!(
-            decoded.planes[0].data, image.planes[0].data,
-            "Rgba pixels diverged through the plain-DIB path",
+            decoded.to_rgba8(),
+            image.to_rgba8(),
+            "pixels diverged through the plain-DIB path ({format:?})",
         );
     }
 

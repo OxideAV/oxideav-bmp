@@ -25,10 +25,15 @@
 //! Run with:
 //!     cargo bench -p oxideav-bmp --bench roundtrip
 
+// The pre-contract entry points exercised here are the deprecated
+// wrappers (IMAGE_CRATE_API migration); this file is their regression
+// gate until they are removed.
+#![allow(deprecated)]
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_bmp::{
-    decode_bmp, decode_dib, encode_bmp, encode_dib, BmpImage, BmpPalette, BmpPixelFormat, BmpPlane,
+    decode_bmp, decode_dib, encode_bmp, encode_dib, BmpImage, BmpPixelFormat, Palette, Plane,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {
@@ -53,17 +58,13 @@ fn build_rgba_image(width: u32, height: u32) -> BmpImage {
             data[idx] = data[idx].wrapping_add(xorshift_byte(&mut state) & 0x07);
         }
     }
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Rgba,
-        planes: vec![BmpPlane {
-            stride: (width as usize) * 4,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+        BmpPixelFormat::Rgba,
+        vec![Plane::new((width as usize) * 4, data)],
+    )
+    .unwrap()
 }
 
 fn build_rgb24_image(width: u32, height: u32) -> BmpImage {
@@ -80,17 +81,13 @@ fn build_rgb24_image(width: u32, height: u32) -> BmpImage {
             data[idx] = data[idx].wrapping_add(xorshift_byte(&mut state) & 0x07);
         }
     }
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Rgb24,
-        planes: vec![BmpPlane {
-            stride: (width as usize) * 3,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+        BmpPixelFormat::Rgb24,
+        vec![Plane::new((width as usize) * 3, data)],
+    )
+    .unwrap()
 }
 
 fn build_rgb565_image(width: u32, height: u32) -> BmpImage {
@@ -106,17 +103,13 @@ fn build_rgb565_image(width: u32, height: u32) -> BmpImage {
             data[idx + 1] = (px >> 8) as u8;
         }
     }
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Rgb565,
-        planes: vec![BmpPlane {
-            stride: (width as usize) * 2,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+        BmpPixelFormat::Rgb565,
+        vec![Plane::new((width as usize) * 2, data)],
+    )
+    .unwrap()
 }
 
 fn build_rle_friendly_indexed8(width: u32, height: u32) -> BmpImage {
@@ -130,17 +123,14 @@ fn build_rle_friendly_indexed8(width: u32, height: u32) -> BmpImage {
     let entries: Vec<[u8; 3]> = (0..256u16)
         .map(|i| [i as u8, (i ^ 0x55) as u8, (i ^ 0xaa) as u8])
         .collect();
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Indexed8,
-        planes: vec![BmpPlane {
-            stride: width as usize,
-            data,
-        }],
-        palette: Some(BmpPalette { entries }),
-        pts: None,
-    }
+        BmpPixelFormat::Pal8,
+        vec![Plane::new(width as usize, data)],
+    )
+    .unwrap()
+    .with_palette(Some(Palette::from_rgb(&entries)))
 }
 
 fn build_rle_friendly_indexed4(width: u32, height: u32) -> BmpImage {
@@ -154,17 +144,14 @@ fn build_rle_friendly_indexed4(width: u32, height: u32) -> BmpImage {
     let entries: Vec<[u8; 3]> = (0..16u8)
         .map(|i| [i * 0x11, (i * 0x11) ^ 0x55, (i * 0x11) ^ 0xaa])
         .collect();
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Indexed4,
-        planes: vec![BmpPlane {
-            stride: width as usize,
-            data,
-        }],
-        palette: Some(BmpPalette { entries }),
-        pts: None,
-    }
+        BmpPixelFormat::Indexed4,
+        vec![Plane::new(width as usize, data)],
+    )
+    .unwrap()
+    .with_palette(Some(Palette::from_rgb(&entries)))
 }
 
 fn bench_roundtrip_rgba_320x240(c: &mut Criterion) {

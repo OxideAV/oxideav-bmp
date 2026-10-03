@@ -19,9 +19,14 @@
 //! would manifest as an OOM-abort which the test harness reports as a
 //! distinct failure (SIGABRT) from a panic.
 
+// The pre-contract entry points exercised here are the deprecated
+// wrappers (IMAGE_CRATE_API migration); this file is their regression
+// gate until they are removed.
+#![allow(deprecated)]
+
 use oxideav_bmp::{
-    decode_bmp, decode_dib, encode_bmp, encode_bmp_with_options, encode_dib, BmpEncodeOptions,
-    BmpImage, BmpPalette, BmpPixelFormat, BmpPlane, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE,
+    decode_bmp, decode_dib, encode_bmp, encode_bmp_with_options, encode_dib, BmpImage,
+    BmpPixelFormat, EncodeOptions, Palette, Plane, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE,
     BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE,
 };
 
@@ -39,17 +44,13 @@ fn rgba_image(w: u32, h: u32) -> BmpImage {
             data.extend_from_slice(&[r, g, b, 0xFF]);
         }
     }
-    BmpImage {
-        width: w,
-        height: h,
-        pixel_format: BmpPixelFormat::Rgba,
-        planes: vec![BmpPlane {
-            stride: w as usize * 4,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+    BmpImage::new(
+        w,
+        h,
+        BmpPixelFormat::Rgba,
+        vec![Plane::new(w as usize * 4, data)],
+    )
+    .unwrap()
 }
 
 fn rgb24_image(w: u32, h: u32) -> BmpImage {
@@ -59,17 +60,13 @@ fn rgb24_image(w: u32, h: u32) -> BmpImage {
             data.extend_from_slice(&[(x & 0xFF) as u8, (y & 0xFF) as u8, ((x + y) & 0xFF) as u8]);
         }
     }
-    BmpImage {
-        width: w,
-        height: h,
-        pixel_format: BmpPixelFormat::Rgb24,
-        planes: vec![BmpPlane {
-            stride: w as usize * 3,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+    BmpImage::new(
+        w,
+        h,
+        BmpPixelFormat::Rgb24,
+        vec![Plane::new(w as usize * 3, data)],
+    )
+    .unwrap()
 }
 
 fn rgb565_image(w: u32, h: u32) -> BmpImage {
@@ -80,17 +77,13 @@ fn rgb565_image(w: u32, h: u32) -> BmpImage {
             data.extend_from_slice(&v.to_le_bytes());
         }
     }
-    BmpImage {
-        width: w,
-        height: h,
-        pixel_format: BmpPixelFormat::Rgb565,
-        planes: vec![BmpPlane {
-            stride: w as usize * 2,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+    BmpImage::new(
+        w,
+        h,
+        BmpPixelFormat::Rgb565,
+        vec![Plane::new(w as usize * 2, data)],
+    )
+    .unwrap()
 }
 
 fn indexed8_image(w: u32, h: u32) -> BmpImage {
@@ -104,17 +97,14 @@ fn indexed8_image(w: u32, h: u32) -> BmpImage {
     for i in 0..8u8 {
         entries.push([i * 32, i * 32, i * 32]);
     }
-    BmpImage {
-        width: w,
-        height: h,
-        pixel_format: BmpPixelFormat::Indexed8,
-        planes: vec![BmpPlane {
-            stride: w as usize,
-            data,
-        }],
-        palette: Some(BmpPalette { entries }),
-        pts: None,
-    }
+    BmpImage::new(
+        w,
+        h,
+        BmpPixelFormat::Pal8,
+        vec![Plane::new(w as usize, data)],
+    )
+    .unwrap()
+    .with_palette(Some(Palette::from_rgb(&entries)))
 }
 
 fn indexed4_image(w: u32, h: u32) -> BmpImage {
@@ -128,17 +118,14 @@ fn indexed4_image(w: u32, h: u32) -> BmpImage {
     for i in 0..16u8 {
         entries.push([i * 16, i * 8, i * 4]);
     }
-    BmpImage {
-        width: w,
-        height: h,
-        pixel_format: BmpPixelFormat::Indexed4,
-        planes: vec![BmpPlane {
-            stride: w as usize,
-            data,
-        }],
-        palette: Some(BmpPalette { entries }),
-        pts: None,
-    }
+    BmpImage::new(
+        w,
+        h,
+        BmpPixelFormat::Indexed4,
+        vec![Plane::new(w as usize, data)],
+    )
+    .unwrap()
+    .with_palette(Some(Palette::from_rgb(&entries)))
 }
 
 fn all_canonical_bmps() -> Vec<(&'static str, Vec<u8>)> {
@@ -146,20 +133,20 @@ fn all_canonical_bmps() -> Vec<(&'static str, Vec<u8>)> {
     // auto-pick RLE when it shrinks the output, otherwise fall back to
     // BI_RGB. Sufficient for the structural mutation tests below; the
     // dedicated RLE-overrun tests further down build their own RLE input.
-    let opts: BmpEncodeOptions = Default::default();
+    let opts: EncodeOptions = Default::default();
     vec![
         ("rgba_32_8x8", encode_bmp(&rgba_image(8, 8)).unwrap().0),
         ("rgb24_8x8", encode_bmp(&rgb24_image(8, 8)).unwrap().0),
         ("rgb565_8x8", encode_bmp(&rgb565_image(8, 8)).unwrap().0),
         (
             "indexed8_8x8",
-            encode_bmp_with_options(&indexed8_image(8, 8), opts)
+            encode_bmp_with_options(&indexed8_image(8, 8), opts.clone())
                 .unwrap()
                 .0,
         ),
         (
             "indexed4_8x8",
-            encode_bmp_with_options(&indexed4_image(8, 8), opts)
+            encode_bmp_with_options(&indexed4_image(8, 8), opts.clone())
                 .unwrap()
                 .0,
         ),
@@ -363,7 +350,7 @@ fn pixel_offset_past_eof_is_rejected() {
 #[test]
 fn indexed8_clr_used_exceeds_palette_space_is_rejected_or_capped() {
     let img = indexed8_image(8, 8);
-    let mut bytes = encode_bmp_with_options(&img, BmpEncodeOptions::default())
+    let mut bytes = encode_bmp_with_options(&img, EncodeOptions::default())
         .unwrap()
         .0;
     // Find the BITMAPINFOHEADER's clr_used at offset 14+32 = 46.
@@ -382,7 +369,7 @@ fn indexed8_clr_used_exceeds_palette_space_is_rejected_or_capped() {
 #[test]
 fn indexed4_clr_used_exceeds_2_bpp_is_rejected() {
     let img = indexed4_image(8, 8);
-    let mut bytes = encode_bmp_with_options(&img, BmpEncodeOptions::default())
+    let mut bytes = encode_bmp_with_options(&img, EncodeOptions::default())
         .unwrap()
         .0;
     // For 4 bpp the legal max is 16 entries. Claim something obviously
@@ -513,7 +500,7 @@ fn rle8_truncated_pixel_stream_does_not_panic() {
 #[test]
 fn indexed8_palette_truncated_does_not_panic() {
     let img = indexed8_image(4, 4);
-    let bytes = encode_bmp_with_options(&img, BmpEncodeOptions::default())
+    let bytes = encode_bmp_with_options(&img, EncodeOptions::default())
         .unwrap()
         .0;
     // For each truncation point between header-end and pixel-start (where

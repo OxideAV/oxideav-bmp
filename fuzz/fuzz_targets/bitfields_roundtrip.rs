@@ -34,14 +34,14 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_bmp::{
-    decode_bmp, encode_bmp_bitfields, BmpBitfields, BmpEncodeOptions, BmpImage, BmpPixelFormat,
-    BmpPlane,
+    decode, encode, BmpBitfields, BmpImage, BmpPixelFormat, EncodeOptions,
+    Plane,
 };
 
 const MAX_DIM: u32 = 64;
 
 /// Build a `width × height × 4` `Rgba` plane by cycling `pixel_bytes`.
-fn make_plane(pixel_bytes: &[u8], width: u32, height: u32) -> Option<BmpPlane> {
+fn make_plane(pixel_bytes: &[u8], width: u32, height: u32) -> Option<Plane> {
     let stride = (width as usize).checked_mul(4)?;
     let total = stride.checked_mul(height as usize)?;
     let mut data = vec![0u8; total];
@@ -50,7 +50,7 @@ fn make_plane(pixel_bytes: &[u8], width: u32, height: u32) -> Option<BmpPlane> {
             *slot = pixel_bytes[i % pixel_bytes.len()];
         }
     }
-    Some(BmpPlane { stride, data })
+    Some(Plane::new(stride, data))
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -92,46 +92,44 @@ fuzz_target!(|data: &[u8]| {
         Some(p) => p,
         None => return,
     };
-    let image = BmpImage {
-        width,
-        height,
-        pixel_format: BmpPixelFormat::Rgba,
-        planes: vec![plane],
-        palette: None,
-        pts: None,
-    };
-    let options = BmpEncodeOptions {
-        top_down,
-        minimal_palette: false,
-    };
+    let image = BmpImage::new(width, height, BmpPixelFormat::Rgba, vec![plane]).unwrap();
+    let options = EncodeOptions::default()
+        .with_top_down(top_down)
+        .with_bitfields(masks);
 
-    let bytes = match encode_bmp_bitfields(&image, masks, options) {
+    let bytes = match encode(&image, &options) {
         Ok(b) => b,
         Err(_) => return,
     };
     assert_eq!(&bytes[..2], b"BM", "encoder emitted non-BMP signature");
 
-    let decoded = decode_bmp(&bytes).expect("bitfields output failed to decode");
+    let decoded = decode(&bytes).expect("bitfields output failed to decode");
     assert_eq!(decoded.width, width, "decoded width mismatch");
     assert_eq!(decoded.height, height, "decoded height mismatch");
-    assert_eq!(decoded.pixel_format, BmpPixelFormat::Rgba);
+    let rgba = decoded.to_rgba8();
 
-    // Byte-aligned 32-bpp presets have an exact contract.
+    // Byte-aligned 32-bpp presets have an exact contract (and decode to
+    // the native `Bgra` layout).
     if masks == BmpBitfields::BGRA8888 {
+        assert_eq!(decoded.format, BmpPixelFormat::Bgra);
         assert_eq!(
-            decoded.planes[0].data, image.planes[0].data,
+            rgba, image.planes[0].data,
             "BGRA8888 round-trip diverged (top_down={top_down})",
         );
     } else if masks == BmpBitfields::BGRX8888 {
-        let stride = decoded.planes[0].stride;
+        assert_eq!(decoded.format, BmpPixelFormat::Bgra);
         let src_stride = image.planes[0].stride;
         for y in 0..height as usize {
             for x in 0..width as usize {
-                let d = &decoded.planes[0].data[y * stride + x * 4..][..4];
+                let d = &rgba[(y * width as usize + x) * 4..][..4];
                 let s = &image.planes[0].data[y * src_stride + x * 4..][..4];
                 assert_eq!(&d[..3], &s[..3], "BGRX8888 colour diverged at ({x},{y})");
                 assert_eq!(d[3], 0xFF, "BGRX8888 alpha not opaque at ({x},{y})");
             }
         }
+    } else {
+        // 16-bpp presets: the canonical 5-5-5 / 5-6-5 masks decode to the
+        // packed native layouts, an alpha mask to expanded `Rgba`.
+        assert_eq!(rgba.len(), width as usize * height as usize * 4);
     }
 });

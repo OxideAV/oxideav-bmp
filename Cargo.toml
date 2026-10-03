@@ -16,20 +16,22 @@ categories = ["multimedia::encoding", "multimedia::images"]
 # `oxideav-core` is gated behind the default-on `registry` feature so
 # image-library consumers can depend on `oxideav-bmp` with
 # `default-features = false` and avoid the framework dependency tree
-# entirely. Without `registry` the crate exposes the standalone
-# `decode_bmp` / `encode_bmp` / `decode_dib` / `encode_dib` API plus
-# crate-local `BmpImage` / `BmpError` / `BmpPixelFormat` types and
-# never references `oxideav-core`.
+# entirely. Without `registry` the crate exposes the image-crate
+# contract (`probe` / `info` / `decode*` / `encode*`, `BmpImage`,
+# `RgbImage` / `RgbaImage`, `DecodeOptions` / `EncodeOptions`,
+# `BmpError`) plus the headerless-DIB helpers, and never references
+# `oxideav-core`.
 oxideav-core = { version = "0.1", optional = true }
 
 [features]
 default = ["registry"]
 
 # Wires up the codec / encoder / decoder / container demuxer + muxer
-# trait implementations against `oxideav-core` so the crate can plug
-# into the `oxideav` framework registry. Default-on; turn off for
-# image-library use-cases that just want the standalone `decode_bmp`
-# / `decode_dib` API.
+# trait implementations against `oxideav-core` (`register`,
+# `make_decoder` / `make_encoder`, the `BmpImage` <-> `VideoFrame`
+# bridge) so the crate can plug into the `oxideav` framework registry.
+# Default-on; turn off for image-library use-cases that just want the
+# standalone `decode` / `encode` API.
 registry = ["dep:oxideav-core"]
 
 [dev-dependencies]

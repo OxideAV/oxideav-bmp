@@ -42,9 +42,9 @@
 //! header-less DIB offset maths, the doubled-height ICO layout, and
 //! the metadata colour-space / ICC-slicing tail:
 //!
-//!   * `decode_bmp` + `decode_bmp_with_metadata` (full file),
-//!   * `decode_dib` / `decode_dib_with_metadata` with `mask = false`,
-//!   * `decode_dib` / `decode_dib_with_metadata` with `mask = true`.
+//!   * `info` + `decode` + `BmpMetadata::from_bmp` (full file),
+//!   * `decode_dib` with `mask = false` and `mask = true`,
+//!   * `BmpMetadata::from_dib`.
 //!
 //! Contract: every call returns a `Result`. No panic, no
 //! index-out-of-bounds, no integer overflow (debug assertions are on
@@ -52,7 +52,7 @@
 //! intentionally discarded.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::{decode_bmp, decode_bmp_with_metadata, decode_dib, decode_dib_with_metadata};
+use oxideav_bmp::{decode, decode_dib, info, BmpMetadata};
 
 /// Declared `biSize` for each generation selector. Selector 7 reads an
 /// arbitrary size from the body instead.
@@ -125,10 +125,10 @@ fuzz_target!(|data: &[u8]| {
     bmp.extend_from_slice(&off_bits.to_le_bytes());
     bmp.extend_from_slice(&dib);
 
-    let _ = decode_bmp(&bmp);
-    let _ = decode_bmp_with_metadata(&bmp);
+    let _ = info(&bmp);
+    let _ = decode(&bmp);
+    let _ = BmpMetadata::from_bmp(&bmp);
     let _ = decode_dib(&dib, false);
     let _ = decode_dib(&dib, true);
-    let _ = decode_dib_with_metadata(&dib, false);
-    let _ = decode_dib_with_metadata(&dib, true);
+    let _ = BmpMetadata::from_dib(&dib);
 });

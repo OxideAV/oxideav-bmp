@@ -25,7 +25,7 @@
 //!   - **encode_indexed4_rle_friendly_320x240**: 320×240 4-bit
 //!     indexed encode on row-constant data — same shape for RLE4.
 //!   - **encode_indexed8_minimal_palette_320x240**: 320×240 8-bit
-//!     indexed encode with `BmpEncodeOptions::minimal_palette` —
+//!     indexed encode with `EncodeOptions::minimal_palette` —
 //!     covers the `biClrUsed`-aware short-table write path.
 //!   - **encode_rgba_top_down_320x240**: 320×240 32-bit BGRA encode
 //!     with `top_down = true` — exercises the negative-biHeight path.
@@ -37,11 +37,16 @@
 //! Run with:
 //!     cargo bench -p oxideav-bmp --bench encode
 
+// The pre-contract entry points exercised here are the deprecated
+// wrappers (IMAGE_CRATE_API migration); this file is their regression
+// gate until they are removed.
+#![allow(deprecated)]
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_bmp::{
-    encode_bmp, encode_bmp_with_options, encode_dib, BmpEncodeOptions, BmpImage, BmpPalette,
-    BmpPixelFormat, BmpPlane,
+    encode_bmp, encode_dib, encode_with_report, BmpImage, BmpPixelFormat, EncodeOptions, Palette,
+    Plane,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {
@@ -66,17 +71,13 @@ fn build_rgba_image(width: u32, height: u32) -> BmpImage {
             data[idx] = data[idx].wrapping_add(xorshift_byte(&mut state) & 0x07);
         }
     }
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Rgba,
-        planes: vec![BmpPlane {
-            stride: (width as usize) * 4,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+        BmpPixelFormat::Rgba,
+        vec![Plane::new((width as usize) * 4, data)],
+    )
+    .unwrap()
 }
 
 fn build_rgb24_image(width: u32, height: u32) -> BmpImage {
@@ -93,17 +94,13 @@ fn build_rgb24_image(width: u32, height: u32) -> BmpImage {
             data[idx] = data[idx].wrapping_add(xorshift_byte(&mut state) & 0x07);
         }
     }
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Rgb24,
-        planes: vec![BmpPlane {
-            stride: (width as usize) * 3,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+        BmpPixelFormat::Rgb24,
+        vec![Plane::new((width as usize) * 3, data)],
+    )
+    .unwrap()
 }
 
 fn build_rgb565_image(width: u32, height: u32) -> BmpImage {
@@ -119,17 +116,13 @@ fn build_rgb565_image(width: u32, height: u32) -> BmpImage {
             data[idx + 1] = (px >> 8) as u8;
         }
     }
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Rgb565,
-        planes: vec![BmpPlane {
-            stride: (width as usize) * 2,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+        BmpPixelFormat::Rgb565,
+        vec![Plane::new((width as usize) * 2, data)],
+    )
+    .unwrap()
 }
 
 fn build_indexed8_random(width: u32, height: u32) -> BmpImage {
@@ -141,17 +134,14 @@ fn build_indexed8_random(width: u32, height: u32) -> BmpImage {
     let entries: Vec<[u8; 3]> = (0..256u16)
         .map(|i| [i as u8, (i ^ 0x55) as u8, (i ^ 0xaa) as u8])
         .collect();
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Indexed8,
-        planes: vec![BmpPlane {
-            stride: width as usize,
-            data,
-        }],
-        palette: Some(BmpPalette { entries }),
-        pts: None,
-    }
+        BmpPixelFormat::Pal8,
+        vec![Plane::new(width as usize, data)],
+    )
+    .unwrap()
+    .with_palette(Some(Palette::from_rgb(&entries)))
 }
 
 fn build_rle_friendly_indexed8(width: u32, height: u32) -> BmpImage {
@@ -165,17 +155,14 @@ fn build_rle_friendly_indexed8(width: u32, height: u32) -> BmpImage {
     let entries: Vec<[u8; 3]> = (0..256u16)
         .map(|i| [i as u8, (i ^ 0x55) as u8, (i ^ 0xaa) as u8])
         .collect();
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Indexed8,
-        planes: vec![BmpPlane {
-            stride: width as usize,
-            data,
-        }],
-        palette: Some(BmpPalette { entries }),
-        pts: None,
-    }
+        BmpPixelFormat::Pal8,
+        vec![Plane::new(width as usize, data)],
+    )
+    .unwrap()
+    .with_palette(Some(Palette::from_rgb(&entries)))
 }
 
 fn build_rle_friendly_indexed4(width: u32, height: u32) -> BmpImage {
@@ -189,17 +176,14 @@ fn build_rle_friendly_indexed4(width: u32, height: u32) -> BmpImage {
     let entries: Vec<[u8; 3]> = (0..16u8)
         .map(|i| [i * 0x11, (i * 0x11) ^ 0x55, (i * 0x11) ^ 0xaa])
         .collect();
-    BmpImage {
+    BmpImage::new(
         width,
         height,
-        pixel_format: BmpPixelFormat::Indexed4,
-        planes: vec![BmpPlane {
-            stride: width as usize,
-            data,
-        }],
-        palette: Some(BmpPalette { entries }),
-        pts: None,
-    }
+        BmpPixelFormat::Indexed4,
+        vec![Plane::new(width as usize, data)],
+    )
+    .unwrap()
+    .with_palette(Some(Palette::from_rgb(&entries)))
 }
 
 fn bench_encode_rgba_320x240(c: &mut Criterion) {
@@ -271,19 +255,14 @@ fn bench_encode_indexed4_rle_friendly_320x240(c: &mut Criterion) {
 
 fn bench_encode_indexed8_minimal_palette_320x240(c: &mut Criterion) {
     let image = build_rle_friendly_indexed8(320, 240);
-    let opts = BmpEncodeOptions {
-        minimal_palette: true,
-        ..Default::default()
-    };
+    let opts = EncodeOptions::default().with_minimal_palette(true);
     let mut g = c.benchmark_group("encode_indexed8_minimal_palette_320x240");
     g.throughput(Throughput::Bytes((320 * 240) as u64));
     g.sample_size(20);
     g.bench_function(
         BenchmarkId::from_parameter("indexed8/min-pal/320x240"),
         |b| {
-            b.iter(|| {
-                encode_bmp_with_options(criterion::black_box(&image), opts).expect("encode_bmp")
-            });
+            b.iter(|| encode_with_report(criterion::black_box(&image), &opts).expect("encode_bmp"));
         },
     );
     g.finish();
@@ -291,14 +270,11 @@ fn bench_encode_indexed8_minimal_palette_320x240(c: &mut Criterion) {
 
 fn bench_encode_rgba_top_down_320x240(c: &mut Criterion) {
     let image = build_rgba_image(320, 240);
-    let opts = BmpEncodeOptions {
-        top_down: true,
-        ..Default::default()
-    };
+    let opts = EncodeOptions::default().with_top_down(true);
     let mut g = c.benchmark_group("encode_rgba_top_down_320x240");
     g.throughput(Throughput::Bytes((320 * 240 * 4) as u64));
     g.bench_function(BenchmarkId::from_parameter("rgba/top-down/320x240"), |b| {
-        b.iter(|| encode_bmp_with_options(criterion::black_box(&image), opts).expect("encode_bmp"));
+        b.iter(|| encode_with_report(criterion::black_box(&image), &opts).expect("encode_bmp"));
     });
     g.finish();
 }

@@ -8,31 +8,30 @@
 //! palette + encode-options, and then immediately decodes the encoder's
 //! output. The contract under test is two-pronged:
 //!
-//!   1. **No-panic.** Neither `encode_bmp_with_options` nor the follow-up
-//!      `decode_bmp` may panic, integer-overflow (in debug builds), index
+//!   1. **No-panic.** Neither `encode_with_report` nor the follow-up
+//!      `decode` may panic, integer-overflow (in debug builds), index
 //!      out of bounds, or OOM-abort on any input the fuzzer produces.
 //!      Errors are fine; crashes are not.
 //!
-//!   2. **Lossless roundtrip for the direct-colour formats.** For
-//!      `Rgba` and `Rgb24` input, the decoder reproduces every pixel byte
-//!      the encoder wrote: alpha (or the synthesised `0xFF` for Rgb24) and
-//!      the three colour channels both survive the BGR↔RGB swap and the
-//!      bottom-up / top-down row flip. Mismatch is an assertion failure
-//!      that surfaces to libfuzzer as a crash.
-//!
-//! Indexed and 16-bit `Rgb565` paths are panic-checked but not
-//! byte-compared: the decoder always materialises `Rgba`, so an indexed
-//! roundtrip compares a 1 B/px index stream against a 4 B/px expanded
-//! image — a different shape. We assert the decoded dimensions instead.
+//!   2. **Lossless roundtrip.** `decode(encode(img))` reproduces the
+//!      picture for every layout: `to_rgba8()` of source and decoded
+//!      image match byte for byte, and the native layouts (`Bgra`,
+//!      `Bgr24`, `Rgb555`, `Rgb565`, `Pal8`) also come back with the same
+//!      `format`, plane bytes and palette. `Rgba` / `Rgb24` input is
+//!      re-laid as `Bgra` / `Bgr24` on disk and the sub-byte indexed
+//!      selectors come back as `Pal8`, so for those only the pixel values
+//!      are compared. Mismatch is an assertion failure that surfaces to
+//!      libfuzzer as a crash.
 //!
 //! ## Wire framing of the fuzz input
 //!
 //! The fuzzer's bytes are sliced into a small header + pixel payload:
 //!
-//!   * byte 0 — format selector (`byte % 8`): 0=Rgba, 1=Rgb24, 2=Rgb565,
-//!     3=Indexed8, 4=Indexed4, 5=Indexed2, 6=Indexed1, 7=Rgb555.
+//!   * byte 0 — format selector (`byte % 10`): 0=Rgba, 1=Rgb24, 2=Rgb565,
+//!     3=Pal8, 4=Indexed4, 5=Indexed2, 6=Indexed1, 7=Bgra, 8=Bgr24,
+//!     9=Rgb555.
 //!   * byte 1 — encode options: bit 0 = `top_down`, bit 1 =
-//!     `minimal_palette`.
+//!     `minimal_palette`, bit 2 = disable `rle`.
 //!   * byte 2 — width in pixels, clamped to 1..=64. The cap keeps memory
 //!     bounded at roughly `64×64×4 = 16 KiB` per iteration so the harness
 //!     does not OOM the fuzz worker, and keeps the encoder's per-row
@@ -57,8 +56,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_bmp::{
-    decode_bmp, encode_bmp_with_options, BmpEncodeOptions, BmpImage, BmpPalette, BmpPixelFormat,
-    BmpPlane, EncodedBmpFormat,
+    decode, encode_with_report, BmpImage, BmpPixelFormat, EncodeOptions, EncodedBmpFormat,
+    Palette, Plane,
 };
 
 /// Maximum picture dimension in pixels. See module docs for rationale.
@@ -70,21 +69,13 @@ const MAX_DIM: u32 = 64;
 /// packs it into the on-disk MSB-first layout); the on-disk stream is
 /// 1 bit per pixel but the in-memory plane is one full byte per index.
 fn bytes_per_pixel(format: BmpPixelFormat) -> usize {
-    match format {
-        BmpPixelFormat::Rgba => 4,
-        BmpPixelFormat::Rgb24 => 3,
-        BmpPixelFormat::Rgb555 | BmpPixelFormat::Rgb565 => 2,
-        BmpPixelFormat::Indexed8
-        | BmpPixelFormat::Indexed4
-        | BmpPixelFormat::Indexed2
-        | BmpPixelFormat::Indexed1 => 1,
-    }
+    format.bytes_per_pixel()
 }
 
 /// Maximum palette entry count for an indexed format.
 fn palette_cap(format: BmpPixelFormat) -> usize {
     match format {
-        BmpPixelFormat::Indexed8 => 256,
+        BmpPixelFormat::Pal8 => 256,
         BmpPixelFormat::Indexed4 => 16,
         BmpPixelFormat::Indexed2 => 4,
         BmpPixelFormat::Indexed1 => 2,
@@ -92,18 +83,19 @@ fn palette_cap(format: BmpPixelFormat) -> usize {
     }
 }
 
-/// Map the format selector byte onto a [`BmpPixelFormat`]. The low
-/// nibble selects across all eight encodable formats; codes 8..=15 wrap
-/// back onto the table to keep the distribution roughly even.
+/// Map the format selector byte onto a [`BmpPixelFormat`] across all
+/// ten encodable layouts.
 fn pick_format(byte: u8) -> BmpPixelFormat {
-    match byte % 8 {
+    match byte % 10 {
         0 => BmpPixelFormat::Rgba,
         1 => BmpPixelFormat::Rgb24,
         2 => BmpPixelFormat::Rgb565,
-        3 => BmpPixelFormat::Indexed8,
+        3 => BmpPixelFormat::Pal8,
         4 => BmpPixelFormat::Indexed4,
         5 => BmpPixelFormat::Indexed2,
         6 => BmpPixelFormat::Indexed1,
+        7 => BmpPixelFormat::Bgra,
+        8 => BmpPixelFormat::Bgr24,
         _ => BmpPixelFormat::Rgb555,
     }
 }
@@ -127,7 +119,7 @@ fn make_plane(
     width: u32,
     height: u32,
     format: BmpPixelFormat,
-) -> Option<BmpPlane> {
+) -> Option<Plane> {
     let bpp = bytes_per_pixel(format);
     let stride = (width as usize).checked_mul(bpp)?;
     let total = stride.checked_mul(height as usize)?;
@@ -137,14 +129,14 @@ fn make_plane(
             *slot = mask_index_byte(pixel_bytes[i % pixel_bytes.len()], format);
         }
     }
-    Some(BmpPlane { stride, data })
+    Some(Plane::new(stride, data))
 }
 
 /// Build a palette from the trailing fuzz bytes, three bytes per entry,
 /// padded with `[0, 0, 0]` so the table never has fewer entries than the
 /// pixel data could index. Returns an empty palette for non-indexed
 /// formats; the encoder ignores `palette` in those modes.
-fn make_palette(tail: &[u8], format: BmpPixelFormat) -> Option<BmpPalette> {
+fn make_palette(tail: &[u8], format: BmpPixelFormat) -> Option<Palette> {
     let cap = palette_cap(format);
     if cap == 0 {
         return None;
@@ -160,66 +152,67 @@ fn make_palette(tail: &[u8], format: BmpPixelFormat) -> Option<BmpPalette> {
     while entries.len() < cap {
         entries.push([0, 0, 0]);
     }
-    Some(BmpPalette { entries })
+    Some(Palette::from_rgb(&entries))
 }
 
-/// Decode the encoder's bytes back into an `Rgba` image. The result is
-/// compared against the input for `Rgba` / `Rgb24`; for everything else
-/// the call is just a no-panic check on the decoder side of the
-/// roundtrip pair.
+/// Decode the encoder's bytes back and hold the contract's lossless
+/// promise: `decode(encode(img))` reproduces the picture exactly.
+///
+/// * every layout: `to_rgba8()` of the decoded image equals that of the
+///   source (the 16-bit words, the BGR bytes and the palette indices
+///   are stored verbatim, so no quantisation happens anywhere);
+/// * the native layouts (`Bgra`, `Bgr24`, `Rgb555`, `Rgb565`, `Pal8`)
+///   additionally come back with the same `format`, plane bytes and
+///   (for `Pal8`) palette — `Rgba` / `Rgb24` are re-laid as
+///   `Bgra` / `Bgr24` on disk, and the sub-byte indexed selectors come
+///   back as `Pal8`, so only the pixel values are compared for those.
 fn check_roundtrip(
     encoded: &[u8],
     written_format: EncodedBmpFormat,
     src: &BmpImage,
-    options: BmpEncodeOptions,
+    options: &EncodeOptions,
 ) {
-    let decoded = decode_bmp(encoded).expect("encoder output failed to decode");
+    let decoded = decode(encoded).expect("encoder output failed to decode");
     assert_eq!(decoded.width, src.width, "decoded width mismatch");
     assert_eq!(decoded.height, src.height, "decoded height mismatch");
-    assert_eq!(decoded.pixel_format, BmpPixelFormat::Rgba);
     assert_eq!(decoded.planes.len(), 1);
 
-    // Lossless byte-level comparison applies only to the two direct-colour
-    // formats; the indexed and 16-bit paths transform the input shape.
-    match src.pixel_format {
-        BmpPixelFormat::Rgba => {
-            assert_eq!(written_format, EncodedBmpFormat::Rgb32);
-            assert_eq!(
-                decoded.planes[0].data, src.planes[0].data,
-                "Rgba roundtrip diverged (top_down={}, minimal_palette={})",
-                options.top_down, options.minimal_palette,
-            );
-        }
-        BmpPixelFormat::Rgb24 => {
-            assert_eq!(written_format, EncodedBmpFormat::Rgb24);
-            // The decoder synthesises alpha = 0xFF for Rgb24 input.
-            let src_stride = src.planes[0].stride;
-            let dec_stride = decoded.planes[0].stride;
-            let w = src.width as usize;
-            let h = src.height as usize;
-            for y in 0..h {
-                for x in 0..w {
-                    let s = &src.planes[0].data[y * src_stride + x * 3..][..3];
-                    let d = &decoded.planes[0].data[y * dec_stride + x * 4..][..4];
-                    assert_eq!(d[0], s[0], "R diverged at ({x},{y})");
-                    assert_eq!(d[1], s[1], "G diverged at ({x},{y})");
-                    assert_eq!(d[2], s[2], "B diverged at ({x},{y})");
-                    assert_eq!(d[3], 0xFF, "alpha not synthesised at ({x},{y})");
-                }
+    let expected_token = match src.format {
+        BmpPixelFormat::Rgba | BmpPixelFormat::Bgra => Some(EncodedBmpFormat::Rgb32),
+        BmpPixelFormat::Rgb24 | BmpPixelFormat::Bgr24 => Some(EncodedBmpFormat::Rgb24),
+        BmpPixelFormat::Rgb555 => Some(EncodedBmpFormat::Rgb16Rgb),
+        BmpPixelFormat::Rgb565 => Some(EncodedBmpFormat::Rgb16Bitfields),
+        _ => None, // indexed: RLE-or-raw is the encoder's call
+    };
+    if let Some(t) = expected_token {
+        assert_eq!(written_format, t, "unexpected on-disk variant");
+    }
+
+    assert_eq!(
+        decoded.to_rgba8(),
+        src.to_rgba8(),
+        "pixels diverged for {:?} (top_down={}, minimal_palette={}, rle={})",
+        src.format,
+        options.top_down,
+        options.minimal_palette,
+        options.rle,
+    );
+
+    match src.format {
+        BmpPixelFormat::Bgra
+        | BmpPixelFormat::Bgr24
+        | BmpPixelFormat::Rgb555
+        | BmpPixelFormat::Rgb565
+        | BmpPixelFormat::Pal8 => {
+            assert_eq!(decoded.format, src.format, "native layout changed");
+            assert_eq!(decoded.planes, src.planes, "native plane diverged");
+            if src.format == BmpPixelFormat::Pal8 {
+                assert_eq!(decoded.palette, src.palette, "palette diverged");
             }
         }
-        // Rgb565 quantises 8-bit → 5/6/5-bit, so the roundtrip is lossy
-        // by design; only check that the decoded buffer is the right shape.
-        // Indexed formats expand 1 B/px palette indices to 4 B/px Rgba, so
-        // the same applies — comparing the streams byte-for-byte would
-        // compare apples to oranges.
-        _ => {
-            assert_eq!(
-                decoded.planes[0].data.len(),
-                (src.width as usize) * (src.height as usize) * 4,
-                "decoded Rgba buffer wrong size",
-            );
-        }
+        BmpPixelFormat::Rgba => assert_eq!(decoded.format, BmpPixelFormat::Bgra),
+        BmpPixelFormat::Rgb24 => assert_eq!(decoded.format, BmpPixelFormat::Bgr24),
+        _ => assert_eq!(decoded.format, BmpPixelFormat::Pal8),
     }
 }
 
@@ -247,21 +240,14 @@ fuzz_target!(|data: &[u8]| {
     };
     let palette = make_palette(palette_tail, format);
 
-    let image = BmpImage {
-        width,
-        height,
-        pixel_format: format,
-        planes: vec![plane],
-        palette,
-        pts: None,
-    };
+    let image = BmpImage::new(width, height, format, vec![plane]).unwrap().with_palette(palette);
 
-    let options = BmpEncodeOptions {
-        top_down: opts_byte & 0b01 != 0,
-        minimal_palette: opts_byte & 0b10 != 0,
-    };
+    let options = EncodeOptions::default()
+        .with_top_down(opts_byte & 0b01 != 0)
+        .with_minimal_palette(opts_byte & 0b10 != 0)
+        .with_rle(opts_byte & 0b100 == 0);
 
-    let (bytes, written_format) = match encode_bmp_with_options(&image, options) {
+    let (bytes, written_format) = match encode_with_report(&image, &options) {
         Ok(pair) => pair,
         Err(_) => return,
     };
@@ -271,5 +257,5 @@ fuzz_target!(|data: &[u8]| {
     // would be a contract bug worth surfacing.
     assert_eq!(&bytes[..2], b"BM", "encoder emitted non-BMP signature");
 
-    check_roundtrip(&bytes, written_format, &image, options);
+    check_roundtrip(&bytes, written_format, &image, &options);
 });

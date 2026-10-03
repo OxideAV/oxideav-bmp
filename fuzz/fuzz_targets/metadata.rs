@@ -2,9 +2,10 @@
 
 //! Metadata-path fuzz target for `oxideav-bmp`.
 //!
-//! The existing `decode` target feeds arbitrary bytes to [`decode_bmp`] /
-//! [`decode_dib`], which return only the pixels. The *metadata* entry
-//! points — [`decode_bmp_with_metadata`] and [`decode_dib_with_metadata`]
+//! The existing `decode` target feeds arbitrary bytes to `decode` /
+//! `decode_dib`. The *metadata* entry points — `BmpMetadata::from_bmp`
+//! / `BmpMetadata::from_dib` and the `color` / `metadata` the decoder
+//! stamps on the image
 //! — are independent public surfaces with their own attacker-controlled
 //! offset / slicing maths that the pixel-only path never reaches:
 //!
@@ -38,10 +39,16 @@
 //! BMP-file framing.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::{decode_bmp_with_metadata, decode_dib_with_metadata};
+use oxideav_bmp::{decode, decode_dib, BmpMetadata};
 
 fuzz_target!(|data: &[u8]| {
-    let _ = decode_bmp_with_metadata(data);
-    let _ = decode_dib_with_metadata(data, false);
-    let _ = decode_dib_with_metadata(data, true);
+    // Header-only metadata parse (the V5 profile-slot slicing).
+    let _ = BmpMetadata::from_bmp(data);
+    let _ = BmpMetadata::from_dib(data);
+    // The contract view: `color` / `metadata.icc` on the decoded image.
+    if let Ok(img) = decode(data) {
+        let _ = (img.color, img.metadata.icc.as_ref().map(Vec::len));
+    }
+    let _ = decode_dib(data, false).map(|img| img.metadata);
+    let _ = decode_dib(data, true).map(|img| img.metadata);
 });

@@ -22,11 +22,16 @@
 //!     endpoints, u32::MAX gamma, undefined intent codes) round-trip
 //!     verbatim.
 
+// The pre-contract entry points exercised here are the deprecated
+// wrappers (IMAGE_CRATE_API migration); this file is their regression
+// gate until they are removed.
+#![allow(deprecated)]
+
 use oxideav_bmp::{
     decode_bmp_with_metadata, decode_dib_with_metadata, encode_bmp_with_calibrated_rgb,
-    encode_bmp_with_icc_profile, encode_bmp_with_linked_icc_profile, BmpColorSpace,
-    BmpEncodeOptions, BmpImage, BmpPalette, BmpPixelFormat, BmpPlane, BmpRenderingIntent,
-    BITMAPFILEHEADER_SIZE, PROFILE_EMBEDDED, PROFILE_LINKED,
+    encode_bmp_with_icc_profile, encode_bmp_with_linked_icc_profile, BmpColorSpace, BmpImage,
+    BmpPixelFormat, BmpRenderingIntent, EncodeOptions, Palette, Plane, BITMAPFILEHEADER_SIZE,
+    PROFILE_EMBEDDED, PROFILE_LINKED,
 };
 
 // ---------------------------------------------------------------------------
@@ -45,33 +50,26 @@ fn rgba_image(w: u32, h: u32) -> BmpImage {
             ]);
         }
     }
-    BmpImage {
-        width: w,
-        height: h,
-        pixel_format: BmpPixelFormat::Rgba,
-        planes: vec![BmpPlane {
-            stride: w as usize * 4,
-            data,
-        }],
-        palette: None,
-        pts: None,
-    }
+    BmpImage::new(
+        w,
+        h,
+        BmpPixelFormat::Rgba,
+        vec![Plane::new(w as usize * 4, data)],
+    )
+    .unwrap()
 }
 
 fn indexed8_image(w: u32, h: u32) -> BmpImage {
     let data: Vec<u8> = (0..w * h).map(|i| (i & 0x0F) as u8).collect();
     let entries: Vec<[u8; 3]> = (0..16u8).map(|i| [i * 16, 255 - i * 16, i]).collect();
-    BmpImage {
-        width: w,
-        height: h,
-        pixel_format: BmpPixelFormat::Indexed8,
-        planes: vec![BmpPlane {
-            stride: w as usize,
-            data,
-        }],
-        palette: Some(BmpPalette { entries }),
-        pts: None,
-    }
+    BmpImage::new(
+        w,
+        h,
+        BmpPixelFormat::Pal8,
+        vec![Plane::new(w as usize, data)],
+    )
+    .unwrap()
+    .with_palette(Some(Palette::from_rgb(&entries)))
 }
 
 /// A fake-but-plausible ICC blob (the decoder treats it opaquely).
@@ -82,15 +80,16 @@ fn icc_blob(len: usize) -> Vec<u8> {
 /// The four V4/V5 fixture files this suite mutates. Names keep failure
 /// output readable.
 fn metadata_fixtures() -> Vec<(&'static str, Vec<u8>)> {
-    let opts = BmpEncodeOptions::default();
+    let opts = EncodeOptions::default();
     vec![
         (
             "v5_embedded_rgba",
-            encode_bmp_with_icc_profile(&rgba_image(7, 5), &icc_blob(64), 4, opts).unwrap(),
+            encode_bmp_with_icc_profile(&rgba_image(7, 5), &icc_blob(64), 4, opts.clone()).unwrap(),
         ),
         (
             "v5_embedded_indexed8",
-            encode_bmp_with_icc_profile(&indexed8_image(9, 4), &icc_blob(17), 1, opts).unwrap(),
+            encode_bmp_with_icc_profile(&indexed8_image(9, 4), &icc_blob(17), 1, opts.clone())
+                .unwrap(),
         ),
         (
             "v5_linked_rgba",
@@ -98,7 +97,7 @@ fn metadata_fixtures() -> Vec<(&'static str, Vec<u8>)> {
                 &rgba_image(4, 6),
                 b"m:\\profiles\\p.icc\0",
                 2,
-                opts,
+                opts.clone(),
             )
             .unwrap(),
         ),
@@ -108,7 +107,7 @@ fn metadata_fixtures() -> Vec<(&'static str, Vec<u8>)> {
                 &rgba_image(6, 3),
                 [1 << 30, 0, 0, 0, 1 << 30, 0, 0, 0, 1 << 30],
                 [0x0001_0000; 3],
-                opts,
+                opts.clone(),
             )
             .unwrap(),
         ),
@@ -321,7 +320,7 @@ fn calibrated_extreme_endpoints_roundtrip() {
         &rgba_image(3, 3),
         endpoints,
         gamma,
-        BmpEncodeOptions::default(),
+        EncodeOptions::default(),
     )
     .expect("extreme endpoints must encode");
     let (_, meta) = decode_bmp_with_metadata(&encoded).expect("extreme endpoints must decode");
@@ -339,7 +338,7 @@ fn undefined_rendering_intent_codes_survive() {
             &rgba_image(2, 2),
             &icc_blob(8),
             intent,
-            BmpEncodeOptions::default(),
+            EncodeOptions::default(),
         )
         .expect("undefined intent must encode");
         let (_, meta) = decode_bmp_with_metadata(&encoded).expect("undefined intent must decode");
@@ -357,7 +356,7 @@ fn profile_blob_size_boundaries_roundtrip() {
     for len in [0usize, 1, 3, 4096] {
         let blob = icc_blob(len);
         let encoded =
-            encode_bmp_with_icc_profile(&rgba_image(2, 2), &blob, 0, BmpEncodeOptions::default())
+            encode_bmp_with_icc_profile(&rgba_image(2, 2), &blob, 0, EncodeOptions::default())
                 .expect("boundary blob must encode");
         let (_, meta) = decode_bmp_with_metadata(&encoded).expect("boundary blob must decode");
         assert_eq!(meta.profile_size, Some(len as u32));

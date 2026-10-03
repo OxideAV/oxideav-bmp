@@ -19,6 +19,11 @@
 //!     regression that breaks a real file (not just hostile bytes)
 //!     fails here deterministically.
 
+// The pre-contract entry points exercised here are the deprecated
+// wrappers (IMAGE_CRATE_API migration); this file is their regression
+// gate until they are removed.
+#![allow(deprecated)]
+
 use oxideav_bmp::{
     decode_bmp, decode_bmp_with_metadata, decode_dib, decode_dib_with_metadata, BitmapFileHeader,
     BitmapInfoHeader, BITMAPFILEHEADER_SIZE,

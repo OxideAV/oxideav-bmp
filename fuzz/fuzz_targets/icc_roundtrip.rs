@@ -50,37 +50,33 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_bmp::{
-    decode_bmp_with_metadata, encode_bmp_with_calibrated_rgb, encode_bmp_with_icc_profile,
-    encode_bmp_with_linked_icc_profile, BmpColorSpace, BmpEncodeOptions, BmpImage, BmpPalette,
-    BmpPixelFormat, BmpPlane,
+    decode, encode, BmpColorSpace, BmpImage, BmpMetadata, CalibratedRgb, EncodeOptions, Palette,
+    BmpPixelFormat, Plane,
 };
 
 const MAX_DIM: u32 = 32;
 
 fn pick_format(byte: u8) -> BmpPixelFormat {
-    match byte % 7 {
+    match byte % 9 {
         0 => BmpPixelFormat::Rgba,
         1 => BmpPixelFormat::Rgb24,
         2 => BmpPixelFormat::Rgb555,
         3 => BmpPixelFormat::Rgb565,
-        4 => BmpPixelFormat::Indexed8,
+        4 => BmpPixelFormat::Pal8,
         5 => BmpPixelFormat::Indexed4,
+        6 => BmpPixelFormat::Bgra,
+        7 => BmpPixelFormat::Bgr24,
         _ => BmpPixelFormat::Indexed1,
     }
 }
 
 fn bytes_per_pixel(format: BmpPixelFormat) -> usize {
-    match format {
-        BmpPixelFormat::Rgba => 4,
-        BmpPixelFormat::Rgb24 => 3,
-        BmpPixelFormat::Rgb555 | BmpPixelFormat::Rgb565 => 2,
-        _ => 1,
-    }
+    format.bytes_per_pixel()
 }
 
 fn palette_cap(format: BmpPixelFormat) -> usize {
     match format {
-        BmpPixelFormat::Indexed8 => 256,
+        BmpPixelFormat::Pal8 => 256,
         BmpPixelFormat::Indexed4 => 16,
         BmpPixelFormat::Indexed1 => 2,
         _ => 0,
@@ -105,10 +101,7 @@ fuzz_target!(|data: &[u8]| {
     }
     let path_selector = data[0] % 3;
     let format = pick_format(data[1]);
-    let options = BmpEncodeOptions {
-        top_down: data[2] & 1 != 0,
-        minimal_palette: data[2] & 2 != 0,
-    };
+    let options = EncodeOptions::default().with_top_down(data[2] & 1 != 0).with_minimal_palette(data[2] & 2 != 0);
     let width = 1 + (data[3] as u32) % MAX_DIM;
     let height = 1 + (data[4] as u32) % MAX_DIM;
     let intent = data[5] as u32;
@@ -141,10 +134,7 @@ fuzz_target!(|data: &[u8]| {
     let stride = width as usize * bpp;
     let pixel_len = stride * height as usize;
     let pixel_src = &rest[..pixel_len.min(rest.len())];
-    let plane = BmpPlane {
-        stride,
-        data: cycled(pixel_src, pixel_len),
-    };
+    let plane = Plane::new(stride, cycled(pixel_src, pixel_len));
 
     let palette = {
         let cap = palette_cap(format);
@@ -160,24 +150,23 @@ fuzz_target!(|data: &[u8]| {
             while entries.len() < cap {
                 entries.push([0, 0, 0]);
             }
-            Some(BmpPalette { entries })
+            Some(Palette::from_rgb(&entries))
         }
     };
 
-    let image = BmpImage {
-        width,
-        height,
-        pixel_format: format,
-        planes: vec![plane],
-        palette,
-        pts: None,
-    };
+    let image = BmpImage::new(width, height, format, vec![plane]).unwrap().with_palette(palette);
 
-    let encoded = match path_selector {
-        0 => encode_bmp_with_icc_profile(&image, &blob, intent, options),
-        1 => encode_bmp_with_linked_icc_profile(&image, &blob, intent, options),
-        _ => encode_bmp_with_calibrated_rgb(&image, endpoints, gamma, options),
+    let mut image = image;
+    let options = options.with_rendering_intent(intent);
+    let options = match path_selector {
+        0 => {
+            image.metadata.icc = Some(blob.clone());
+            options
+        }
+        1 => options.with_linked_icc(blob.clone()),
+        _ => options.with_calibrated_rgb(CalibratedRgb::new(endpoints, gamma)),
     };
+    let encoded = encode(&image, &options);
     let encoded = match encoded {
         Ok(bytes) => bytes,
         // Encoder rejection is a legal outcome; the contract is only
@@ -185,11 +174,11 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    let (decoded, meta) =
-        decode_bmp_with_metadata(&encoded).expect("colour-management encoder output must decode");
+    let decoded = decode(&encoded).expect("colour-management encoder output must decode");
+    let meta = BmpMetadata::from_bmp(&encoded).expect("header metadata must parse");
     assert_eq!(decoded.width, width, "decoded width mismatch");
     assert_eq!(decoded.height, height, "decoded height mismatch");
-    assert_eq!(decoded.pixel_format, BmpPixelFormat::Rgba);
+    assert_eq!(meta.rendering_intent.is_some(), path_selector != 2);
 
     match path_selector {
         0 => {
@@ -202,6 +191,12 @@ fuzz_target!(|data: &[u8]| {
                 meta.icc_profile.as_deref().unwrap_or(&[]),
                 &blob[..],
                 "embedded ICC blob diverged on the way back",
+            );
+            // The contract view carries the same bytes.
+            assert_eq!(
+                decoded.metadata.icc.as_deref().unwrap_or(&[]),
+                &blob[..],
+                "metadata.icc diverged from the header slot",
             );
         }
         1 => {
@@ -227,11 +222,10 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // 32-bpp BI_RGB keeps all four bytes on every path.
-    if format == BmpPixelFormat::Rgba {
-        assert_eq!(
-            decoded.planes[0].data, image.planes[0].data,
-            "Rgba pixels diverged through the V4/V5 colour-management path",
-        );
-    }
+    // Every path stores the pixels verbatim: the picture round-trips.
+    assert_eq!(
+        decoded.to_rgba8(),
+        image.to_rgba8(),
+        "pixels diverged through the V4/V5 colour-management path ({format:?})",
+    );
 });
