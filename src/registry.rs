@@ -206,22 +206,23 @@ impl BmpImage {
     pub fn from_video_frame(
         frame: &VideoFrame,
         params: &CodecParameters,
-    ) -> oxideav_core::Result<Self> {
+    ) -> crate::error::Result<Self> {
         let width = params
             .width
-            .ok_or_else(|| oxideav_core::Error::invalid("BMP: missing width"))?;
+            .ok_or_else(|| BmpError::invalid("BMP: missing width"))?;
         let height = params
             .height
-            .ok_or_else(|| oxideav_core::Error::invalid("BMP: missing height"))?;
-        let pix = from_core_pixel_format(
-            params
-                .pixel_format
-                .ok_or_else(|| oxideav_core::Error::invalid("BMP: missing pixel_format"))?,
-        )?;
+            .ok_or_else(|| BmpError::invalid("BMP: missing height"))?;
+        let core_pix = params
+            .pixel_format
+            .ok_or_else(|| BmpError::invalid("BMP: missing pixel_format"))?;
+        let pix = from_core_pixel_format(core_pix).map_err(|_| {
+            BmpError::unsupported(format!("BMP: pixel format {core_pix:?} not supported"))
+        })?;
         let plane = frame
             .image_planes()
             .first()
-            .ok_or_else(|| oxideav_core::Error::invalid("BMP: frame has no planes"))?;
+            .ok_or_else(|| BmpError::invalid("BMP: frame has no planes"))?;
         let mut img = BmpImage::new(
             width,
             height,
@@ -230,7 +231,7 @@ impl BmpImage {
         )?;
         if pix.is_indexed() {
             let rgb = frame.palette().ok_or_else(|| {
-                oxideav_core::Error::invalid("BMP: Pal8 frame without a palette side-channel")
+                BmpError::invalid("BMP: Pal8 frame without a palette side-channel")
             })?;
             let entries: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
             img.palette = Some(Palette::from_rgb(&entries));
@@ -243,8 +244,8 @@ impl BmpImage {
 }
 
 impl TryFrom<(&VideoFrame, &CodecParameters)> for BmpImage {
-    type Error = oxideav_core::Error;
-    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> oxideav_core::Result<Self> {
+    type Error = BmpError;
+    fn try_from((frame, params): (&VideoFrame, &CodecParameters)) -> crate::error::Result<Self> {
         BmpImage::from_video_frame(frame, params)
     }
 }
@@ -454,7 +455,7 @@ fn frame_image(
     params.width = Some(width);
     params.height = Some(height);
     params.pixel_format = Some(format);
-    BmpImage::from_video_frame(frame, &params)
+    Ok(BmpImage::from_video_frame(frame, &params)?)
 }
 
 /// Encode a `VideoFrame` into a complete BMP file.

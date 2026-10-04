@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `BmpImage::from_video_frame` and `TryFrom<(&VideoFrame, &CodecParameters)>`
+  return the crate's `BmpError` instead of `oxideav_core::Error` (contract
+  ruling); the registry adapter and the deprecated `VideoFrame` wrappers
+  map it. `from_core_pixel_format` still yields `oxideav_core::Error`.
 - **`BmpImage::from_rgb8` / `from_rgba8` return `Result`** (`InvalidData`
   on a zero dimension or a short buffer) instead of panicking; no
   infallible alias is kept (IMAGE_CRATE_API ruling).
