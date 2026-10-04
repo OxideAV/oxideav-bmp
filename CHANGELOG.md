@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.7...v0.1.8) - 2026-10-04
+
+### Other
+
+- from_video_frame returns BmpError (contract ruling); adapter maps to core
+- fleet sweep — fallible from_rgb8/from_rgba8, native-layout registry output, crates.io exclude
+- README examples use the current registry API
+
 ### Added
 
 - `registry::registry_pixel_format(BmpPixelFormat) -> oxideav_core::PixelFormat`:
