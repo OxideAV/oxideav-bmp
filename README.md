@@ -28,6 +28,7 @@ if oxideav_bmp::probe(&bytes) {
     std::fs::write("out.bmp", out)?;
     let _ = info;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Root vocabulary (identical across every `oxideav-*` image crate):
@@ -289,6 +290,7 @@ populated only for an exactly-64-byte header (every Windows generation
 and the truncated OS/2 2.x forms report `None`):
 
 ```rust
+# let bytes: &[u8] = &std::fs::read("in.bmp")?;
 use oxideav_bmp::{BmpMetadata, BmpOs2Halftone};
 let md = BmpMetadata::from_bmp(bytes)?;
 if let Some(h2) = md.os2_header2 {
@@ -304,6 +306,7 @@ if let Some(h2) = md.os2_header2 {
     }
     let _ = (h2.halftone_size1, h2.halftone_size2, h2.identifier);
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Every raw field is passed through verbatim so a non-standard write is
@@ -319,6 +322,7 @@ struct for callers that want to inspect the file header without
 running the full decode (probe / dispatcher / fuzz consumers):
 
 ```rust
+# let bytes: &[u8] = &std::fs::read("in.bmp")?;
 use oxideav_bmp::BitmapFileHeader;
 
 // `parse` validates buffer length + the `0x4D42` `bfType` signature.
@@ -333,6 +337,7 @@ let _ = h.reserved_is_clean();        // bfReserved1/2 zero per the spec
 // `from_bytes` is the unchecked variant (returns `None` on a short
 // buffer; the magic check is skipped). Encoder consumers go the
 // other way via `to_bytes()` for a deterministic 14-byte layout.
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `decode`, `info` and `BmpMetadata::from_bmp` all funnel the file
@@ -383,6 +388,7 @@ likewise surfaced as a typed struct — the eleven documented fields
 / `clr_used` / `clr_important`) at their on-disk offsets:
 
 ```rust
+# let bmp = std::fs::read("in.bmp")?;
 use oxideav_bmp::{BitmapFileHeader, BitmapInfoHeader, DibHeaderKind};
 
 // `parse` validates buffer length + the biSize discrimination:
@@ -401,6 +407,7 @@ h.planes_is_valid();   // biPlanes == 1 ("must be set to 1")
 // `to_bytes()` renders the deterministic 40-byte layout back.
 // `DibHeaderKind::from_size(biSize)` maps 12/40/52/56/108/124 to the
 // six known header generations.
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `parse_dib_header` inside the decoder now reads the eleven base fields
@@ -438,13 +445,15 @@ that pre-date colour management: `biXPelsPerMeter`, `biYPelsPerMeter`,
 `biClrUsed`, and `biClrImportant`. The named accessors:
 
 ```rust
+# let bytes: &[u8] = &std::fs::read("in.bmp")?;
 let md = oxideav_bmp::BmpMetadata::from_bmp(bytes)?;
-md.pixels_per_meter_x      // Option<i32>  — None on OS/2 V1
-md.pixels_per_meter_y      // Option<i32>
-md.colors_used             // Option<u32>  — `0` = "all 2^bpp"
-md.colors_important        // Option<u32>  — `0` = "all important"
-md.dpi_x();                // Option<u32>  — derived, rounded to nearest
-md.dpi_y();                // Option<u32>
+let _ = md.pixels_per_meter_x;  // Option<i32>  — None on OS/2 V1
+let _ = md.pixels_per_meter_y;  // Option<i32>
+let _ = md.colors_used;         // Option<u32>  — `0` = "all 2^bpp"
+let _ = md.colors_important;    // Option<u32>  — `0` = "all important"
+let _ = md.dpi_x();             // Option<u32>  — derived, rounded to nearest
+let _ = md.dpi_y();             // Option<u32>
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 V3 (`BITMAPINFOHEADER`, 40 B) is the first BMP header generation to
@@ -472,6 +481,7 @@ as `BmpMetadata::icc_profile: Option<Vec<u8>>`; `PROFILE_LINKED`
 surfaces the offset + size so callers can resolve the path themselves.
 
 ```rust
+# let bytes: &[u8] = &std::fs::read("in.bmp")?;
 let md = oxideav_bmp::BmpMetadata::from_bmp(bytes)?;
 match md.color_space {
     Some(oxideav_bmp::BmpColorSpace::SRgb) => /* sRGB */ {}
@@ -481,6 +491,7 @@ match md.color_space {
     }
     _ => {}
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 The typed accessor `BmpMetadata::icc_profile_ref()` collapses the
@@ -490,6 +501,8 @@ single `BmpIccProfileRef<'_>` enum so callers don't have to match on
 `profile_data_offset` / `profile_size` by hand:
 
 ```rust
+# let bytes: &[u8] = &std::fs::read("in.bmp")?;
+# let md = oxideav_bmp::BmpMetadata::from_bmp(bytes)?;
 use oxideav_bmp::BmpIccProfileRef;
 match md.icc_profile_ref() {
     BmpIccProfileRef::Embedded(icc)    => { /* embedded ICC bytes */ }
@@ -497,6 +510,7 @@ match md.icc_profile_ref() {
     BmpIccProfileRef::Declared { .. }  => { /* V5 declared a PROFILE_* but the bytes were unreachable */ }
     BmpIccProfileRef::None             => { /* V3 / V4 / V5 LCS_* — no ICC reference */ }
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `PROFILE_LINKED` bitmaps now also surface the path bytestring through
@@ -646,7 +660,10 @@ reserved byte.
 ### Minimal colour table (`biClrUsed`)
 
 ```rust
-encode(&image, &EncodeOptions::default().with_minimal_palette(true))
+# use oxideav_bmp::{encode, EncodeOptions};
+# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]);
+let bytes = encode(&image, &EncodeOptions::default().with_minimal_palette(true))?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 By default the indexed paths write a full `2^bpp` colour table and
@@ -682,9 +699,11 @@ mask block a V4 / V5 header carries — the masks sit **between** the
 layout the decoder already reads.
 
 ```rust
+# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]);
 use oxideav_bmp::{encode, BmpBitfields, EncodeOptions};
 
 let bytes = encode(&image, &EncodeOptions::default().with_bitfields(BmpBitfields::BGRA8888))?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `BmpBitfields` carries the four channel masks plus the on-disk bit depth
@@ -715,6 +734,7 @@ inside `bpp` bits.
 ## DIB helpers for `.ico`
 
 ```rust
+# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]);
 // Headerless DIB (BITMAPINFOHEADER + pixels). No BITMAPFILEHEADER.
 let dib = oxideav_bmp::encode_dib(&image, /* doubled */ false)?;
 let image = oxideav_bmp::decode_dib(&dib, /* doubled */ false)?;   // native layout
@@ -726,6 +746,7 @@ let ico_sub = oxideav_bmp::encode_dib(&image, /* doubled */ true)?;
 // Decoding a doubled-height DIB folds the AND mask into alpha, so the
 // result is always `Rgba`.
 let rgba = oxideav_bmp::decode_dib(&ico_sub, /* doubled */ true)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ## Robustness — property tests + fuzzing
