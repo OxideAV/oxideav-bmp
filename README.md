@@ -84,8 +84,15 @@ oxideav_bmp::register(&mut ctx);          // codec "bmp" + container "bmp" (.bmp
 `register_codecs(&mut CodecRegistry)` / `register_containers(&mut
 ContainerRegistry)` install the two halves separately; `make_decoder` /
 `make_encoder` are the factories. The framework decoder hands the
-pipeline **`Rgba` frames** (the container declares `Rgba`; every native
-layout is widened through `BmpImage::to_rgba8`); the framework encoder
+pipeline the **native layout** (`registry_pixel_format`): `Pal8` with
+the palette side-channel for every indexed depth (the 4- / 2- / 1-bit
+layouts are already one index per byte), `Bgr24` / `Bgra` / `Rgb24` /
+`Rgba` as stored, and `Rgb24` for the 16-bit `Rgb555` / `Rgb565`
+layouts (core has no 16-bit RGB name; 5 / 6-bit samples bit-replicated);
+the colour-signal side-channel rides along when the file carries a
+colour space. The demuxer declares the same layout on its stream.
+Nothing is pre-converted to `Rgba` — use `oxideav-pixfmt`, or
+`decode_rgba8` standalone. The framework encoder
 accepts `Rgba`, `Rgb24`, `Bgra`, `Bgr24` and `Pal8` (palette from the
 frame's palette side-channel) and reads `EncodeOptions` from
 `CodecParameters::options` (`top_down`, `minimal_palette`, `rle`,
@@ -661,7 +668,7 @@ reserved byte.
 
 ```rust
 # use oxideav_bmp::{encode, EncodeOptions};
-# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]);
+# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]).unwrap();
 let bytes = encode(&image, &EncodeOptions::default().with_minimal_palette(true))?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -699,7 +706,7 @@ mask block a V4 / V5 header carries — the masks sit **between** the
 layout the decoder already reads.
 
 ```rust
-# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]);
+# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]).unwrap();
 use oxideav_bmp::{encode, BmpBitfields, EncodeOptions};
 
 let bytes = encode(&image, &EncodeOptions::default().with_bitfields(BmpBitfields::BGRA8888))?;
@@ -734,7 +741,7 @@ inside `bpp` bits.
 ## DIB helpers for `.ico`
 
 ```rust
-# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]);
+# let image = oxideav_bmp::BmpImage::from_rgba8(1, 1, vec![0, 0, 0, 255]).unwrap();
 // Headerless DIB (BITMAPINFOHEADER + pixels). No BITMAPFILEHEADER.
 let dib = oxideav_bmp::encode_dib(&image, /* doubled */ false)?;
 let image = oxideav_bmp::decode_dib(&dib, /* doubled */ false)?;   // native layout

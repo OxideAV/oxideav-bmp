@@ -9,6 +9,8 @@ homepage = "https://github.com/OxideAV/oxideav-bmp"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust BMP (Windows bitmap) decoder + encoder + container for oxideav — also exposes the header-less DIB helpers used by .ico / .cur sub-images"
 readme = "README.md"
+# crates.io caps packages at 10 MiB; fixtures and fuzz corpora stay out.
+exclude = ["/tests", "/fuzz"]
 keywords = ["multimedia", "image", "bmp", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
 

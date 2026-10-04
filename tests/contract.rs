@@ -196,11 +196,31 @@ fn bgr_layouts_swizzle_and_keep_alpha() {
     assert_eq!(img.to_rgb8(), [3, 2, 1]);
     let img = BmpImage::packed(1, 1, PixelFormat::Bgr24, 3, vec![1, 2, 3]).unwrap();
     assert_eq!(img.to_rgba8(), [3, 2, 1, 255]);
-    let img = BmpImage::from_rgb8(1, 1, vec![7, 8, 9]);
+    let img = BmpImage::from_rgb8(1, 1, vec![7, 8, 9]).unwrap();
     assert_eq!(img.format(), PixelFormat::Rgb24);
     assert_eq!(img.as_bytes(), Some(&[7u8, 8, 9][..]));
     assert_eq!(img.to_rgba8(), [7, 8, 9, 255]);
     assert_eq!(img.into_raw(), [7, 8, 9]);
+}
+
+#[test]
+fn raw_constructors_are_fallible() {
+    // Short buffer / zero dimension → InvalidData; no panic, no alias.
+    assert!(matches!(
+        BmpImage::from_rgb8(2, 1, vec![1, 2, 3]),
+        Err(Error::InvalidData(_))
+    ));
+    assert!(matches!(
+        BmpImage::from_rgba8(1, 1, vec![1, 2, 3]),
+        Err(Error::InvalidData(_))
+    ));
+    assert!(matches!(
+        BmpImage::from_rgba8(0, 1, vec![]),
+        Err(Error::InvalidData(_))
+    ));
+    let img = BmpImage::from_rgba8(1, 1, vec![1, 2, 3, 4]).unwrap();
+    assert_eq!(img.format(), PixelFormat::Rgba);
+    assert_eq!(img.planes[0].stride, 4);
 }
 
 #[test]

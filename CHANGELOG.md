@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `registry::registry_pixel_format(BmpPixelFormat) -> oxideav_core::PixelFormat`:
+  the layout the framework decoder emits / the demuxer declares.
+- `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap).
+
+### Changed
+
+- **`BmpImage::from_rgb8` / `from_rgba8` return `Result`** (`InvalidData`
+  on a zero dimension or a short buffer) instead of panicking; no
+  infallible alias is kept (IMAGE_CRATE_API ruling).
+- **The framework `BmpDecoder` emits the native layout**, never a
+  pre-converted `Rgba`: `Pal8` + palette side-channel for every indexed
+  depth (4- / 2- / 1-bit indices stay one per byte under the `Pal8`
+  label), `Bgr24` / `Bgra` / `Rgb24` / `Rgba` as stored, `Rgb24` for
+  `Rgb555` / `Rgb565` (core has no 16-bit RGB layout). The BMP demuxer
+  declares that layout on its stream (`None` when the header cannot be
+  read) instead of a fixed `Rgba`. Framework consumers that assumed
+  4-byte `Rgba` frames must convert through `oxideav-pixfmt` or read the
+  stream's `pixel_format`; the deprecated `decode_videoframe` /
+  `decode_dib_videoframe` wrappers still widen to `Rgba`.
+
 ## [0.1.7](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.6...v0.1.7) - 2026-10-03
 
 ### Added

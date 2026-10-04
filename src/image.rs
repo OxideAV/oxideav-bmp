@@ -514,26 +514,29 @@ impl BmpImage {
         Self::new(width, height, format, vec![Plane::new(stride, data)])
     }
 
-    /// Tightly packed `Rgb24` from exactly `3 × width × height` bytes.
-    ///
-    /// # Panics
-    ///
-    /// If `data.len() != 3 × width × height` or a dimension is zero —
-    /// use [`Self::new`] for a fallible path.
-    pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::packed(width, height, PixelFormat::Rgb24, width as usize * 3, data)
-            .expect("BmpImage::from_rgb8: data must be 3 * width * height bytes")
+    /// Tightly packed `Rgb24` from `3 × width × height` bytes (stride
+    /// `3 × width`), validated like [`Self::new`]: a zero dimension or a
+    /// short buffer is `Error::InvalidData`.
+    pub fn from_rgb8(width: u32, height: u32, data: Vec<u8>) -> crate::error::Result<Self> {
+        Self::packed(
+            width,
+            height,
+            PixelFormat::Rgb24,
+            (width as usize).saturating_mul(3),
+            data,
+        )
     }
 
-    /// Tightly packed `Rgba` from exactly `4 × width × height` bytes.
-    ///
-    /// # Panics
-    ///
-    /// If `data.len() != 4 × width × height` or a dimension is zero —
-    /// use [`Self::new`] for a fallible path.
-    pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self::packed(width, height, PixelFormat::Rgba, width as usize * 4, data)
-            .expect("BmpImage::from_rgba8: data must be 4 * width * height bytes")
+    /// Tightly packed `Rgba` from `4 × width × height` bytes (stride
+    /// `4 × width`), validated like [`Self::new`].
+    pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> crate::error::Result<Self> {
+        Self::packed(
+            width,
+            height,
+            PixelFormat::Rgba,
+            (width as usize).saturating_mul(4),
+            data,
+        )
     }
 
     /// Set the colour signalling.

@@ -6,8 +6,7 @@
 use std::io::{Read, SeekFrom, Write};
 
 use oxideav_core::{
-    CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, PixelFormat, Result,
-    StreamInfo, TimeBase,
+    CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, Result, StreamInfo, TimeBase,
 };
 use oxideav_core::{
     ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
@@ -54,7 +53,12 @@ pub fn open_demuxer(
     let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     params.width = Some(width);
     params.height = Some(height);
-    params.pixel_format = Some(PixelFormat::Rgba);
+    // The stream carries the layout the decoder emits (the native one,
+    // see `registry::registry_pixel_format`); a header `info` cannot
+    // read leaves it undeclared and the decoder reports the error.
+    params.pixel_format = crate::info(&buf)
+        .ok()
+        .map(|i| crate::registry::registry_pixel_format(i.format));
     let stream = StreamInfo {
         index: 0,
         params,

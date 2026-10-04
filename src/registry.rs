@@ -80,6 +80,49 @@ pub fn from_core_pixel_format(pf: PixelFormat) -> oxideav_core::Result<BmpPixelF
     })
 }
 
+/// The framework layout the registry decoder emits for a decoded
+/// image: the native layout wherever the core enum has its name
+/// (`Rgba` / `Rgb24` / `Bgra` / `Bgr24` / `Pal8`); the sub-byte indexed
+/// layouts (`Indexed4` / `Indexed2` / `Indexed1`, already one index per
+/// byte) ride `Pal8` with the same plane and palette; `Rgb555` /
+/// `Rgb565`, which core has no 16-bit RGB name for, are widened to
+/// `Rgb24` (bit-replicated 5 / 6-bit samples). The BMP demuxer
+/// declares the same layout on its stream.
+pub fn registry_pixel_format(pf: BmpPixelFormat) -> PixelFormat {
+    match to_core_pixel_format(pf) {
+        Some(core) => core,
+        None if pf.is_indexed() => PixelFormat::Pal8,
+        None => PixelFormat::Rgb24,
+    }
+}
+
+/// Re-label / widen a decoded image to the layout
+/// [`registry_pixel_format`] names (a no-op for layouts core has).
+fn into_registry_layout(image: BmpImage) -> BmpImage {
+    match image.format {
+        BmpPixelFormat::Indexed4 | BmpPixelFormat::Indexed2 | BmpPixelFormat::Indexed1 => {
+            // One index per byte already; only the label changes.
+            BmpImage {
+                format: BmpPixelFormat::Pal8,
+                ..image
+            }
+        }
+        BmpPixelFormat::Rgb555 | BmpPixelFormat::Rgb565 => {
+            let data = image.to_rgb8();
+            BmpImage {
+                width: image.width,
+                height: image.height,
+                format: BmpPixelFormat::Rgb24,
+                planes: vec![Plane::new(image.width as usize * 3, data)],
+                color: image.color,
+                metadata: image.metadata,
+                palette: None,
+            }
+        }
+        _ => image,
+    }
+}
+
 impl TryFrom<PixelFormat> for BmpPixelFormat {
     type Error = oxideav_core::Error;
     fn try_from(pf: PixelFormat) -> oxideav_core::Result<Self> {
@@ -251,10 +294,14 @@ impl CodecOptionsStruct for EncodeOptions {
 // ---- Decoder trait impl + factory ----
 
 /// Factory registered with the codec registry. Consumes one packet per
-/// whole BMP file and produces one `Rgba` frame (the pipeline's BMP
-/// convention: the container declares `Rgba`, and every native layout
-/// is widened through [`BmpImage::to_rgba8`]). BMP is a single-image
-/// format, so `flush()` just drains the one pending frame.
+/// whole BMP file and produces one frame in the image's native layout
+/// per [`registry_pixel_format`] — `Pal8` with the palette side-channel
+/// for every indexed depth, `Bgr24` / `Bgra` / `Rgb24` / `Rgba` as
+/// stored, `Rgb24` for the 16-bit layouts — plus the colour-signal
+/// side-channel when the file carries a colour space (V4 / V5 sRGB).
+/// Nothing is pre-converted to `Rgba`; use `oxideav-pixfmt` (or
+/// [`crate::decode_rgba8`]) for that. BMP is a single-image format, so
+/// `flush()` just drains the one pending frame.
 pub fn make_decoder(_params: &CodecParameters) -> oxideav_core::Result<Box<dyn Decoder>> {
     Ok(Box::new(BmpDecoder {
         codec_id: CodecId::new(crate::CODEC_ID_STR),
@@ -276,7 +323,10 @@ impl Decoder for BmpDecoder {
     }
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
         let image = crate::decoder::decode_file(&packet.data, &DecodeOptions::default())?;
-        self.pending = Some(image_into_video_frame(image.into_rgba(), packet.pts));
+        self.pending = Some(image_into_video_frame(
+            into_registry_layout(image),
+            packet.pts,
+        ));
         Ok(())
     }
     fn receive_frame(&mut self) -> oxideav_core::Result<Frame> {
@@ -529,5 +579,110 @@ mod tests {
             assert_eq!(from_core_pixel_format(c).unwrap(), b);
         }
         assert_eq!(to_core_pixel_format(BmpPixelFormat::Rgb565), None);
+        assert_eq!(
+            registry_pixel_format(BmpPixelFormat::Rgb565),
+            PixelFormat::Rgb24
+        );
+        assert_eq!(
+            registry_pixel_format(BmpPixelFormat::Indexed1),
+            PixelFormat::Pal8
+        );
+    }
+
+    /// One packet through `make_decoder`, as the framework sees it.
+    fn decode_via_registry(bytes: Vec<u8>) -> VideoFrame {
+        let params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
+        let mut dec = make_decoder(&params).unwrap();
+        dec.send_packet(&Packet::new(0, TimeBase::new(1, 1), bytes))
+            .unwrap();
+        match dec.receive_frame().unwrap() {
+            Frame::Video(v) => v,
+            _ => panic!("non-video frame"),
+        }
+    }
+
+    #[test]
+    fn decoder_emits_native_layouts_not_rgba() {
+        use crate::{encode, EncodeOptions};
+        // Pal8: index plane + palette side-channel.
+        let pal = BmpImage::packed(3, 2, BmpPixelFormat::Pal8, 3, vec![0, 1, 2, 2, 1, 0])
+            .unwrap()
+            .with_palette(Palette::from_rgb(&[
+                [10, 20, 30],
+                [40, 50, 60],
+                [70, 80, 90],
+            ]));
+        let v = decode_via_registry(encode(&pal, &EncodeOptions::default()).unwrap());
+        assert_eq!(v.image_plane_count(), 1);
+        assert_eq!(v.planes[0].stride, 3, "Pal8 is one byte per pixel");
+        assert_eq!(v.planes[0].data, [0, 1, 2, 2, 1, 0]);
+        // The default encode writes the full 256-entry table; the
+        // image's entries lead it.
+        let pal_rgb = v.palette().expect("Pal8 frame carries its palette");
+        assert_eq!(pal_rgb.len(), 256 * 3);
+        assert_eq!(&pal_rgb[..9], &[10u8, 20, 30, 40, 50, 60, 70, 80, 90]);
+        assert!(
+            v.color_signal().is_none(),
+            "V3 file carries no colour space"
+        );
+
+        // Indexed1 → Pal8 label, same one-index-per-byte plane.
+        let bw = BmpImage::packed(4, 1, BmpPixelFormat::Indexed1, 4, vec![1, 0, 0, 1])
+            .unwrap()
+            .with_palette(Palette::from_rgb(&[[0, 0, 0], [255, 255, 255]]));
+        let v = decode_via_registry(encode(&bw, &EncodeOptions::default()).unwrap());
+        assert_eq!(v.planes[0].stride, 4);
+        assert_eq!(v.planes[0].data, [1, 0, 0, 1]);
+        assert_eq!(
+            v.palette().map(|p| &p[..6]),
+            Some(&[0u8, 0, 0, 255, 255, 255][..])
+        );
+
+        // Bgr24 stays Bgr24 (BMP's own 24 bpp order, no swizzle).
+        let bgr = BmpImage::packed(1, 1, BmpPixelFormat::Bgr24, 3, vec![1, 2, 3]).unwrap();
+        let v = decode_via_registry(encode(&bgr, &EncodeOptions::default()).unwrap());
+        assert_eq!(v.planes[0].stride, 3);
+        assert_eq!(v.planes[0].data, [1, 2, 3]);
+        assert!(v.palette().is_none());
+
+        // Bgra stays Bgra (4 bytes, file order).
+        let bgra = BmpImage::packed(1, 1, BmpPixelFormat::Bgra, 4, vec![1, 2, 3, 200]).unwrap();
+        let v = decode_via_registry(encode(&bgra, &EncodeOptions::default()).unwrap());
+        assert_eq!(v.planes[0].stride, 4);
+        assert_eq!(v.planes[0].data, [1, 2, 3, 200]);
+
+        // Rgb565 (no core name) widens to Rgb24 by bit replication.
+        let px = 0xF800u16; // R = 31 (bits 15..11), G = 0, B = 0
+        let r565 =
+            BmpImage::packed(1, 1, BmpPixelFormat::Rgb565, 2, px.to_le_bytes().to_vec()).unwrap();
+        let v = decode_via_registry(encode(&r565, &EncodeOptions::default()).unwrap());
+        assert_eq!(v.planes[0].stride, 3);
+        assert_eq!(v.planes[0].data, [255, 0, 0]);
+    }
+
+    #[test]
+    fn demuxer_declares_the_native_layout() {
+        use crate::{encode, EncodeOptions};
+        let pal = BmpImage::packed(2, 1, BmpPixelFormat::Pal8, 2, vec![0, 1])
+            .unwrap()
+            .with_palette(Palette::from_rgb(&[[1, 2, 3], [4, 5, 6]]));
+        let bytes = encode(&pal, &EncodeOptions::default()).unwrap();
+        let ctx = RuntimeContext::new();
+        let dmx =
+            crate::container::open_demuxer(Box::new(std::io::Cursor::new(bytes)), &ctx.codecs)
+                .unwrap();
+        assert_eq!(
+            dmx.streams()[0].params.pixel_format,
+            Some(PixelFormat::Pal8)
+        );
+        let bgr = BmpImage::packed(1, 1, BmpPixelFormat::Bgr24, 3, vec![1, 2, 3]).unwrap();
+        let bytes = encode(&bgr, &EncodeOptions::default()).unwrap();
+        let dmx =
+            crate::container::open_demuxer(Box::new(std::io::Cursor::new(bytes)), &ctx.codecs)
+                .unwrap();
+        assert_eq!(
+            dmx.streams()[0].params.pixel_format,
+            Some(PixelFormat::Bgr24)
+        );
     }
 }
