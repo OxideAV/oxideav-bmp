@@ -48,7 +48,9 @@ BMP has one image per file, so there is no `decode_all`.
 
 BMP-specific depth on top of the contract: `encode_with_report` (also
 tells you which on-disk variant was written — RLE or raw, bitfields,
-…), `decode_dib` / `decode_dib_with` / `encode_dib` (headerless DIBs for
+…), `encode_into` (appends the file to a caller's buffer; with
+`encoded_size_bound` bytes of spare capacity it does not allocate),
+`decode_dib` / `decode_dib_with` / `encode_dib` (headerless DIBs for
 `.ico` / `.cur`), `BmpMetadata::from_bmp` / `from_dib` (every V3 / V4 /
 V5 header field, header-only), `BmpBitfields` (mask presets), the typed
 `BitmapFileHeader` / `BitmapInfoHeader` / `DibHeader` views and the
@@ -940,4 +942,7 @@ expansions below the size where a 65 536-entry combined value→RGBA table
 amortises its build; the combined table is kept above that threshold.
 The encoder's BGR(A) packers walk `chunks_exact` for a bounds-check-free
 shuffle, and the indexed RLE size probe aborts as soon as the compressed
-stream exceeds the raw array on incompressible input.
+stream exceeds the raw array on incompressible input. `encode` and
+`encode_with_report` write each pixel row straight into its final place
+in the output, with no intermediate plane (the RLE probe writes into the
+same buffer), so an encode allocates the file and little else.
