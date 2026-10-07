@@ -30,6 +30,7 @@ use crate::error::{BmpError as Error, Result};
 use crate::image::{BmpImage, BmpPixelFormat, Palette, Plane};
 use crate::options::{CalibratedRgb, EncodeOptions};
 use crate::types::*;
+use std::io::Write;
 
 // The items that used to live in this module keep their `encoder::` path
 // for one release.
@@ -161,6 +162,16 @@ fn encode_source(
         out.shrink_to_fit();
     }
     Ok((out, format))
+}
+
+/// [`crate::encode_to`]: stream `image` into `w`. Every check runs
+/// before the first write.
+pub(crate) fn encode_image_to<W: Write>(
+    image: &BmpImage,
+    options: &EncodeOptions,
+    w: W,
+) -> Result<()> {
+    Plan::new(&EncodeSource::from_image(image)?, options)?.write_to(w)
 }
 
 /// The uncompressed token a layout maps to (the V4 / V5 paths never
@@ -736,6 +747,12 @@ fn written_palette_entries(bpp: u16, palette: &Palette, options: &EncodeOptions)
 /// The largest file the 32-bit `bfSize` field of the
 /// `BITMAPFILEHEADER` can record.
 const MAX_FILE: u64 = u32::MAX as u64;
+
+/// How many bytes of whole rows [`Plan::write_to`] collects before it
+/// hands them to the writer: a narrow image does not cost one write per
+/// row, and a large one is never held in memory. Each write is at least
+/// this long (a row can take it past), except the last.
+const WRITE_CHUNK: usize = 64 * 1024;
 
 /// One encode, decided before the first byte is written: the header
 /// (which carries the RLE choice and the trailing profile blob, see
@@ -1362,6 +1379,69 @@ impl<'a> Plan<'a> {
         out.extend_from_slice(self.tail());
         Ok(self.format)
     }
+
+    /// Stream the file into `w`: the header, then the pixel rows, handed
+    /// to the writer with one `write_all` each time at least
+    /// [`WRITE_CHUNK`] bytes of whole rows have collected (the last write
+    /// can be shorter), then the profile blob in a `write_all` of its
+    /// own. `bfSize` records the file's size, so an RLE stream is first
+    /// measured, one row of scratch at a time, and then encoded again as
+    /// it is written. Every encode error is raised before the first
+    /// write.
+    fn write_to<W: Write>(&self, mut w: W) -> Result<()> {
+        let s = self.sizes;
+        let rle = match (&self.head, s.rle_budget) {
+            (Head::V3Indexed { rle: Some(rle), .. }, Some(budget)) => Some((*rle, budget)),
+            _ => None,
+        };
+        let stride = self.rows.stride as u64;
+        let row = match rle {
+            Some(_) => stride.max(rle_slack(self.rows.width)),
+            None => stride,
+        };
+        // One chunk and a row, or the whole file when that is smaller; never
+        // more than `bound`, which `Sizes::new` checked is addressable, as is
+        // every other count converted to `usize` below.
+        let capacity = (s.head + s.raw.max(row))
+            .min(WRITE_CHUNK as u64 + row)
+            .min(s.bound);
+        let mut buf = Vec::with_capacity(capacity as usize);
+        // Only a V3 indexed header carries an RLE choice, and it has no
+        // blob after the pixels, so an RLE file ends with its stream.
+        if let Some((rle, budget)) = rle {
+            if let Some(len) = self.rows.rle_len(rle, budget as usize, &mut buf) {
+                // Within the limit: the stream is below its budget.
+                let file = s.head + len as u64;
+                self.write_head(&mut buf, file as u32, 0);
+                patch_rle_head(&mut buf, file as usize, rle);
+                for y in 0..self.rows.height {
+                    self.rows.rle_row(rle, y, &mut buf);
+                    if buf.len() >= WRITE_CHUNK {
+                        w.write_all(&buf)?;
+                        buf.clear();
+                    }
+                }
+                w.write_all(&buf)?;
+                return Ok(());
+            }
+            if !s.file_fits {
+                return Err(s.rle_too_large());
+            }
+        }
+        self.write_head(&mut buf, s.file as u32, s.raw as u32);
+        for y in 0..self.rows.height {
+            let at = buf.len();
+            buf.resize(at + self.rows.stride, 0);
+            self.rows.pack(y, &mut buf[at..]);
+            if buf.len() >= WRITE_CHUNK {
+                w.write_all(&buf)?;
+                buf.clear();
+            }
+        }
+        w.write_all(&buf)?;
+        w.write_all(self.tail())?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1877,6 +1957,23 @@ impl Rows<'_> {
             out.truncate(start);
             false
         }
+    }
+
+    /// [`Self::rle_into`] that only measures: the stream's length when it
+    /// is strictly smaller than `budget`. Each row is encoded into
+    /// `scratch` and dropped again.
+    fn rle_len(&self, rle: Rle, budget: usize, scratch: &mut Vec<u8>) -> Option<usize> {
+        let mut len = 0;
+        for y in 0..self.height {
+            if len >= budget {
+                return None;
+            }
+            let mark = scratch.len();
+            self.rle_row(rle, y, scratch);
+            len += scratch.len() - mark;
+            scratch.truncate(mark);
+        }
+        (len < budget).then_some(len)
     }
 }
 
@@ -2528,5 +2625,43 @@ mod tests {
         let mut out = b"head".to_vec();
         assert!(plan.write_into(&mut out).is_err());
         assert_eq!(out, b"head");
+    }
+    /// `encode_to` makes the same decisions, and raises the error before
+    /// it writes anything.
+    #[test]
+    fn a_streamed_file_over_the_limit_is_written_compressed_or_refused() {
+        let opts = EncodeOptions::default();
+        let zeros = pal8(300, false);
+        let rle_file = crate::encode(&zeros, &opts).unwrap();
+        let src = EncodeSource::from_image(&zeros).unwrap();
+        let rle_len = rle_file.len() as u64;
+        for limit in [MAX_FILE, 1078 + 1024 * 300 - 1, rle_len] {
+            let plan = Plan::new(&src, &opts).unwrap().with_limit(limit).unwrap();
+            let mut out = Vec::new();
+            plan.write_to(&mut out).unwrap();
+            assert!(out == rle_file, "limit {limit}");
+        }
+        let plan = Plan::new(&src, &opts)
+            .unwrap()
+            .with_limit(rle_len - 1)
+            .unwrap();
+        let mut out = Vec::new();
+        let err = plan.write_to(&mut out).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("RLE stream does not bring it under"),
+            "{err}"
+        );
+        assert!(out.is_empty(), "wrote before failing");
+
+        let noise = pal8(300, true);
+        let src = EncodeSource::from_image(&noise).unwrap();
+        let plan = Plan::new(&src, &opts)
+            .unwrap()
+            .with_limit(1078 + 1024 * 300 - 1)
+            .unwrap();
+        let mut out = Vec::new();
+        assert!(plan.write_to(&mut out).is_err());
+        assert!(out.is_empty(), "wrote before failing");
     }
 }

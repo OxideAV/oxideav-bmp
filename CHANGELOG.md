@@ -24,6 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overflow panic in a debug build). A `Pal8` / `Indexed4` image whose
   uncompressed file is over that limit but whose RLE file fits is still
   written, RLE-compressed.
+- `encode_to` writes the file as it is encoded instead of encoding the
+  whole file into a `Vec` and handing it to one `write_all`: the headers
+  and pixel rows go out in `write_all` calls of at least 64 KiB of whole
+  rows (the last can be shorter), and a V5 profile in a call of its own.
+  An indexed image that may be RLE-compressed is encoded twice, once to
+  measure the stream (`bfSize` records the file's size) and once to
+  write it. A 1024 x 1024 RGBA encode into `io::sink()` allocates
+  69 632 bytes (4 194 358 with the in-place row writer alone, 8 388 662
+  in 0.1.8); its first write is 65 590 bytes, the 54-byte header and 16
+  rows.
 
 ### Other
 

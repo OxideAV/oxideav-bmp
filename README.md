@@ -943,4 +943,6 @@ shuffle, and the indexed RLE size probe aborts as soon as the compressed
 stream exceeds the raw array on incompressible input. `encode` and
 `encode_with_report` write each pixel row straight into its final place
 in the output, with no intermediate plane (the RLE probe writes into the
-same buffer), so an encode allocates the file and little else.
+same buffer), so an encode allocates the file and little else;
+`encode_to` writes whole rows in calls of at least 64 KiB (the last call
+can be shorter) without holding the file.
