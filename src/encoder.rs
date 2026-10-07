@@ -147,6 +147,23 @@ pub(crate) fn encode_image(
     encode_source(&EncodeSource::from_image(image)?, options)
 }
 
+/// [`crate::encode_into`]: append `image` to `out`. On error `out` has
+/// its length and contents on entry (see [`Plan::write_into`]).
+pub(crate) fn encode_image_into(
+    image: &BmpImage,
+    options: &EncodeOptions,
+    out: &mut Vec<u8>,
+) -> Result<EncodedBmpFormat> {
+    Plan::new(&EncodeSource::from_image(image)?, options)?.write_into(out)
+}
+
+/// [`crate::encoded_size_bound`]: the capacity [`encode_image_into`]
+/// requests. `Sizes::new` has checked that it is addressable.
+pub(crate) fn encoded_size_bound(image: &BmpImage, options: &EncodeOptions) -> Result<usize> {
+    let plan = Plan::new(&EncodeSource::from_image(image)?, options)?;
+    Ok(plan.sizes.bound as usize)
+}
+
 /// [`encode_image`] for a borrowed source: one buffer, reserved once for
 /// the plan's [`Sizes::bound`] and shrunk to the file when the RLE stream
 /// wins.
