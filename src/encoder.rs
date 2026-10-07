@@ -91,38 +91,43 @@ impl EncodedBmpFormat {
 // ---------------------------------------------------------------------------
 
 /// Borrowed view of the source plane: the encoder reads every row
-/// straight out of it.
+/// straight out of it, so the plane-level entry points and the registry
+/// adapter, which hold a [`Plane`] or a framework frame rather than a
+/// [`BmpImage`], encode without copying the pixels first.
 #[derive(Clone, Copy)]
-struct PlaneRef<'a> {
+pub(crate) struct PlaneRef<'a> {
     stride: usize,
     data: &'a [u8],
 }
 
+impl<'a> PlaneRef<'a> {
+    pub(crate) fn new(stride: usize, data: &'a [u8]) -> Self {
+        Self { stride, data }
+    }
+}
+
 impl<'a> From<&'a Plane> for PlaneRef<'a> {
     fn from(plane: &'a Plane) -> Self {
-        Self {
-            stride: plane.stride,
-            data: &plane.data,
-        }
+        Self::new(plane.stride, &plane.data)
     }
 }
 
 /// What an encode reads from its source, borrowed: the [`BmpImage`]
-/// fields the encoder uses.
+/// fields the encoder uses, wherever the caller keeps them.
 #[derive(Clone, Copy)]
-struct EncodeSource<'a> {
-    plane: PlaneRef<'a>,
-    format: BmpPixelFormat,
-    palette: Option<&'a Palette>,
+pub(crate) struct EncodeSource<'a> {
+    pub(crate) plane: PlaneRef<'a>,
+    pub(crate) format: BmpPixelFormat,
+    pub(crate) palette: Option<&'a Palette>,
     /// The ICC profile a V5 `PROFILE_EMBEDDED` header carries when
     /// [`EncodeOptions::embed_icc`] is set.
-    icc: Option<&'a [u8]>,
-    width: u32,
-    height: u32,
+    pub(crate) icc: Option<&'a [u8]>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 impl<'a> EncodeSource<'a> {
-    fn from_image(image: &'a BmpImage) -> Result<Self> {
+    pub(crate) fn from_image(image: &'a BmpImage) -> Result<Self> {
         let plane = image
             .planes
             .first()
@@ -167,7 +172,7 @@ pub(crate) fn encoded_size_bound(image: &BmpImage, options: &EncodeOptions) -> R
 /// [`encode_image`] for a borrowed source: one buffer, reserved once for
 /// the plan's [`Sizes::bound`] and shrunk to the file when the RLE stream
 /// wins.
-fn encode_source(
+pub(crate) fn encode_source(
     src: &EncodeSource<'_>,
     options: &EncodeOptions,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
@@ -195,8 +200,29 @@ fn plain_token(format: BmpPixelFormat) -> EncodedBmpFormat {
     }
 }
 
+/// Validate a bare plane like [`BmpImage::new`] and borrow it as an
+/// encode source (the deprecated plane-level encode entry points funnel
+/// through this).
+fn plane_source<'a>(
+    plane: &'a Plane,
+    format: BmpPixelFormat,
+    palette: Option<&'a Palette>,
+    width: u32,
+    height: u32,
+) -> Result<EncodeSource<'a>> {
+    crate::image::check_plane_geometry(width, height, format, 1, plane.stride, plane.data.len())?;
+    Ok(EncodeSource {
+        plane: plane.into(),
+        format,
+        palette,
+        icc: None,
+        width,
+        height,
+    })
+}
+
 /// Wrap a bare plane + palette into a validated [`BmpImage`] (the
-/// deprecated plane-level entry points funnel through this).
+/// deprecated headerless-DIB plane entry point funnels through this).
 #[allow(deprecated)]
 fn plane_image(
     plane: &Plane,
@@ -240,8 +266,14 @@ pub fn encode_bmp_plane(
     width: u32,
     height: u32,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
-    let image = plane_image(plane, format, palette, width, height)?;
-    encode_image(&image, &EncodeOptions::default())
+    encode_bmp_plane_with_options(
+        plane,
+        format,
+        palette,
+        width,
+        height,
+        EncodeOptions::default(),
+    )
 }
 
 /// Encode a bare plane with explicit options.
@@ -257,8 +289,9 @@ pub fn encode_bmp_plane_with_options(
     height: u32,
     options: EncodeOptions,
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
-    let image = plane_image(plane, format, palette, width, height)?;
-    encode_image(&image, &options)
+    let palette = palette.map(Palette::from);
+    let src = plane_source(plane, format, palette.as_ref(), width, height)?;
+    encode_source(&src, &options)
 }
 
 /// Explicit-mask `BI_BITFIELDS` / `BI_ALPHABITFIELDS` encode.
@@ -283,8 +316,8 @@ pub fn encode_bmp_plane_bitfields(
     height: u32,
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    let image = plane_image(plane, format, None, width, height)?;
-    Ok(encode_image(&image, &options.with_bitfields(masks))?.0)
+    let src = plane_source(plane, format, None, width, height)?;
+    Ok(encode_source(&src, &options.with_bitfields(masks))?.0)
 }
 
 /// V5 `PROFILE_EMBEDDED` encode with the given ICC profile bytes.
@@ -297,13 +330,13 @@ pub fn encode_bmp_with_icc_profile(
     rendering_intent: u32,
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    let mut image = image.clone();
-    image.metadata.icc = Some(icc_profile.to_vec());
+    let mut src = EncodeSource::from_image(image)?;
+    src.icc = Some(icc_profile);
     let options = options
         .with_embed_icc(true)
         .with_linked_icc(None)
         .with_rendering_intent(rendering_intent);
-    Ok(encode_image(&image, &options)?.0)
+    Ok(encode_source(&src, &options)?.0)
 }
 
 /// V5 `PROFILE_LINKED` encode with the given path bytestring.
