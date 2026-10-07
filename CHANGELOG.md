@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The encoder writes each pixel row straight into the output**
+  instead of packing the rows into a plane-sized buffer of their own and
+  copying that into the file. The `BI_RLE8` / `BI_RLE4` probe writes its
+  stream into the same buffer, and the `BI_RLE4` probe reads the nibbles
+  from the index bytes in place. Encoding a 1024 x 1024 RGBA plane
+  through `encode` allocates the 4 194 358-byte file and nothing else
+  (was 8 388 662 bytes); a 1024 x 1024 `Pal8` image whose RLE stream
+  loses allocates 1 051 704 bytes (was 3 148 856). Output bytes are
+  unchanged (`tests/encode_identity.rs`); allocations are pinned by
+  `tests/encode_alloc.rs`. Allocation counts in `BENCHMARKS.md`.
+- A file larger than the 4 GiB the 32-bit `bfSize` field can record is
+  an `Unsupported` error instead of a header with wrapped sizes (or an
+  overflow panic in a debug build). A `Pal8` / `Indexed4` image whose
+  uncompressed file is over that limit but whose RLE file fits is still
+  written, RLE-compressed.
+- `encode_to` writes the file as it is encoded instead of encoding the
+  whole file into a `Vec` and handing it to one `write_all`: the headers
+  and pixel rows go out in `write_all` calls of at least 64 KiB of whole
+  rows (the last can be shorter), and a V5 profile in a call of its own.
+  An indexed image that may be RLE-compressed is encoded twice, once to
+  measure the stream (`bfSize` records the file's size) and once to
+  write it. A 1024 x 1024 RGBA encode into `io::sink()` allocates
+  69 632 bytes (4 194 358 with the in-place row writer alone, 8 388 662
+  in 0.1.8); its first write is 65 590 bytes, the 54-byte header and 16
+  rows.
+
+### Other
+
+- pin encoder output bytes against v0.1.8 digests
+  (`tests/encode_identity.rs`): every pixel format, option family and
+  row order, the error paths, the fuzz seed images, the headerless DIB
+  and images over 64 KiB, through every encode entry point.
+
 ## [0.1.8](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.7...v0.1.8) - 2026-10-04
 
 ### Other

@@ -98,9 +98,14 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], opts: &EncodeOptions) 
     encode(&img, opts)
 }
 
-/// [`encode`] into a writer.
-pub fn encode_to<W: Write>(image: &BmpImage, opts: &EncodeOptions, mut w: W) -> Result<()> {
-    let bytes = encode(image, opts)?;
-    w.write_all(&bytes)?;
-    Ok(())
+/// [`encode`] into a writer, as it is encoded, so the file is never
+/// held in memory: the headers and pixel rows go out in `write_all`
+/// calls of at least 64 KiB each (whole rows collect until 64 KiB is
+/// reached; the last call can be shorter), and any trailing profile in
+/// a `write_all` of its own. An indexed image that may be
+/// RLE-compressed is encoded twice, once to measure the stream (the
+/// file header's `bfSize` records the file's size) and once to write
+/// it. Every encode error is reported before anything is written.
+pub fn encode_to<W: Write>(image: &BmpImage, opts: &EncodeOptions, w: W) -> Result<()> {
+    encoder::encode_image_to(image, opts, w)
 }
