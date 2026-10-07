@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- pin encoder output bytes against v0.1.8 digests
+  (`tests/encode_identity.rs`): every pixel format, option family and
+  row order, the error paths, the fuzz seed images, the headerless DIB
+  and images over 64 KiB, through every encode entry point.
+
 ## [0.1.8](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.7...v0.1.8) - 2026-10-04
 
 ### Other
