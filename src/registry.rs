@@ -165,6 +165,12 @@ fn image_into_video_frame(mut image: BmpImage, pts: Option<i64>) -> VideoFrame {
     } else {
         std::mem::take(&mut image.planes[0].data)
     };
+    video_frame(&image, stride, data, pts)
+}
+
+/// The frame for `image` with `data` as its pixel plane: the palette
+/// and colour-signal side-channels come from `image`.
+fn video_frame(image: &BmpImage, stride: usize, data: Vec<u8>, pts: Option<i64>) -> VideoFrame {
     let mut frame = VideoFrame {
         pts,
         planes: vec![VideoPlane { stride, data }],
@@ -192,8 +198,16 @@ impl From<BmpImage> for VideoFrame {
 }
 
 impl From<&BmpImage> for VideoFrame {
+    /// As `From<BmpImage>`. The frame owns its plane, so the pixels are
+    /// copied once; nothing else is cloned (the ICC profile, which a
+    /// frame does not carry, stays behind).
     fn from(image: &BmpImage) -> Self {
-        image_into_video_frame(image.clone(), None)
+        let data = image
+            .planes
+            .first()
+            .map(|p| p.data.clone())
+            .unwrap_or_default();
+        video_frame(image, image.stride(), data, None)
     }
 }
 

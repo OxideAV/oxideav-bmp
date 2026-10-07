@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loses allocates 1 051 704 bytes (was 3 148 856). Output bytes are
   unchanged (`tests/encode_identity.rs`); allocations are pinned by
   `tests/encode_alloc.rs`. Allocation counts in `BENCHMARKS.md`.
+- `VideoFrame::from(&BmpImage)` copies only the pixel plane; it cloned
+  the whole image, ICC profile and palette included, and dropped all but
+  the plane. With a 1 MiB profile on a 1024 x 1024 RGBA image it
+  allocates 4 194 336 bytes (was 5 242 944).
 - A file larger than the 4 GiB the 32-bit `bfSize` field can record is
   an `Unsupported` error instead of a header with wrapped sizes (or an
   overflow panic in a debug build). A `Pal8` / `Indexed4` image whose
