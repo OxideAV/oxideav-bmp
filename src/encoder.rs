@@ -1382,7 +1382,9 @@ struct Rows<'a> {
 
 impl<'a> Rows<'a> {
     /// `truncated` is the error for a plane holding fewer than `height`
-    /// rows of its stride.
+    /// rows of its stride. A stride below the row width (possible
+    /// through the public fields) is an error too: the source rows would
+    /// overlap, and the last one could run past the plane.
     fn new(
         plane: PlaneRef<'a>,
         pack: RowPack,
@@ -1395,6 +1397,13 @@ impl<'a> Rows<'a> {
         let h = height as usize;
         if plane.data.len() < plane.stride * h {
             return Err(Error::invalid(truncated));
+        }
+        let row = w.saturating_mul(pack.source_bytes());
+        if plane.stride < row {
+            return Err(Error::invalid(format!(
+                "BMP encoder: plane stride {} is below the {row} bytes a {w}-pixel row needs",
+                plane.stride
+            )));
         }
         Ok(Self {
             plane,

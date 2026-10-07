@@ -477,3 +477,32 @@ fn hostile_inputs_never_panic() {
         }
     }
 }
+
+/// A stride below the row width, set through the public fields after
+/// validation, is an error from every encoder, never a panic and never
+/// rows read across each other.
+#[test]
+fn a_stride_below_the_row_is_refused_by_every_encoder() {
+    for format in all_formats() {
+        let row = W as usize * format.bytes_per_pixel();
+        // Stride 0 with no data, and a stride one byte short with enough
+        // data for the last row.
+        let mut empty = image(format);
+        empty.planes[0].stride = 0;
+        empty.planes[0].data.clear();
+        let mut short = image(format);
+        short.planes[0].stride = row - 1;
+        for img in [&empty, &short] {
+            let what = format!("{format:?} stride {}", img.planes[0].stride);
+            let err = encode(img, &EncodeOptions::default()).unwrap_err();
+            assert!(matches!(err, Error::InvalidData(_)), "{what}: {err}");
+            assert!(err.to_string().contains("stride"), "{what}: {err}");
+            for doubled in [false, true] {
+                let err = oxideav_bmp::encode_dib(img, doubled).unwrap_err();
+                assert!(err.to_string().contains("stride"), "{what} dib: {err}");
+            }
+            let opts = EncodeOptions::default().with_bitfields(BmpBitfields::BGRA8888);
+            assert!(encode(img, &opts).is_err(), "{what} bitfields");
+        }
+    }
+}

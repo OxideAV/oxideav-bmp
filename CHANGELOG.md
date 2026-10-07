@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uncompressed file is over that limit but whose RLE file fits is still
   written, RLE-compressed.
 
+### Fixed
+
+- A plane whose stride is below the row width, possible by changing the
+  public fields of a validated `BmpImage`, is an `InvalidData` error from
+  every encoder (the `encode` family and `encode_dib`) instead of a slice
+  panic (stride 0 with a short plane) or rows read across each other.
+
 ### Other
 
 - pin encoder output bytes against v0.1.8 digests
