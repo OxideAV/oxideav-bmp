@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The encoder writes each pixel row straight into the output**
+  instead of packing the rows into a plane-sized buffer of their own and
+  copying that into the file. The `BI_RLE8` / `BI_RLE4` probe writes its
+  stream into the same buffer, and the `BI_RLE4` probe reads the nibbles
+  from the index bytes in place. Encoding a 1024 x 1024 RGBA plane
+  through `encode` allocates the 4 194 358-byte file and nothing else
+  (was 8 388 662 bytes); a 1024 x 1024 `Pal8` image whose RLE stream
+  loses allocates 1 051 704 bytes (was 3 148 856). Output bytes are
+  unchanged (`tests/encode_identity.rs`); allocations are pinned by
+  `tests/encode_alloc.rs`. Allocation counts in `BENCHMARKS.md`.
+- A file larger than the 4 GiB the 32-bit `bfSize` field can record is
+  an `Unsupported` error instead of a header with wrapped sizes (or an
+  overflow panic in a debug build). A `Pal8` / `Indexed4` image whose
+  uncompressed file is over that limit but whose RLE file fits is still
+  written, RLE-compressed.
+
+### Fixed
+
+- A plane whose stride is below the row width, possible by changing the
+  public fields of a validated `BmpImage`, is an `InvalidData` error from
+  every encoder (the `encode` family and `encode_dib`) instead of a slice
+  panic (stride 0 with a short plane) or rows read across each other.
+
+### Other
+
+- pin encoder output bytes against v0.1.8 digests
+  (`tests/encode_identity.rs`): every pixel format, option family and
+  row order, the error paths, the fuzz seed images, the headerless DIB
+  and images over 64 KiB, through every encode entry point.
+
 ## [0.1.8](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.7...v0.1.8) - 2026-10-04
 
 ### Other
