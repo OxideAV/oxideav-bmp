@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `encode_into(&BmpImage, &EncodeOptions, &mut Vec<u8>)` appends the
+  file to a caller's buffer, after whatever it already holds, and
+  `encoded_size_bound(&BmpImage, &EncodeOptions)` returns the spare
+  capacity it requests: the file's exact size, or for a `Pal8` /
+  `Indexed4` image the plain V3 header may RLE-compress, the smaller of
+  the uncompressed file and 4 GiB plus `2 × width + 2` bytes. With that
+  capacity reserved, `encode_into` does not allocate; on error the
+  buffer keeps its length and contents.
+
 ### Changed
 
 - **The encoder writes each pixel row straight into the output**

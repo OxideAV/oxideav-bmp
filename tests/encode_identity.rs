@@ -28,10 +28,11 @@
 //! (bytes and the reported [`EncodedBmpFormat`], so the RLE-or-raw choice
 //! is pinned), the plane-level, bitfields, calibrated-RGB, ICC and linked
 //! deprecated names, [`encode_rgb8`] / [`encode_rgba8`], each as bytes or
-//! as the error message. [`encode`], [`encode_to`], [`encode_bmp`] and
-//! [`encode_bmp_with_options`] must return exactly what
-//! [`encode_with_report`] returns, error messages included, and any
-//! entry point that succeeds must write the bytes `encode` writes. With
+//! as the error message. [`encode`], [`encode_to`], [`encode_into`],
+//! [`encode_bmp`] and [`encode_bmp_with_options`] must return exactly
+//! what [`encode_with_report`] returns, error messages included,
+//! [`encoded_size_bound`] must fail as it does or cover the file, and
+//! any entry point that succeeds must write the bytes `encode` writes. With
 //! the `registry` feature the registry encoder and the deprecated
 //! `VideoFrame` names are pinned the same way, for the synthetic and the
 //! seed images, in their own table.
@@ -49,8 +50,9 @@ use oxideav_bmp::{
     decode, encode, encode_bmp, encode_bmp_bitfields, encode_bmp_plane, encode_bmp_plane_bitfields,
     encode_bmp_plane_with_options, encode_bmp_with_calibrated_rgb, encode_bmp_with_icc_profile,
     encode_bmp_with_linked_icc_profile, encode_bmp_with_options, encode_dib, encode_dib_plane,
-    encode_rgb8, encode_rgba8, encode_to, encode_with_report, BmpBitfields, BmpImage, BmpPalette,
-    CalibratedRgb, EncodeOptions, EncodedBmpFormat, Error, Palette, PixelFormat, LCS_GM_BUSINESS,
+    encode_into, encode_rgb8, encode_rgba8, encode_to, encode_with_report, encoded_size_bound,
+    BmpBitfields, BmpImage, BmpPalette, CalibratedRgb, EncodeOptions, EncodedBmpFormat, Error,
+    Palette, PixelFormat, LCS_GM_BUSINESS,
 };
 
 const FORMATS: [PixelFormat; 10] = [
@@ -443,6 +445,32 @@ fn entry_points(
             "{what}: encode_to wrote before failing"
         );
     }
+    let mut appended = b"prefix".to_vec();
+    let via_into = encode_into(image, opts, &mut appended).map(|()| appended[6..].to_vec());
+    exact(
+        &format!("{what}: encode_into"),
+        msg(&via_into),
+        report_bytes.clone(),
+    );
+    assert_eq!(&appended[..6], b"prefix", "{what}: encode_into");
+    if via_into.is_err() {
+        assert_eq!(
+            appended.len(),
+            6,
+            "{what}: encode_into kept bytes after failing"
+        );
+    }
+    match (encoded_size_bound(image, opts), &report_bytes) {
+        (Ok(bound), Ok(bytes)) => assert!(bytes.len() <= bound, "{what}: encoded_size_bound"),
+        (Err(a), Err(b)) => assert_eq!(&a.to_string(), b, "{what}: encoded_size_bound"),
+        // The one error the bound cannot see: decided by the RLE probe
+        // during the encode (an over-limit uncompressed file).
+        (Ok(_), Err(b)) => assert!(
+            b.contains("RLE stream does not bring it under"),
+            "{what}: encoded_size_bound succeeded where encode failed: {b}"
+        ),
+        (Err(a), Ok(_)) => panic!("{what}: encoded_size_bound failed where encode did not: {a}"),
+    }
     exact(
         &format!("{what}: encode_bmp_with_options"),
         msg(&encode_bmp_with_options(image, opts.clone())),
@@ -788,6 +816,9 @@ fn large_images_are_byte_identical_to_v0_1_8_through_every_sink() {
         };
         encode_to(&image, &opts, &mut trickle).unwrap();
         assert!(trickle.out == *bytes, "{name}: encode_to");
+        let mut appended = b"prefix".to_vec();
+        encode_into(&image, &opts, &mut appended).unwrap();
+        assert!(appended[6..] == bytes[..], "{name}: encode_into");
     }
     compare("GOLDEN_LARGE", &actual, GOLDEN_LARGE);
 }

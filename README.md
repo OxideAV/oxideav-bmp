@@ -48,7 +48,9 @@ BMP has one image per file, so there is no `decode_all`.
 
 BMP-specific depth on top of the contract: `encode_with_report` (also
 tells you which on-disk variant was written — RLE or raw, bitfields,
-…), `decode_dib` / `decode_dib_with` / `encode_dib` (headerless DIBs for
+…), `encode_into` (appends the file to a caller's buffer; with
+`encoded_size_bound` bytes of spare capacity it does not allocate),
+`decode_dib` / `decode_dib_with` / `encode_dib` (headerless DIBs for
 `.ico` / `.cur`), `BmpMetadata::from_bmp` / `from_dib` (every V3 / V4 /
 V5 header field, header-only), `BmpBitfields` (mask presets), the typed
 `BitmapFileHeader` / `BitmapInfoHeader` / `DibHeader` views and the
