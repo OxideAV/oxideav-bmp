@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The deprecated `encode_bmp_plane` / `encode_bmp_plane_with_options` /
+  `encode_bmp_plane_bitfields` and `encode_bmp_with_icc_profile` read the
+  caller's plane in place instead of cloning it (or the whole image) into
+  a new `BmpImage`, and the registry `BmpEncoder` and the deprecated
+  `encode_bmp_videoframe` read the frame's plane in place instead of
+  copying it through `BmpImage::from_video_frame`. A 1024 x 1024 RGBA
+  encode allocates 4 194 358 bytes through `encode_bmp_plane` and
+  4 194 796 through the registry encoder (12 582 998 and 12 583 436 in
+  0.1.8; 8 388 694 and 8 389 132 with the in-place row writer alone).
 - **The encoder writes each pixel row straight into the output**
   instead of packing the rows into a plane-sized buffer of their own and
   copying that into the file. The `BI_RLE8` / `BI_RLE4` probe writes its
