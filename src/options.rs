@@ -11,7 +11,8 @@ use crate::types::LCS_GM_IMAGES;
 /// buffer is allocated, so a hostile header fails with
 /// [`BmpError::LimitExceeded`] instead of committing memory. The
 /// defaults are: no dimension / pixel-count limit, decoded plane capped
-/// at [`DecodeOptions::DEFAULT_MAX_BYTES`] (1 GiB), `strict = false`.
+/// at [`DecodeOptions::DEFAULT_MAX_BYTES`] (1 GiB), `strict = false`,
+/// `copy_icc = true`.
 ///
 /// `strict` turns two tolerances off:
 ///
@@ -21,6 +22,15 @@ use crate::types::LCS_GM_IMAGES;
 ///   mode rejects it as `InvalidData`;
 /// * the two `BITMAPFILEHEADER` reserved words, documented as "must be
 ///   zero", are normally ignored; strict mode rejects a non-zero value.
+///
+/// `copy_icc` selects whether a V5 header's embedded ICC profile is
+/// copied out of the file into [`crate::Metadata::icc`]. It is by
+/// default. The profile is as large as the file says, up to the whole
+/// file, so a caller that wants the pixels, or that reads the profile
+/// where it lies in the file, turns it off: `metadata.icc` is then
+/// `None`, and nothing profile-sized is allocated. [`crate::info`]
+/// still reports `has_icc`, and the header's `bV5ProfileData` /
+/// `bV5ProfileSize` ([`crate::DibHeader`]) locate the profile.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecodeOptions {
@@ -35,6 +45,9 @@ pub struct DecodeOptions {
     pub max_bytes: Option<u64>,
     /// Enforce the file-header rules (see the type docs).
     pub strict: bool,
+    /// Copy an embedded ICC profile into the decoded image's metadata
+    /// (see the type docs). Default `true`.
+    pub copy_icc: bool,
 }
 
 impl DecodeOptions {
@@ -73,6 +86,13 @@ impl DecodeOptions {
     /// Set strict mode.
     pub fn with_strict(mut self, strict: bool) -> Self {
         self.strict = strict;
+        self
+    }
+
+    /// Set whether an embedded ICC profile is copied into the decoded
+    /// image (see the type docs).
+    pub fn with_copy_icc(mut self, copy_icc: bool) -> Self {
+        self.copy_icc = copy_icc;
         self
     }
 
@@ -129,6 +149,7 @@ impl Default for DecodeOptions {
             max_pixels: None,
             max_bytes: Some(Self::DEFAULT_MAX_BYTES),
             strict: false,
+            copy_icc: true,
         }
     }
 }

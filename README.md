@@ -166,7 +166,9 @@ back as `Bgra` / `Bgr24` and `Indexed4` / `Indexed2` / `Indexed1` as
 1 GiB of decoded plane), `strict: bool` (default `false`; `true` rejects
 a `bfOffBits` that points inside the header / colour table instead of
 recovering the canonical offset, and non-zero `BITMAPFILEHEADER`
-reserved words).
+reserved words), `copy_icc: bool` (default `true`; `false` leaves an
+embedded ICC profile in the file: `metadata.icc` is `None` and nothing
+profile-sized is allocated).
 
 `EncodeOptions` (`#[non_exhaustive]`, `Default`, `with_*`):
 
@@ -940,4 +942,7 @@ expansions below the size where a 65 536-entry combined value→RGBA table
 amortises its build; the combined table is kept above that threshold.
 The encoder's BGR(A) packers walk `chunks_exact` for a bounds-check-free
 shuffle, and the indexed RLE size probe aborts as soon as the compressed
-stream exceeds the raw array on incompressible input.
+stream exceeds the raw array on incompressible input. `encode` and
+`encode_with_report` write each pixel row straight into its final place
+in the output, with no intermediate plane (the RLE probe writes into the
+same buffer), so an encode allocates the file and little else.

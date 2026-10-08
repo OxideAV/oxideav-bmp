@@ -463,34 +463,8 @@ impl BmpImage {
         format: PixelFormat,
         planes: Vec<Plane>,
     ) -> crate::error::Result<Self> {
-        use crate::error::BmpError as Error;
-        if width == 0 || height == 0 {
-            return Err(Error::invalid("BMP image: zero dimension"));
-        }
-        if planes.len() != 1 {
-            return Err(Error::invalid(format!(
-                "BMP image: expected exactly one plane, got {}",
-                planes.len()
-            )));
-        }
-        let plane = &planes[0];
-        let min_stride = (width as usize).saturating_mul(format.bytes_per_pixel());
-        if plane.stride < min_stride {
-            return Err(Error::invalid(format!(
-                "BMP image: stride {} is below the {} bytes a {}-pixel row of {:?} needs",
-                plane.stride, min_stride, width, format
-            )));
-        }
-        let needed = plane.stride.saturating_mul(height as usize);
-        if plane.data.len() < needed {
-            return Err(Error::invalid(format!(
-                "BMP image: plane holds {} bytes, {} × {} rows need {}",
-                plane.data.len(),
-                plane.stride,
-                height,
-                needed
-            )));
-        }
+        let (stride, len) = planes.first().map_or((0, 0), |p| (p.stride, p.data.len()));
+        check_plane_geometry(width, height, format, planes.len(), stride, len)?;
         Ok(Self {
             width,
             height,
@@ -760,6 +734,46 @@ impl BmpImage {
         }
         out
     }
+}
+
+/// The geometry rules of [`BmpImage::new`], for `planes` planes whose
+/// first has `stride` and holds `len` bytes: non-zero dimensions,
+/// exactly one plane, a stride covering `width × bytes_per_pixel`, data
+/// covering `stride × height`. The encoder applies them to planes it
+/// borrows (a bare [`Plane`], a framework frame's plane) without
+/// building a [`BmpImage`] around a copy.
+pub(crate) fn check_plane_geometry(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    planes: usize,
+    stride: usize,
+    len: usize,
+) -> crate::error::Result<()> {
+    use crate::error::BmpError as Error;
+    if width == 0 || height == 0 {
+        return Err(Error::invalid("BMP image: zero dimension"));
+    }
+    if planes != 1 {
+        return Err(Error::invalid(format!(
+            "BMP image: expected exactly one plane, got {planes}"
+        )));
+    }
+    let min_stride = (width as usize).saturating_mul(format.bytes_per_pixel());
+    if stride < min_stride {
+        return Err(Error::invalid(format!(
+            "BMP image: stride {} is below the {} bytes a {}-pixel row of {:?} needs",
+            stride, min_stride, width, format
+        )));
+    }
+    let needed = stride.saturating_mul(height as usize);
+    if len < needed {
+        return Err(Error::invalid(format!(
+            "BMP image: plane holds {} bytes, {} × {} rows need {}",
+            len, stride, height, needed
+        )));
+    }
+    Ok(())
 }
 
 /// Widen a 5-bit sample to 8 bits by bit replication (`v << 3 | v >> 2`).

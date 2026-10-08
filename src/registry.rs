@@ -29,8 +29,9 @@ use oxideav_core::{
 };
 
 use crate::container;
+use crate::encoder::{EncodeSource, PlaneRef};
 use crate::error::BmpError;
-use crate::image::{BmpImage, BmpPixelFormat, ColorInfo, ColorRange, Palette, Plane};
+use crate::image::{BmpImage, BmpPixelFormat, ColorInfo, ColorRange, Metadata, Palette, Plane};
 use crate::options::{DecodeOptions, EncodeOptions};
 
 /// Convert a [`BmpError`] into the framework-shared `oxideav_core::Error`
@@ -197,16 +198,19 @@ impl From<&BmpImage> for VideoFrame {
     }
 }
 
-impl BmpImage {
-    /// Rebuild an image from a framework frame and the stream
-    /// parameters that describe it (`width`, `height` and
-    /// `pixel_format` are required; a `Pal8` frame needs the palette
-    /// side-channel). The frame's colour-signal side-channel, when
-    /// attached, becomes `color`.
-    pub fn from_video_frame(
-        frame: &VideoFrame,
-        params: &CodecParameters,
-    ) -> crate::error::Result<Self> {
+/// A framework frame validated as [`BmpImage::from_video_frame`]
+/// validates it, its pixel plane still borrowed from the frame.
+struct FrameSource<'a> {
+    width: u32,
+    height: u32,
+    format: BmpPixelFormat,
+    plane: &'a VideoPlane,
+    palette: Option<Palette>,
+    color: ColorInfo,
+}
+
+impl<'a> FrameSource<'a> {
+    fn new(frame: &'a VideoFrame, params: &CodecParameters) -> crate::error::Result<Self> {
         let width = params
             .width
             .ok_or_else(|| BmpError::invalid("BMP: missing width"))?;
@@ -216,30 +220,80 @@ impl BmpImage {
         let core_pix = params
             .pixel_format
             .ok_or_else(|| BmpError::invalid("BMP: missing pixel_format"))?;
-        let pix = from_core_pixel_format(core_pix).map_err(|_| {
+        let format = from_core_pixel_format(core_pix).map_err(|_| {
             BmpError::unsupported(format!("BMP: pixel format {core_pix:?} not supported"))
         })?;
         let plane = frame
             .image_planes()
             .first()
             .ok_or_else(|| BmpError::invalid("BMP: frame has no planes"))?;
-        let mut img = BmpImage::new(
+        crate::image::check_plane_geometry(
             width,
             height,
-            pix,
-            vec![Plane::new(plane.stride, plane.data.clone())],
+            format,
+            1,
+            plane.stride,
+            plane.data.len(),
         )?;
-        if pix.is_indexed() {
+        let mut palette = None;
+        if format.is_indexed() {
             let rgb = frame.palette().ok_or_else(|| {
                 BmpError::invalid("BMP: Pal8 frame without a palette side-channel")
             })?;
             let entries: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-            img.palette = Some(Palette::from_rgb(&entries));
+            palette = Some(Palette::from_rgb(&entries));
         }
-        if let Some(sig) = frame.color_signal() {
-            img.color = from_color_signal(&sig);
-        }
-        Ok(img)
+        let color = frame
+            .color_signal()
+            .map_or_else(ColorInfo::bmp_default, |sig| from_color_signal(&sig));
+        Ok(Self {
+            width,
+            height,
+            format,
+            plane,
+            palette,
+            color,
+        })
+    }
+
+    /// Encode the frame as a BMP file, reading the pixels from the
+    /// frame's own plane.
+    fn encode(&self, options: &EncodeOptions) -> crate::error::Result<Vec<u8>> {
+        let src = EncodeSource {
+            plane: PlaneRef::new(self.plane.stride, &self.plane.data),
+            format: self.format,
+            palette: self.palette.as_ref(),
+            icc: None,
+            width: self.width,
+            height: self.height,
+        };
+        Ok(crate::encoder::encode_source(&src, options)?.0)
+    }
+}
+
+impl BmpImage {
+    /// Rebuild an image from a framework frame and the stream
+    /// parameters that describe it (`width`, `height` and
+    /// `pixel_format` are required; a `Pal8` frame needs the palette
+    /// side-channel). The frame's colour-signal side-channel, when
+    /// attached, becomes `color`.
+    ///
+    /// The image owns its plane, so the frame's pixels are copied; the
+    /// registry encoder reads them from the frame instead.
+    pub fn from_video_frame(
+        frame: &VideoFrame,
+        params: &CodecParameters,
+    ) -> crate::error::Result<Self> {
+        let src = FrameSource::new(frame, params)?;
+        Ok(BmpImage {
+            width: src.width,
+            height: src.height,
+            format: src.format,
+            planes: vec![Plane::new(src.plane.stride, src.plane.data.clone())],
+            color: src.color,
+            metadata: Metadata::default(),
+            palette: src.palette,
+        })
     }
 }
 
@@ -395,8 +449,9 @@ impl Encoder for BmpEncoder {
                 ))
             }
         };
-        let image = BmpImage::from_video_frame(vf, &self.out_params)?;
-        let bytes = crate::encoder::encode_image(&image, &self.opts)?.0;
+        // The pixels are read from the frame's plane; nothing is copied
+        // before the file is written.
+        let bytes = FrameSource::new(vf, &self.out_params)?.encode(&self.opts)?;
         self.pending = Some(bytes);
         Ok(())
     }
@@ -445,16 +500,21 @@ pub fn decode_dib_videoframe(
     Ok(image_into_video_frame(image.into_rgba(), None))
 }
 
+fn frame_params(format: PixelFormat, width: u32, height: u32) -> CodecParameters {
+    let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
+    params.width = Some(width);
+    params.height = Some(height);
+    params.pixel_format = Some(format);
+    params
+}
+
 fn frame_image(
     frame: &VideoFrame,
     format: PixelFormat,
     width: u32,
     height: u32,
 ) -> oxideav_core::Result<BmpImage> {
-    let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
-    params.width = Some(width);
-    params.height = Some(height);
-    params.pixel_format = Some(format);
+    let params = frame_params(format, width, height);
     Ok(BmpImage::from_video_frame(frame, &params)?)
 }
 
@@ -466,8 +526,8 @@ pub fn encode_bmp_videoframe(
     width: u32,
     height: u32,
 ) -> oxideav_core::Result<Vec<u8>> {
-    let image = frame_image(frame, format, width, height)?;
-    Ok(crate::encoder::encode_image(&image, &EncodeOptions::default())?.0)
+    let params = frame_params(format, width, height);
+    Ok(FrameSource::new(frame, &params)?.encode(&EncodeOptions::default())?)
 }
 
 /// Encode a `VideoFrame` into a headerless DIB.

@@ -237,11 +237,12 @@ pub(crate) fn color_from_header(header: &DibHeader) -> ColorInfo {
     }
 }
 
-/// The contract [`Metadata`]: the embedded ICC profile when the V5
-/// header declares one that fits in the buffer.
-fn metadata_from_header(header: &DibHeader, whole: &[u8], base: usize) -> Metadata {
+/// The contract [`Metadata`]: a copy of the embedded ICC profile when
+/// the V5 header declares one that fits in the buffer and `copy_icc`
+/// ([`DecodeOptions::copy_icc`]) asks for it.
+fn metadata_from_header(header: &DibHeader, whole: &[u8], base: usize, copy_icc: bool) -> Metadata {
     let mut m = Metadata::default();
-    if header.cs_type == Some(PROFILE_EMBEDDED) {
+    if copy_icc && header.cs_type == Some(PROFILE_EMBEDDED) {
         m.icc = read_profile_slot(
             whole,
             base,
@@ -567,7 +568,7 @@ fn decode_dib_payload(
         format: layout.format,
         planes: vec![Plane::new(out_stride, data)],
         color: color_from_header(h),
-        metadata: metadata_from_header(h, whole, base),
+        metadata: metadata_from_header(h, whole, base, opts.copy_icc),
         palette,
     })
 }

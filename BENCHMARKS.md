@@ -94,3 +94,29 @@ change; the deltas, not the microsecond figures, are what carry over.
    directly, each pixel to its already-flipped row, with palette lookups
    through the padded table — dropping `height + 1` allocations, a full
    copy pass, and the per-pixel bounds check.
+
+## In-place row writer (Unreleased)
+
+The encoder writes each source row straight into its final place in the
+output buffer instead of packing the rows into a plane-sized buffer of
+their own and copying that into the file. The `BI_RLE8` / `BI_RLE4`
+probe writes its stream into the same buffer, and the `BI_RLE4` probe
+reads the nibbles from the index bytes in place. Output bytes are
+unchanged (`tests/encode_identity.rs`).
+
+Bytes allocated by one `encode` of a 1024×1024 image, counted by the
+global allocator in `tests/encode_alloc.rs` (v0.1.8 is "before"):
+
+| Image                      | file      | before    | after     |
+| -------------------------- | --------- | --------- | --------- |
+| `Rgba`                     | 4 194 358 | 8 388 662 | 4 194 358 |
+| `Pal8` noise (raw array)   | 1 049 654 | 3 148 856 | 1 051 704 |
+| `Pal8` runs (`BI_RLE8`)    | 35 894    | 2 135 096 | 1 087 598 |
+| `Indexed4` noise (raw)     | 524 406   | 1 576 056 | 526 456   |
+| `Indexed4` runs (`BI_RLE4`) | 34 934   | 1 086 584 | 561 390   |
+
+For `Pal8` / `Indexed4` the buffer is reserved once for the raw file
+plus 2 × width + 2 bytes, the most the RLE probe writes past the raw
+array before it gives up; when the RLE stream wins, the buffer is
+shrunk to the file, which the counter records as one more allocation
+of the file's size.
