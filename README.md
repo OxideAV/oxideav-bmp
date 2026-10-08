@@ -50,6 +50,8 @@ BMP-specific depth on top of the contract: `encode_with_report` (also
 tells you which on-disk variant was written — RLE or raw, bitfields,
 …), `encode_into` (appends the file to a caller's buffer; with
 `encoded_size_bound` bytes of spare capacity it does not allocate),
+`encode_into_with_icc_profile` / `encoded_size_bound_with_icc_profile`
+(the same with a borrowed ICC profile in place of `metadata.icc`),
 `decode_dib` / `decode_dib_with` / `encode_dib` (headerless DIBs for
 `.ico` / `.cur`), `BmpMetadata::from_bmp` / `from_dib` (every V3 / V4 /
 V5 header field, header-only), `BmpBitfields` (mask presets), the typed
@@ -66,8 +68,8 @@ function always returned `Rgba`, `decode` returns the native layout),
 `encode_bmp_with_options` / `encode_bmp_plane*` (now `encode` /
 `encode_with_report`), `encode_bmp_bitfields` / `encode_bmp_with_icc_profile`
 / `encode_bmp_with_linked_icc_profile` / `encode_bmp_with_calibrated_rgb`
-(now `EncodeOptions` fields: `bitfields`, `embed_icc` + `metadata.icc`,
-`linked_icc`, `calibrated_rgb`), `BmpEncodeOptions` (now `EncodeOptions`,
+(now `EncodeOptions` fields: `bitfields`, `embed_icc` + `metadata.icc`
+or `encode_into_with_icc_profile`, `linked_icc`, `calibrated_rgb`), `BmpEncodeOptions` (now `EncodeOptions`,
 `#[non_exhaustive]`, built with `with_*`), `BmpPlane` (now `Plane`),
 `BmpPalette` (`[u8; 3]` entries; now `Palette` with `[u8; 4]`),
 `BmpPixelFormat::Indexed8` (now `Pal8`), and the `*_videoframe`

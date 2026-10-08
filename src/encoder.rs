@@ -169,6 +169,36 @@ pub(crate) fn encoded_size_bound(image: &BmpImage, options: &EncodeOptions) -> R
     Ok(plan.sizes.bound as usize)
 }
 
+/// `image` as an encode source whose ICC profile is the borrowed
+/// `profile` rather than [`crate::Metadata::icc`].
+fn source_with_icc<'a>(image: &'a BmpImage, profile: &'a [u8]) -> Result<EncodeSource<'a>> {
+    let mut src = EncodeSource::from_image(image)?;
+    src.icc = Some(profile);
+    Ok(src)
+}
+
+/// [`crate::encode_into_with_icc_profile`]: [`encode_image_into`] with
+/// `profile` in place of the image's own.
+pub(crate) fn encode_image_into_with_icc(
+    image: &BmpImage,
+    options: &EncodeOptions,
+    profile: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<EncodedBmpFormat> {
+    Plan::new(&source_with_icc(image, profile)?, options)?.write_into(out)
+}
+
+/// [`crate::encoded_size_bound_with_icc_profile`]: the capacity
+/// [`encode_image_into_with_icc`] requests.
+pub(crate) fn encoded_size_bound_with_icc(
+    image: &BmpImage,
+    options: &EncodeOptions,
+    profile: &[u8],
+) -> Result<usize> {
+    let plan = Plan::new(&source_with_icc(image, profile)?, options)?;
+    Ok(plan.sizes.bound as usize)
+}
+
 /// [`encode_image`] for a borrowed source: one buffer, reserved once for
 /// the plan's [`Sizes::bound`] and shrunk to the file when the RLE stream
 /// wins.
@@ -330,8 +360,7 @@ pub fn encode_bmp_with_icc_profile(
     rendering_intent: u32,
     options: EncodeOptions,
 ) -> Result<Vec<u8>> {
-    let mut src = EncodeSource::from_image(image)?;
-    src.icc = Some(icc_profile);
+    let src = source_with_icc(image, icc_profile)?;
     let options = options
         .with_embed_icc(true)
         .with_linked_icc(None)

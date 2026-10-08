@@ -109,6 +109,39 @@ pub fn encoded_size_bound(image: &BmpImage, opts: &EncodeOptions) -> Result<usiz
     encoder::encoded_size_bound(image, opts)
 }
 
+/// [`encode_into`] with `profile` as the image's ICC profile, in place
+/// of [`crate::Metadata::icc`]: the profile is borrowed and written once,
+/// straight into `out`, so a caller that holds it elsewhere need not
+/// copy it into the image first. [`EncodeOptions`] decide the header as
+/// they do for [`encode_into`]: with the defaults the file is a V5
+/// `PROFILE_EMBEDDED` bitmap at the default rendering intent, the bytes
+/// the deprecated `encode_bmp_with_icc_profile` writes at
+/// `LCS_GM_IMAGES`, while [`EncodeOptions::embed_icc`] `= false` writes
+/// no profile and [`EncodeOptions::linked_icc`] links one instead.
+/// With [`encoded_size_bound_with_icc_profile`] bytes of spare capacity
+/// in `out`, the encode does not allocate. On error `out` keeps the
+/// length and contents it had.
+pub fn encode_into_with_icc_profile(
+    image: &BmpImage,
+    opts: &EncodeOptions,
+    profile: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    encoder::encode_image_into_with_icc(image, opts, profile, out).map(|_| ())
+}
+
+/// The spare capacity [`encode_into_with_icc_profile`] requests, and so
+/// needs to encode without allocating: [`encoded_size_bound`] for the
+/// image carrying `profile`. With the default options it is the file's
+/// exact size.
+pub fn encoded_size_bound_with_icc_profile(
+    image: &BmpImage,
+    opts: &EncodeOptions,
+    profile: &[u8],
+) -> Result<usize> {
+    encoder::encoded_size_bound_with_icc(image, opts, profile)
+}
+
 /// Encode tightly packed 8-bit RGB as a 24-bit `BI_RGB` bitmap.
 pub fn encode_rgb8(width: u32, height: u32, rgb: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     let img = BmpImage::packed(

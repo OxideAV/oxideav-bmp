@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `encode_into_with_icc_profile(&BmpImage, &EncodeOptions, &[u8],
+  &mut Vec<u8>)` and `encoded_size_bound_with_icc_profile(&BmpImage,
+  &EncodeOptions, &[u8])`: `encode_into` and `encoded_size_bound` with
+  a borrowed ICC profile in place of `metadata.icc`. The deprecated
+  `encode_bmp_with_icc_profile` was the only entry that borrowed a
+  profile; the contract path took it only as the image's owned
+  `Vec<u8>`, so a caller that held the profile elsewhere copied it into
+  the image first. The profile is written once, straight into the
+  output, and the options decide the header as for `encode_into`; with
+  the defaults the bytes are those `encode_bmp_with_icc_profile` writes
+  at `LCS_GM_IMAGES`. A 1024 x 1024 RGBA encode with a 1 MiB profile
+  allocates nothing into a buffer reserved at the bound, and the
+  5 243 018-byte file alone into an empty one.
+
 - `encode_into(&BmpImage, &EncodeOptions, &mut Vec<u8>)` appends the
   file to a caller's buffer, after whatever it already holds, and
   `encoded_size_bound(&BmpImage, &EncodeOptions)` returns the spare
@@ -236,7 +250,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BmpPixelFormat::Indexed8` — all kept for one release as thin wrappers
   over the contract entry points (the `decode_bmp*` / `*_videoframe`
   wrappers still widen to `Rgba`).
-
 
 ### Added
 
