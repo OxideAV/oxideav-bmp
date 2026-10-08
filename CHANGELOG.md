@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `DecodeOptions::copy_icc` / `with_copy_icc(bool)` (default `true`,
+  the behaviour so far). With `false`, `decode_with` and
+  `decode_dib_with` leave an embedded V5 ICC profile in the file instead
+  of copying it into `metadata.icc`, so a caller that wants the pixels,
+  or that reads the profile where it lies, does not pay for a copy as
+  large as the file says. Decoding a 1024 x 1024 RGBA file with a 1 MiB
+  profile allocates 4 194 336 bytes this way, against 5 242 912 with
+  the copy; the pixel plane is 4 194 304.
+
 ### Changed
 
 - The deprecated `encode_bmp_plane` / `encode_bmp_plane_with_options` /
@@ -225,7 +236,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BmpPixelFormat::Indexed8` — all kept for one release as thin wrappers
   over the contract entry points (the `decode_bmp*` / `*_videoframe`
   wrappers still widen to `Rgba`).
-
 
 ### Added
 

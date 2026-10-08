@@ -166,7 +166,9 @@ back as `Bgra` / `Bgr24` and `Indexed4` / `Indexed2` / `Indexed1` as
 1 GiB of decoded plane), `strict: bool` (default `false`; `true` rejects
 a `bfOffBits` that points inside the header / colour table instead of
 recovering the canonical offset, and non-zero `BITMAPFILEHEADER`
-reserved words).
+reserved words), `copy_icc: bool` (default `true`; `false` leaves an
+embedded ICC profile in the file: `metadata.icc` is `None` and nothing
+profile-sized is allocated).
 
 `EncodeOptions` (`#[non_exhaustive]`, `Default`, `with_*`):
 
