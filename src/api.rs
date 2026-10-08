@@ -28,7 +28,8 @@ pub fn decode(bytes: &[u8]) -> Result<BmpImage> {
     decoder::decode_file(bytes, &DecodeOptions::default())
 }
 
-/// Decode with explicit limits / strictness.
+/// Decode with explicit limits / strictness / profile copy
+/// ([`DecodeOptions`]).
 pub fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<BmpImage> {
     decoder::decode_file(bytes, opts)
 }
