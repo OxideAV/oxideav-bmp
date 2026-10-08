@@ -71,6 +71,77 @@ pub fn encode_with_report(
     encoder::encode_image(image, opts)
 }
 
+/// [`encode`] appended to `out`, after whatever it already holds.
+///
+/// The encode requests [`encoded_size_bound`] bytes of spare capacity
+/// once (`Vec::reserve`, which may give more) and writes each pixel row
+/// straight into its place: when `out` already has that much spare
+/// capacity, the encode does not allocate. On error `out` keeps the
+/// length and contents it had. Every error but one is raised before
+/// `out` is touched; the exception is a `Pal8` / `Indexed4` image whose
+/// uncompressed file is over the 4 GiB the BMP size fields can record
+/// and whose RLE stream does not bring it under, which is found after
+/// the RLE probe and truncates `out` back.
+pub fn encode_into(image: &BmpImage, opts: &EncodeOptions, out: &mut Vec<u8>) -> Result<()> {
+    encoder::encode_image_into(image, opts, out).map(|_| ())
+}
+
+/// The spare capacity [`encode_into`] requests, and so needs to encode
+/// `image` without allocating.
+///
+/// This is the file's exact size for every layout but one: a `Pal8` /
+/// `Indexed4` image written with the plain V3 header (no
+/// [`EncodeOptions::bitfields`], [`EncodeOptions::calibrated_rgb`] or V5
+/// profile option) and RLE allowed (bottom-up with
+/// [`EncodeOptions::rle`] set). There the RLE probe runs, and the bound
+/// is the smaller of the uncompressed file and 4 GiB (2^32 bytes), plus
+/// `2 × width + 2` bytes, the most the probe writes past its budget
+/// before it gives up; the file itself is never larger than the
+/// uncompressed one. The V4 calibrated-RGB and V5 profile paths never
+/// use RLE and return exact sizes.
+///
+/// It fails as [`encode`] does for everything decided before encoding.
+/// A bound for an RLE candidate whose uncompressed file is over the
+/// 4 GiB the BMP size fields can record does not mean the encode will
+/// succeed: whether the RLE stream brings the file under is only known
+/// once the probe has run during the encode.
+pub fn encoded_size_bound(image: &BmpImage, opts: &EncodeOptions) -> Result<usize> {
+    encoder::encoded_size_bound(image, opts)
+}
+
+/// [`encode_into`] with `profile` as the image's ICC profile, in place
+/// of [`crate::Metadata::icc`]: the profile is borrowed and written once,
+/// straight into `out`, so a caller that holds it elsewhere need not
+/// copy it into the image first. [`EncodeOptions`] decide the header as
+/// they do for [`encode_into`]: with the defaults the file is a V5
+/// `PROFILE_EMBEDDED` bitmap at the default rendering intent, the bytes
+/// the deprecated `encode_bmp_with_icc_profile` writes at
+/// `LCS_GM_IMAGES`, while [`EncodeOptions::embed_icc`] `= false` writes
+/// no profile and [`EncodeOptions::linked_icc`] links one instead.
+/// With [`encoded_size_bound_with_icc_profile`] bytes of spare capacity
+/// in `out`, the encode does not allocate. On error `out` keeps the
+/// length and contents it had.
+pub fn encode_into_with_icc_profile(
+    image: &BmpImage,
+    opts: &EncodeOptions,
+    profile: &[u8],
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    encoder::encode_image_into_with_icc(image, opts, profile, out).map(|_| ())
+}
+
+/// The spare capacity [`encode_into_with_icc_profile`] requests, and so
+/// needs to encode without allocating: [`encoded_size_bound`] for the
+/// image carrying `profile`. With the default options it is the file's
+/// exact size.
+pub fn encoded_size_bound_with_icc_profile(
+    image: &BmpImage,
+    opts: &EncodeOptions,
+    profile: &[u8],
+) -> Result<usize> {
+    encoder::encoded_size_bound_with_icc(image, opts, profile)
+}
+
 /// Encode tightly packed 8-bit RGB as a 24-bit `BI_RGB` bitmap.
 pub fn encode_rgb8(width: u32, height: u32, rgb: &[u8], opts: &EncodeOptions) -> Result<Vec<u8>> {
     let img = BmpImage::packed(

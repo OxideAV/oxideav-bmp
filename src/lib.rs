@@ -37,7 +37,11 @@
 //! 2 / 1-bit indexed (RLE8 / RLE4 when smaller), explicit-mask
 //! `BI_BITFIELDS` / `BI_ALPHABITFIELDS`, V4 calibrated-RGB and V5
 //! embedded / linked ICC headers — all selected through
-//! [`EncodeOptions`] fields.
+//! [`EncodeOptions`] fields. [`encode_into`] appends the file to a
+//! caller's buffer instead of returning a new one; with
+//! [`encoded_size_bound`] bytes of spare capacity it does not allocate.
+//! [`encode_into_with_icc_profile`] does the same with a borrowed ICC
+//! profile in place of the image's own.
 //!
 //! The headerless "DIB" helpers ([`decode_dib`] / [`encode_dib`]) read
 //! and write the same `BITMAPINFOHEADER` + pixel array without the
@@ -84,6 +88,10 @@ pub use image::{
 pub use options::{CalibratedRgb, DecodeOptions, EncodeOptions};
 
 // ---- BMP-specific depth (the contract is a floor, not a ceiling) ----------
+pub use api::{
+    encode_into, encode_into_with_icc_profile, encoded_size_bound,
+    encoded_size_bound_with_icc_profile,
+};
 pub use decoder::{decode_dib, decode_dib_with};
 pub use encoder::{encode_dib, BmpBitfields, EncodedBmpFormat};
 pub use metadata::{

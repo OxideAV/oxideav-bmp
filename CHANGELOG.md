@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `encode_into_with_icc_profile(&BmpImage, &EncodeOptions, &[u8],
+  &mut Vec<u8>)` and `encoded_size_bound_with_icc_profile(&BmpImage,
+  &EncodeOptions, &[u8])`: `encode_into` and `encoded_size_bound` with
+  a borrowed ICC profile in place of `metadata.icc`. The deprecated
+  `encode_bmp_with_icc_profile` was the only entry that borrowed a
+  profile; the contract path took it only as the image's owned
+  `Vec<u8>`, so a caller that held the profile elsewhere copied it into
+  the image first. The profile is written once, straight into the
+  output, and the options decide the header as for `encode_into`; with
+  the defaults the bytes are those `encode_bmp_with_icc_profile` writes
+  at `LCS_GM_IMAGES`. A 1024 x 1024 RGBA encode with a 1 MiB profile
+  allocates nothing into a buffer reserved at the bound, and the
+  5 243 018-byte file alone into an empty one.
+
+- `encode_into(&BmpImage, &EncodeOptions, &mut Vec<u8>)` appends the
+  file to a caller's buffer, after whatever it already holds, and
+  `encoded_size_bound(&BmpImage, &EncodeOptions)` returns the spare
+  capacity it requests: the file's exact size, or for a `Pal8` /
+  `Indexed4` image the plain V3 header may RLE-compress, the smaller of
+  the uncompressed file and 4 GiB plus `2 × width + 2` bytes. With that
+  capacity reserved, `encode_into` does not allocate; on error the
+  buffer keeps its length and contents.
+
+### Changed
+
+- The deprecated `encode_bmp_plane` / `encode_bmp_plane_with_options` /
+  `encode_bmp_plane_bitfields` and `encode_bmp_with_icc_profile` read the
+  caller's plane in place instead of cloning it (or the whole image) into
+  a new `BmpImage`, and the registry `BmpEncoder` and the deprecated
+  `encode_bmp_videoframe` read the frame's plane in place instead of
+  copying it through `BmpImage::from_video_frame`. A 1024 x 1024 RGBA
+  encode allocates 4 194 358 bytes through `encode_bmp_plane` and
+  4 194 796 through the registry encoder (12 582 998 and 12 583 436 in
+  0.1.8; 8 388 694 and 8 389 132 with the in-place row writer alone).
+- **The encoder writes each pixel row straight into the output**
+  instead of packing the rows into a plane-sized buffer of their own and
+  copying that into the file. The `BI_RLE8` / `BI_RLE4` probe writes its
+  stream into the same buffer, and the `BI_RLE4` probe reads the nibbles
+  from the index bytes in place. Encoding a 1024 x 1024 RGBA plane
+  through `encode` allocates the 4 194 358-byte file and nothing else
+  (was 8 388 662 bytes); a 1024 x 1024 `Pal8` image whose RLE stream
+  loses allocates 1 051 704 bytes (was 3 148 856). Output bytes are
+  unchanged (`tests/encode_identity.rs`); allocations are pinned by
+  `tests/encode_alloc.rs`. Allocation counts in `BENCHMARKS.md`.
+- A file larger than the 4 GiB the 32-bit `bfSize` field can record is
+  an `Unsupported` error instead of a header with wrapped sizes (or an
+  overflow panic in a debug build). A `Pal8` / `Indexed4` image whose
+  uncompressed file is over that limit but whose RLE file fits is still
+  written, RLE-compressed.
+
+### Other
+
+- pin encoder output bytes against v0.1.8 digests
+  (`tests/encode_identity.rs`): every pixel format, option family and
+  row order, the error paths, the fuzz seed images, the headerless DIB
+  and images over 64 KiB, through every encode entry point.
+
 ## [0.1.8](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.7...v0.1.8) - 2026-10-04
 
 ### Other
@@ -191,7 +250,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BmpPixelFormat::Indexed8` — all kept for one release as thin wrappers
   over the contract entry points (the `decode_bmp*` / `*_videoframe`
   wrappers still widen to `Rgba`).
-
 
 ### Added
 

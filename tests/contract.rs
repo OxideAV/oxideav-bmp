@@ -5,10 +5,11 @@
 use std::io::Cursor;
 
 use oxideav_bmp::{
-    decode, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_rgb8, encode_rgba8,
-    encode_to, encode_with_report, info, probe, BmpBitfields, BmpImage, BmpMetadata, CalibratedRgb,
-    ColorInfo, ColorRange, DecodeOptions, EncodeOptions, EncodedBmpFormat, Error, Palette,
-    PixelFormat, Plane, BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB, BI_RLE8,
+    decode, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_into, encode_rgb8,
+    encode_rgba8, encode_to, encode_with_report, encoded_size_bound, info, probe, BmpBitfields,
+    BmpImage, BmpMetadata, CalibratedRgb, ColorInfo, ColorRange, DecodeOptions, EncodeOptions,
+    EncodedBmpFormat, Error, Palette, PixelFormat, Plane, BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB,
+    BI_RLE8,
 };
 
 const W: u32 = 5; // odd width: every row needs DWORD padding on disk
@@ -267,6 +268,74 @@ fn raw_paths_and_streams() {
         encode_rgb8(W, H, &rgb_src[..10], &EncodeOptions::default()),
         Err(Error::InvalidData(_))
     ));
+}
+
+#[test]
+fn encode_into_appends_and_fails_without_touching_the_buffer() {
+    for format in all_formats() {
+        let img = image(format);
+        let opts = EncodeOptions::default();
+        let bytes = encode(&img, &opts).unwrap();
+        let mut out = b"head".to_vec();
+        encode_into(&img, &opts, &mut out).unwrap();
+        assert_eq!(&out[..4], b"head", "{format:?}");
+        assert_eq!(&out[4..], &bytes[..], "{format:?}: same bytes as encode");
+        // A second file appends after the first.
+        encode_into(&img, &opts, &mut out).unwrap();
+        assert_eq!(&out[4 + bytes.len()..], &bytes[..], "{format:?}");
+    }
+    // Mutually exclusive header options: an error, and the buffer is
+    // left exactly as it was (length and capacity).
+    let opts = EncodeOptions::default()
+        .with_bitfields(BmpBitfields::RGB565)
+        .with_calibrated_rgb(CalibratedRgb::new([0; 9], [0; 3]));
+    let mut out = b"head".to_vec();
+    let capacity = out.capacity();
+    let err = encode_into(&image(PixelFormat::Rgba), &opts, &mut out).unwrap_err();
+    assert!(matches!(err, Error::Unsupported(_)));
+    assert_eq!((out.as_slice(), out.capacity()), (&b"head"[..], capacity));
+    // A short plane (the fields are public) fails the same way.
+    let mut short = image(PixelFormat::Bgr24);
+    short.planes[0].data.truncate(4);
+    assert!(matches!(
+        encode_into(&short, &EncodeOptions::default(), &mut out),
+        Err(Error::InvalidData(_))
+    ));
+    assert_eq!((out.as_slice(), out.capacity()), (&b"head"[..], capacity));
+}
+
+#[test]
+fn encoded_size_bound_covers_the_file() {
+    for format in all_formats() {
+        let img = image(format);
+        for opts in [
+            EncodeOptions::default(),
+            EncodeOptions::default().with_top_down(true),
+            EncodeOptions::default().with_rle(false),
+        ] {
+            let bound = encoded_size_bound(&img, &opts).unwrap();
+            let (bytes, written) = encode_with_report(&img, &opts).unwrap();
+            let rle_probe = matches!(format, PixelFormat::Pal8 | PixelFormat::Indexed4)
+                && opts.rle
+                && !opts.top_down;
+            if rle_probe {
+                // The uncompressed file plus 2 × width + 2.
+                let raw = encode(&img, &opts.clone().with_rle(false)).unwrap();
+                assert_eq!(bound, raw.len() + 2 * W as usize + 2, "{format:?}");
+                assert!(bytes.len() <= raw.len(), "{format:?} {written:?}");
+            } else {
+                assert_eq!(bound, bytes.len(), "{format:?} {opts:?}: the exact size");
+            }
+        }
+    }
+    // The same errors as `encode`.
+    let mut short = image(PixelFormat::Rgba);
+    short.planes[0].data.truncate(4);
+    let opts = EncodeOptions::default();
+    assert_eq!(
+        encoded_size_bound(&short, &opts).unwrap_err().to_string(),
+        encode(&short, &opts).unwrap_err().to_string()
+    );
 }
 
 #[test]
