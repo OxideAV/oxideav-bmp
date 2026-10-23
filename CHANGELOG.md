@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - edition 2024, MSRV 1.95.
-
 - **The encoder writes each pixel row straight into the output**
   instead of packing the rows into a plane-sized buffer of their own and
   copying that into the file. The `BI_RLE8` / `BI_RLE4` probe writes its

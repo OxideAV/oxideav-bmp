@@ -10,7 +10,7 @@
 mod counting_alloc;
 
 use counting_alloc::*;
-use oxideav_bmp::{encode, EncodeOptions};
+use oxideav_bmp::{EncodeOptions, encode};
 
 #[test]
 fn encode_allocates_the_file_once() {

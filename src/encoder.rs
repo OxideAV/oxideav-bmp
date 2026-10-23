@@ -709,11 +709,7 @@ fn encode_dib_impl(
 /// Bottom-up DIBs encode the absolute height; top-down DIBs encode its
 /// negation per the BMP spec's signed-height convention.
 fn signed_stored_height(h: u32, top_down: bool) -> i32 {
-    if top_down {
-        -(h as i32)
-    } else {
-        h as i32
-    }
+    if top_down { -(h as i32) } else { h as i32 }
 }
 
 /// Number of colour-table entries actually written on disk for the
@@ -1531,7 +1527,12 @@ impl RowPack {
             // shuffle).
             Self::Bgra32 { in_bpp, bgr } => match (in_bpp, bgr) {
                 (4, false) => {
-                    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                    for (d, s) in dst
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(src.as_chunks::<4>().0.iter())
+                    {
                         d[0] = s[2];
                         d[1] = s[1];
                         d[2] = s[0];
@@ -1540,7 +1541,12 @@ impl RowPack {
                 }
                 (4, true) => dst[..src.len()].copy_from_slice(src),
                 (_, false) => {
-                    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+                    for (d, s) in dst
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(src.as_chunks::<3>().0.iter())
+                    {
                         d[0] = s[2];
                         d[1] = s[1];
                         d[2] = s[0];
@@ -1548,7 +1554,12 @@ impl RowPack {
                     }
                 }
                 (_, true) => {
-                    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+                    for (d, s) in dst
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(src.as_chunks::<3>().0.iter())
+                    {
                         d[..3].copy_from_slice(s);
                         d[3] = 0xFF;
                     }
@@ -1558,11 +1569,21 @@ impl RowPack {
             Self::Bgr24 { in_bpp, bgr } => {
                 let dst = &mut dst[..src.len() / in_bpp * 3];
                 if bgr {
-                    for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(in_bpp)) {
+                    for (d, s) in dst
+                        .as_chunks_mut::<3>()
+                        .0
+                        .iter_mut()
+                        .zip(src.chunks_exact(in_bpp))
+                    {
                         d.copy_from_slice(&s[..3]);
                     }
                 } else {
-                    for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(in_bpp)) {
+                    for (d, s) in dst
+                        .as_chunks_mut::<3>()
+                        .0
+                        .iter_mut()
+                        .zip(src.chunks_exact(in_bpp))
+                    {
                         d[0] = s[2];
                         d[1] = s[1];
                         d[2] = s[0];
@@ -2100,12 +2121,12 @@ fn write_dib_header_v4_bitfields(out: &mut Vec<u8>, w: u32, stored_height: i32) 
     out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_used
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 extension: R/G/B/A masks (offsets 40-55)
+    // V4 extension: R/G/B/A masks (offsets 40-55)
     out.extend_from_slice(&0xF800u32.to_le_bytes()); // R mask
     out.extend_from_slice(&0x07E0u32.to_le_bytes()); // G mask
     out.extend_from_slice(&0x001Fu32.to_le_bytes()); // B mask
     out.extend_from_slice(&0x0000u32.to_le_bytes()); // A mask (no alpha)
-                                                     // CS type: LCS_sRGB = 0x73524742
+    // CS type: LCS_sRGB = 0x73524742
     out.extend_from_slice(&0x7352_4742u32.to_le_bytes());
     // CIEXYZTRIPLE (9 × i32 = 36 bytes) — all zero for sRGB
     out.extend_from_slice(&[0u8; 36]);
@@ -2159,12 +2180,12 @@ fn write_dib_header_v4_calibrated(
     out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
     out.extend_from_slice(&clr_used.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 tail: R/G/B/A masks (offsets 40..56).
+    // V4 tail: R/G/B/A masks (offsets 40..56).
     out.extend_from_slice(&masks[0].to_le_bytes()); // R
     out.extend_from_slice(&masks[1].to_le_bytes()); // G
     out.extend_from_slice(&masks[2].to_le_bytes()); // B
     out.extend_from_slice(&masks[3].to_le_bytes()); // A
-                                                    // bV4CSType — calibrated RGB: endpoints + gamma are authoritative.
+    // bV4CSType — calibrated RGB: endpoints + gamma are authoritative.
     out.extend_from_slice(&LCS_CALIBRATED_RGB.to_le_bytes());
     // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes).
     for v in endpoints {
@@ -2225,18 +2246,18 @@ fn write_dib_header_v5_with_profile(
     out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_used
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 tail: R/G/B/A masks. Zeroed for BI_RGB direct-colour;
-                                                // canonical 5-6-5 layout for 16-bpp BI_BITFIELDS.
+    // V4 tail: R/G/B/A masks. Zeroed for BI_RGB direct-colour;
+    // canonical 5-6-5 layout for 16-bpp BI_BITFIELDS.
     out.extend_from_slice(&masks[0].to_le_bytes()); // R
     out.extend_from_slice(&masks[1].to_le_bytes()); // G
     out.extend_from_slice(&masks[2].to_le_bytes()); // B
     out.extend_from_slice(&masks[3].to_le_bytes()); // A
-                                                    // bV5CSType — caller-selected: PROFILE_EMBEDDED routes the
-                                                    // trailing blob through `BmpMetadata::icc_profile`;
-                                                    // PROFILE_LINKED keeps the trailing blob as an opaque
-                                                    // external-path bytestring that the decoder surfaces via
-                                                    // `profile_data_offset` / `profile_size` without
-                                                    // auto-loading.
+    // bV5CSType — caller-selected: PROFILE_EMBEDDED routes the
+    // trailing blob through `BmpMetadata::icc_profile`;
+    // PROFILE_LINKED keeps the trailing blob as an opaque
+    // external-path bytestring that the decoder surfaces via
+    // `profile_data_offset` / `profile_size` without
+    // auto-loading.
     out.extend_from_slice(&cs_type.to_le_bytes());
     // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes) — zero; the profile
     // (embedded or linked) is the authoritative description.
@@ -2248,7 +2269,7 @@ fn write_dib_header_v5_with_profile(
     out.extend_from_slice(&profile_data_offset.to_le_bytes());
     out.extend_from_slice(&profile_size.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // bV5Reserved
-                                                // Total: 40 + 16 + 4 + 36 + 12 + 4 + 4 + 4 + 4 = 124 ✓
+    // Total: 40 + 16 + 4 + 36 + 12 + 4 + 4 + 4 + 4 = 124 ✓
 }
 
 /// Canonical RGB 5-6-5 mask quadruple (R, G, B, A=0) — used by the V5
@@ -2304,7 +2325,7 @@ fn write_dib_header_v5_indexed_with_profile(
     out.extend_from_slice(&2835i32.to_le_bytes());
     out.extend_from_slice(&clr_used.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 mask region zeroed for BI_RGB indexed.
+    // V4 mask region zeroed for BI_RGB indexed.
     out.extend_from_slice(&[0u8; 16]);
     out.extend_from_slice(&cs_type.to_le_bytes());
     out.extend_from_slice(&[0u8; 36]); // CIEXYZTRIPLE — zero, profile is authoritative
@@ -2384,11 +2405,7 @@ mod tests {
         let data = (0..1024 * height as usize)
             .map(|_| {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                if noise {
-                    (state >> 24) as u8
-                } else {
-                    0
-                }
+                if noise { (state >> 24) as u8 } else { 0 }
             })
             .collect();
         BmpImage::packed(1024, height, BmpPixelFormat::Pal8, 1024, data)

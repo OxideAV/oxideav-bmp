@@ -37,21 +37,26 @@ fn note(size: usize) {
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         note(layout.size());
-        System.alloc(layout)
+        // SAFETY: the caller's contract for `GlobalAlloc::alloc` is
+        // forwarded unchanged.
+        unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         note(layout.size());
-        System.alloc_zeroed(layout)
+        // SAFETY: as for `alloc`.
+        unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout)
+        // SAFETY: `ptr` / `layout` are what `System` handed out.
+        unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         note(new_size);
-        System.realloc(ptr, layout, new_size)
+        // SAFETY: as for `dealloc`, with the caller's `new_size`.
+        unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
 
