@@ -5,7 +5,7 @@
 mod counting_alloc;
 
 use counting_alloc::*;
-use oxideav_bmp::{encode, encode_to, BmpImage, EncodeOptions, Metadata};
+use oxideav_bmp::{BmpImage, EncodeOptions, Metadata, encode, encode_to};
 
 /// One 64 KiB write chunk plus a row, for raw rows and for the RLE
 /// stream alike (the RLE stream is measured first, a row at a time).
