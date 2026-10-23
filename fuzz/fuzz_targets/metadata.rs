@@ -39,7 +39,7 @@
 //! BMP-file framing.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::{decode, decode_dib, BmpMetadata};
+use oxideav_bmp::{BmpMetadata, decode, decode_dib};
 
 fuzz_target!(|data: &[u8]| {
     // Header-only metadata parse (the V5 profile-slot slicing).

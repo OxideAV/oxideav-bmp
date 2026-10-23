@@ -5,10 +5,10 @@
 use std::io::Cursor;
 
 use oxideav_bmp::{
-    decode, decode_from, decode_rgb8, decode_rgba8, decode_with, encode, encode_rgb8, encode_rgba8,
-    encode_to, encode_with_report, info, probe, BmpBitfields, BmpImage, BmpMetadata, CalibratedRgb,
-    ColorInfo, ColorRange, DecodeOptions, EncodeOptions, EncodedBmpFormat, Error, Palette,
-    PixelFormat, Plane, BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB, BI_RLE8,
+    BI_ALPHABITFIELDS, BI_BITFIELDS, BI_RGB, BI_RLE8, BmpBitfields, BmpImage, BmpMetadata,
+    CalibratedRgb, ColorInfo, ColorRange, DecodeOptions, EncodeOptions, EncodedBmpFormat, Error,
+    Palette, PixelFormat, Plane, decode, decode_from, decode_rgb8, decode_rgba8, decode_with,
+    encode, encode_rgb8, encode_rgba8, encode_to, encode_with_report, info, probe,
 };
 
 const W: u32 = 5; // odd width: every row needs DWORD padding on disk
@@ -175,7 +175,9 @@ fn sixteen_bit_expansion_is_bit_replication() {
     let img = BmpImage::packed(4, 1, PixelFormat::Rgb555, 8, data).unwrap();
     assert_eq!(
         img.to_rgba8(),
-        [255, 255, 255, 255, 0x84, 0x84, 0x84, 255, 0, 0, 0, 255, 0, 0, 0, 255]
+        [
+            255, 255, 255, 255, 0x84, 0x84, 0x84, 255, 0, 0, 0, 255, 0, 0, 0, 255
+        ]
     );
     // 5-6-5: 0xFFFF → white; 0x0400 → G = 0b100000 → 0x82.
     let words: Vec<u16> = vec![0xFFFF, 0x0400];
@@ -387,11 +389,13 @@ fn header_families_are_exclusive() {
     .unwrap();
     assert_eq!(token, EncodedBmpFormat::Bitfields);
     assert_eq!(info(&bf_opaque).unwrap().compression, BI_BITFIELDS);
-    assert!(decode(&bf_opaque)
-        .unwrap()
-        .to_rgba8()
-        .chunks(4)
-        .all(|p| p[3] == 0xFF));
+    assert!(
+        decode(&bf_opaque)
+            .unwrap()
+            .to_rgba8()
+            .chunks(4)
+            .all(|p| p[3] == 0xFF)
+    );
     let back = decode(&bf).unwrap();
     assert_eq!(back.format, PixelFormat::Bgra);
     assert_eq!(back.planes, src.planes);

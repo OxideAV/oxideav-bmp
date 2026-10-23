@@ -15,8 +15,8 @@
 #![allow(deprecated)]
 
 use oxideav_bmp::{
-    decode_bmp, encode_bmp, encode_bmp_with_options, BmpImage, BmpPixelFormat, EncodeOptions,
-    EncodedBmpFormat, Palette, Plane,
+    BmpImage, BmpPixelFormat, EncodeOptions, EncodedBmpFormat, Palette, Plane, decode_bmp,
+    encode_bmp, encode_bmp_with_options,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -200,7 +200,7 @@ fn magick_8bpp_indexed() {
     let w = 8u32;
     let h = 8u32;
     let palette = Palette::from_rgb(&[[255, 0, 0], [0, 0, 255]]); // red=0, blue=1
-                                                                  // Solid red image (all index 0).
+    // Solid red image (all index 0).
     let data = vec![0u8; w as usize * h as usize];
     let src = BmpImage::new(
         w,
@@ -236,7 +236,7 @@ fn magick_4bpp_indexed() {
     let w = 8u32;
     let h = 8u32;
     let palette = Palette::from_rgb(&[[0, 255, 0], [255, 0, 0]]); // green=0, red=1
-                                                                  // Solid green (all index 0).
+    // Solid green (all index 0).
     let data = vec![0u8; w as usize * h as usize];
     let src = BmpImage::new(
         w,
@@ -317,7 +317,7 @@ fn magick_rle8_delta_skip_fills_index0() {
         v.to_le_bytes()
     }
     let off: u32 = 14 + 40 + 4 * 4; // file + info header + 4 RGBQUADs
-                                    // RLE: idx1 at (0,bottom); delta +2x,+1y → (3,top); idx2; end.
+    // RLE: idx1 at (0,bottom); delta +2x,+1y → (3,top); idx2; end.
     let rle: [u8; 10] = [
         0x01, 0x01, // run 1 × idx1
         0x00, 0x02, 0x02, 0x01, // delta +2 x, +1 y
@@ -386,7 +386,7 @@ fn magick_rle4_encode() {
     let w = 32u32;
     let h = 16u32;
     let palette = Palette::from_rgb(&[[0, 0, 255], [255, 0, 0]]); // blue=0, red=1
-                                                                  // Solid blue (index 0).
+    // Solid blue (index 0).
     let data = vec![0u8; w as usize * h as usize];
     let src = BmpImage::new(
         w,
@@ -425,8 +425,8 @@ fn magick_minimal_palette_8bpp() {
     let w = 8u32;
     let h = 8u32;
     let palette = Palette::from_rgb(&[[255, 0, 0], [0, 0, 255]]); // 2-entry table; red=0, blue=1
-                                                                  // Force the uncompressed indexed path (alternate rows ⇒ poor RLE) so
-                                                                  // we exercise an explicit biClrUsed=2 colour table, not an RLE stream.
+    // Force the uncompressed indexed path (alternate rows ⇒ poor RLE) so
+    // we exercise an explicit biClrUsed=2 colour table, not an RLE stream.
     let mut data = Vec::with_capacity(w as usize * h as usize);
     for _ in 0..h {
         for x in 0..w {

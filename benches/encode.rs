@@ -42,11 +42,11 @@
 // gate until they are removed.
 #![allow(deprecated)]
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_bmp::{
-    encode_bmp, encode_dib, encode_with_report, BmpImage, BmpPixelFormat, EncodeOptions, Palette,
-    Plane,
+    BmpImage, BmpPixelFormat, EncodeOptions, Palette, Plane, encode_bmp, encode_dib,
+    encode_with_report,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {

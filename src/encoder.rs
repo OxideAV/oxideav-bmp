@@ -607,7 +607,7 @@ fn pack_bitfields(
         other => {
             return Err(Error::unsupported(format!(
                 "BMP bitfields: source must be Rgba / Rgb24 / Bgra / Bgr24, got {other:?}"
-            )))
+            )));
         }
     };
     let (ri, bi) = if bgr { (2, 0) } else { (0, 2) };
@@ -747,7 +747,7 @@ fn encode_v5_profile(
         other => {
             return Err(Error::unsupported(format!(
                 "BMP encoder: V5 profile header not supported for {other:?}",
-            )))
+            )));
         }
     };
     // Layout:
@@ -831,7 +831,7 @@ fn encode_v4_calibrated(
         other => {
             return Err(Error::unsupported(format!(
                 "BMP encoder: V4 calibrated-RGB not supported for {other:?}",
-            )))
+            )));
         }
     };
     // Layout: [BITMAPFILEHEADER 14 B][BITMAPV4HEADER 108 B][pixel array].
@@ -1368,11 +1368,12 @@ fn encode_indexed4_auto(
 ) -> Result<(Vec<u8>, EncodedBmpFormat)> {
     let (raw_pixels, _) = pack_indexed(plane, 4, width, height, options)?;
 
-    if options.rle && !options.top_down {
-        if let Some(rle_pixels) = rle4_encode(&raw_pixels, width, height, raw_pixels.len()) {
-            let file = build_indexed_bmp(width, height, 4, BI_RLE4, palette, &rle_pixels, options);
-            return Ok((file, EncodedBmpFormat::Rle4));
-        }
+    if options.rle
+        && !options.top_down
+        && let Some(rle_pixels) = rle4_encode(&raw_pixels, width, height, raw_pixels.len())
+    {
+        let file = build_indexed_bmp(width, height, 4, BI_RLE4, palette, &rle_pixels, options);
+        return Ok((file, EncodedBmpFormat::Rle4));
     }
     let file = build_indexed_bmp(width, height, 4, BI_RGB, palette, &raw_pixels, options);
     Ok((file, EncodedBmpFormat::Indexed4))
@@ -1435,11 +1436,7 @@ fn build_indexed_bmp(
 /// preserve source ordering — destination row 0 IS source row 0.
 #[inline]
 fn source_row(y: usize, h: usize, options: &EncodeOptions) -> usize {
-    if options.top_down {
-        y
-    } else {
-        h - 1 - y
-    }
+    if options.top_down { y } else { h - 1 - y }
 }
 
 /// Pack RGBA or RGB24 input to 32-bit BGRA rows. The output row order
@@ -1463,7 +1460,7 @@ fn pack_rgba(
         _ => {
             return Err(Error::invalid(
                 "pack_rgba: format is not Rgba / Rgb24 / Bgra / Bgr24",
-            ))
+            ));
         }
     };
     if plane.data.len() < in_stride * h {
@@ -1480,7 +1477,12 @@ fn pack_rgba(
         // checks (and can vectorise the fixed 3/4-byte shuffle).
         match (in_bpp, bgr) {
             (4, false) => {
-                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                for (d, s) in dst
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(src.as_chunks::<4>().0.iter())
+                {
                     d[0] = s[2];
                     d[1] = s[1];
                     d[2] = s[0];
@@ -1489,7 +1491,12 @@ fn pack_rgba(
             }
             (4, true) => dst.copy_from_slice(src),
             (_, false) => {
-                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+                for (d, s) in dst
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(src.as_chunks::<3>().0.iter())
+                {
                     d[0] = s[2];
                     d[1] = s[1];
                     d[2] = s[0];
@@ -1497,7 +1504,12 @@ fn pack_rgba(
                 }
             }
             (_, true) => {
-                for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+                for (d, s) in dst
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(src.as_chunks::<3>().0.iter())
+                {
                     d[..3].copy_from_slice(s);
                     d[3] = 0xFF;
                 }
@@ -1527,7 +1539,7 @@ fn pack_rgb24(
         _ => {
             return Err(Error::invalid(
                 "pack_rgb24: format is not Rgba / Rgb24 / Bgra / Bgr24",
-            ))
+            ));
         }
     };
     if plane.data.len() < in_stride * h {
@@ -1542,11 +1554,21 @@ fn pack_rgb24(
         // `chunks_exact` on both sides elides the per-byte bounds checks;
         // the source step is `in_bpp` (3 or 4), the dest step a packed 3.
         if bgr {
-            for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(in_bpp)) {
+            for (d, s) in dst
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(src.chunks_exact(in_bpp))
+            {
                 d.copy_from_slice(&s[..3]);
             }
         } else {
-            for (d, s) in dst.chunks_exact_mut(3).zip(src.chunks_exact(in_bpp)) {
+            for (d, s) in dst
+                .as_chunks_mut::<3>()
+                .0
+                .iter_mut()
+                .zip(src.chunks_exact(in_bpp))
+            {
                 d[0] = s[2];
                 d[1] = s[1];
                 d[2] = s[0];
@@ -1945,7 +1967,7 @@ fn write_dib_header_v3_indexed(
     out.extend_from_slice(&2835i32.to_le_bytes());
     out.extend_from_slice(&clr_used.to_le_bytes()); // 0 → full 2^bpp; else exact count
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // Colour table: on-disk order is B, G, R, 0x00.
+    // Colour table: on-disk order is B, G, R, 0x00.
     for i in 0..entries {
         if let Some(rgb) = palette.entries.get(i) {
             out.push(rgb[2]); // B
@@ -1977,12 +1999,12 @@ fn write_dib_header_v4_bitfields(out: &mut Vec<u8>, w: u32, stored_height: i32) 
     out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_used
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 extension: R/G/B/A masks (offsets 40-55)
+    // V4 extension: R/G/B/A masks (offsets 40-55)
     out.extend_from_slice(&0xF800u32.to_le_bytes()); // R mask
     out.extend_from_slice(&0x07E0u32.to_le_bytes()); // G mask
     out.extend_from_slice(&0x001Fu32.to_le_bytes()); // B mask
     out.extend_from_slice(&0x0000u32.to_le_bytes()); // A mask (no alpha)
-                                                     // CS type: LCS_sRGB = 0x73524742
+    // CS type: LCS_sRGB = 0x73524742
     out.extend_from_slice(&0x7352_4742u32.to_le_bytes());
     // CIEXYZTRIPLE (9 × i32 = 36 bytes) — all zero for sRGB
     out.extend_from_slice(&[0u8; 36]);
@@ -2036,12 +2058,12 @@ fn write_dib_header_v4_calibrated(
     out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
     out.extend_from_slice(&clr_used.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 tail: R/G/B/A masks (offsets 40..56).
+    // V4 tail: R/G/B/A masks (offsets 40..56).
     out.extend_from_slice(&masks[0].to_le_bytes()); // R
     out.extend_from_slice(&masks[1].to_le_bytes()); // G
     out.extend_from_slice(&masks[2].to_le_bytes()); // B
     out.extend_from_slice(&masks[3].to_le_bytes()); // A
-                                                    // bV4CSType — calibrated RGB: endpoints + gamma are authoritative.
+    // bV4CSType — calibrated RGB: endpoints + gamma are authoritative.
     out.extend_from_slice(&LCS_CALIBRATED_RGB.to_le_bytes());
     // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes).
     for v in endpoints {
@@ -2102,18 +2124,18 @@ fn write_dib_header_v5_with_profile(
     out.extend_from_slice(&2835i32.to_le_bytes()); // y_pels/m
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_used
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 tail: R/G/B/A masks. Zeroed for BI_RGB direct-colour;
-                                                // canonical 5-6-5 layout for 16-bpp BI_BITFIELDS.
+    // V4 tail: R/G/B/A masks. Zeroed for BI_RGB direct-colour;
+    // canonical 5-6-5 layout for 16-bpp BI_BITFIELDS.
     out.extend_from_slice(&masks[0].to_le_bytes()); // R
     out.extend_from_slice(&masks[1].to_le_bytes()); // G
     out.extend_from_slice(&masks[2].to_le_bytes()); // B
     out.extend_from_slice(&masks[3].to_le_bytes()); // A
-                                                    // bV5CSType — caller-selected: PROFILE_EMBEDDED routes the
-                                                    // trailing blob through `BmpMetadata::icc_profile`;
-                                                    // PROFILE_LINKED keeps the trailing blob as an opaque
-                                                    // external-path bytestring that the decoder surfaces via
-                                                    // `profile_data_offset` / `profile_size` without
-                                                    // auto-loading.
+    // bV5CSType — caller-selected: PROFILE_EMBEDDED routes the
+    // trailing blob through `BmpMetadata::icc_profile`;
+    // PROFILE_LINKED keeps the trailing blob as an opaque
+    // external-path bytestring that the decoder surfaces via
+    // `profile_data_offset` / `profile_size` without
+    // auto-loading.
     out.extend_from_slice(&cs_type.to_le_bytes());
     // CIEXYZTRIPLE endpoints (9 × i32 = 36 bytes) — zero; the profile
     // (embedded or linked) is the authoritative description.
@@ -2125,7 +2147,7 @@ fn write_dib_header_v5_with_profile(
     out.extend_from_slice(&profile_data_offset.to_le_bytes());
     out.extend_from_slice(&profile_size.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // bV5Reserved
-                                                // Total: 40 + 16 + 4 + 36 + 12 + 4 + 4 + 4 + 4 = 124 ✓
+    // Total: 40 + 16 + 4 + 36 + 12 + 4 + 4 + 4 + 4 = 124 ✓
 }
 
 /// Canonical RGB 5-6-5 mask quadruple (R, G, B, A=0) — used by the V5
@@ -2181,7 +2203,7 @@ fn write_dib_header_v5_indexed_with_profile(
     out.extend_from_slice(&2835i32.to_le_bytes());
     out.extend_from_slice(&clr_used.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // V4 mask region zeroed for BI_RGB indexed.
+    // V4 mask region zeroed for BI_RGB indexed.
     out.extend_from_slice(&[0u8; 16]);
     out.extend_from_slice(&cs_type.to_le_bytes());
     out.extend_from_slice(&[0u8; 36]); // CIEXYZTRIPLE — zero, profile is authoritative

@@ -151,7 +151,7 @@ fn bitfields_rgb24_source_synthesises_opaque_alpha() {
     let bytes =
         encode_bmp_bitfields(&src, BmpBitfields::BGRA8888, EncodeOptions::default()).unwrap();
     let back = decode_bmp(&bytes).unwrap();
-    for px in back.planes[0].data.chunks_exact(4) {
+    for px in back.planes[0].data.as_chunks::<4>().0.iter() {
         assert_eq!(px[3], 0xFF);
     }
 }
@@ -213,55 +213,65 @@ fn bitfields_rgb555_3mask_tail() {
 #[test]
 fn bitfields_validate_rejects_bad_masks() {
     // Non-contiguous mask.
-    assert!(BmpBitfields {
-        bpp: 32,
-        r: 0x0000_00FF,
-        g: 0x0000_FF00,
-        b: 0b1010,
-        a: 0,
-    }
-    .validate()
-    .is_err());
+    assert!(
+        BmpBitfields {
+            bpp: 32,
+            r: 0x0000_00FF,
+            g: 0x0000_FF00,
+            b: 0b1010,
+            a: 0,
+        }
+        .validate()
+        .is_err()
+    );
     // Overlapping masks.
-    assert!(BmpBitfields {
-        bpp: 32,
-        r: 0x0000_00FF,
-        g: 0x0000_00FF,
-        b: 0x00FF_0000,
-        a: 0,
-    }
-    .validate()
-    .is_err());
+    assert!(
+        BmpBitfields {
+            bpp: 32,
+            r: 0x0000_00FF,
+            g: 0x0000_00FF,
+            b: 0x00FF_0000,
+            a: 0,
+        }
+        .validate()
+        .is_err()
+    );
     // Bad bpp.
-    assert!(BmpBitfields {
-        bpp: 24,
-        r: 0xFF,
-        g: 0xFF00,
-        b: 0xFF_0000,
-        a: 0,
-    }
-    .validate()
-    .is_err());
+    assert!(
+        BmpBitfields {
+            bpp: 24,
+            r: 0xFF,
+            g: 0xFF00,
+            b: 0xFF_0000,
+            a: 0,
+        }
+        .validate()
+        .is_err()
+    );
     // 16-bpp mask exceeding 16 bits.
-    assert!(BmpBitfields {
-        bpp: 16,
-        r: 0x1_0000,
-        g: 0x07E0,
-        b: 0x001F,
-        a: 0,
-    }
-    .validate()
-    .is_err());
+    assert!(
+        BmpBitfields {
+            bpp: 16,
+            r: 0x1_0000,
+            g: 0x07E0,
+            b: 0x001F,
+            a: 0,
+        }
+        .validate()
+        .is_err()
+    );
     // No colour channels at all.
-    assert!(BmpBitfields {
-        bpp: 32,
-        r: 0,
-        g: 0,
-        b: 0,
-        a: 0xFF00_0000,
-    }
-    .validate()
-    .is_err());
+    assert!(
+        BmpBitfields {
+            bpp: 32,
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0xFF00_0000,
+        }
+        .validate()
+        .is_err()
+    );
     // All presets validate.
     for m in [
         BmpBitfields::RGB565,
@@ -574,7 +584,7 @@ fn rgb555_truncated_plane_errors() {
     let h = 8u32;
     let stride = w as usize * 2;
     let short = Plane::new(stride, vec![0u8; stride * (h as usize - 2)]); // too short
-                                                                          // The validated constructor refuses the geometry up front …
+    // The validated constructor refuses the geometry up front …
     assert!(BmpImage::new(w, h, BmpPixelFormat::Rgb555, vec![short.clone()]).is_err());
     // … and so does the deprecated plane-level entry point.
     assert!(encode_bmp_plane(&short, BmpPixelFormat::Rgb555, None, w, h).is_err());
@@ -1302,7 +1312,7 @@ fn build_os22x_full_8bpp(
     out.extend_from_slice(&0i32.to_le_bytes()); // biYPelsPerM @28
     out.extend_from_slice(&0u32.to_le_bytes()); // biClrUsed @32
     out.extend_from_slice(&0u32.to_le_bytes()); // biClrImportant @36
-                                                // 24-byte OS/2 2.x trailing block.
+    // 24-byte OS/2 2.x trailing block.
     out.extend_from_slice(&units.to_le_bytes()); // usUnits @40
     out.extend_from_slice(&0u16.to_le_bytes()); // padding @42
     out.extend_from_slice(&recording.to_le_bytes()); // usRecording @44
@@ -1311,7 +1321,7 @@ fn build_os22x_full_8bpp(
     out.extend_from_slice(&size2.to_le_bytes()); // cSize2 @52
     out.extend_from_slice(&color_encoding.to_le_bytes()); // ulColorEncoding @56
     out.extend_from_slice(&identifier.to_le_bytes()); // ulIdentifier @60
-                                                      // Colour table: 256 RGBQUAD (B, G, R, 0) entries.
+    // Colour table: 256 RGBQUAD (B, G, R, 0) entries.
     for i in 0..palette_entries {
         if let Some(rgb) = palette.get(i) {
             out.push(rgb[2]);
@@ -2151,8 +2161,8 @@ fn rle8_end_of_bitmap_leaves_index0_not_transparent_black() {
     // not [0,0,0,0].
     let img = decode_bmp(&rle8_skip_fixture(&[0x00, 0x01])).expect("decode");
     assert_eq!((img.width, img.height), (4, 2));
-    for px in img.planes[0].data.chunks_exact(4) {
-        assert_eq!(px, RLE_IDX0_RGBA, "untouched RLE cell must be index 0");
+    for px in img.planes[0].data.as_chunks::<4>().0.iter() {
+        assert_eq!(*px, RLE_IDX0_RGBA, "untouched RLE cell must be index 0");
     }
 }
 
@@ -2256,8 +2266,8 @@ fn rle4_skipped_cells_are_index0() {
     input.extend_from_slice(&[0x00, 0x01]); // end of bitmap
     let img = decode_bmp(&input).expect("decode");
     let idx0 = [0u8, 180, 200, 0xFF];
-    for px in img.planes[0].data.chunks_exact(4) {
-        assert_eq!(px, idx0, "untouched RLE4 cell must be index 0");
+    for px in img.planes[0].data.as_chunks::<4>().0.iter() {
+        assert_eq!(*px, idx0, "untouched RLE4 cell must be index 0");
     }
 }
 
@@ -2393,7 +2403,7 @@ fn raw_v2_or_v3_info_32bpp(
     v.extend_from_slice(&0i32.to_le_bytes()); // y ppm
     v.extend_from_slice(&0u32.to_le_bytes()); // clr used
     v.extend_from_slice(&0u32.to_le_bytes()); // clr important
-                                              // In-header masks
+    // In-header masks
     v.extend_from_slice(&masks_rgb[0].to_le_bytes()); // R @ 40
     v.extend_from_slice(&masks_rgb[1].to_le_bytes()); // G @ 44
     v.extend_from_slice(&masks_rgb[2].to_le_bytes()); // B @ 48
@@ -2517,7 +2527,7 @@ fn build_v5_srgb_32bpp(pixel: u32, intent: u32) -> Vec<u8> {
     out.extend_from_slice(&0i32.to_le_bytes()); // y_pels/m
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_used
     out.extend_from_slice(&0u32.to_le_bytes()); // clr_important
-                                                // R / G / B / A masks (zeroed for BI_RGB).
+    // R / G / B / A masks (zeroed for BI_RGB).
     out.extend_from_slice(&[0u8; 16]);
     // bV5CSType = LCS_sRGB.
     out.extend_from_slice(&LCS_S_RGB.to_le_bytes());
@@ -3126,8 +3136,8 @@ fn alpha_bitfields_v3_16bpp_5551() {
     input.extend_from_slice(&0x03E0u32.to_le_bytes()); // G
     input.extend_from_slice(&0x001Fu32.to_le_bytes()); // B
     input.extend_from_slice(&0x8000u32.to_le_bytes()); // A
-                                                       // 16-bpp row stride is `ceil(1*16/32)*4 = 4`, so pad the 2-byte
-                                                       // pixel word to 4 bytes.
+    // 16-bpp row stride is `ceil(1*16/32)*4 = 4`, so pad the 2-byte
+    // pixel word to 4 bytes.
     input.extend_from_slice(&[0x1F, 0xFC, 0x00, 0x00]);
     let img = decode_bmp(&input).expect("16-bpp BI_ALPHABITFIELDS decode");
     assert_eq!((img.width, img.height), (1, 1));

@@ -683,7 +683,7 @@ impl BmpImage {
         let row_bytes = w.saturating_mul(in_bpp);
         // Opaque fill for the layouts without alpha.
         if out_bpp == 4 && !self.format.has_alpha() {
-            for px in out.chunks_exact_mut(4) {
+            for px in out.as_chunks_mut::<4>().0.iter_mut() {
                 px[3] = 0xFF;
             }
         }
@@ -705,17 +705,26 @@ impl BmpImage {
             let dst = &mut out[y * w * out_bpp..(y + 1) * w * out_bpp];
             match self.format {
                 PixelFormat::Rgba => {
-                    for (d, s) in dst.chunks_exact_mut(out_bpp).zip(src.chunks_exact(4)) {
+                    for (d, s) in dst
+                        .chunks_exact_mut(out_bpp)
+                        .zip(src.as_chunks::<4>().0.iter())
+                    {
                         d[..out_bpp].copy_from_slice(&s[..out_bpp]);
                     }
                 }
                 PixelFormat::Rgb24 => {
-                    for (d, s) in dst.chunks_exact_mut(out_bpp).zip(src.chunks_exact(3)) {
+                    for (d, s) in dst
+                        .chunks_exact_mut(out_bpp)
+                        .zip(src.as_chunks::<3>().0.iter())
+                    {
                         d[..3].copy_from_slice(s);
                     }
                 }
                 PixelFormat::Bgra => {
-                    for (d, s) in dst.chunks_exact_mut(out_bpp).zip(src.chunks_exact(4)) {
+                    for (d, s) in dst
+                        .chunks_exact_mut(out_bpp)
+                        .zip(src.as_chunks::<4>().0.iter())
+                    {
                         d[0] = s[2];
                         d[1] = s[1];
                         d[2] = s[0];
@@ -725,14 +734,20 @@ impl BmpImage {
                     }
                 }
                 PixelFormat::Bgr24 => {
-                    for (d, s) in dst.chunks_exact_mut(out_bpp).zip(src.chunks_exact(3)) {
+                    for (d, s) in dst
+                        .chunks_exact_mut(out_bpp)
+                        .zip(src.as_chunks::<3>().0.iter())
+                    {
                         d[0] = s[2];
                         d[1] = s[1];
                         d[2] = s[0];
                     }
                 }
                 PixelFormat::Rgb555 => {
-                    for (d, s) in dst.chunks_exact_mut(out_bpp).zip(src.chunks_exact(2)) {
+                    for (d, s) in dst
+                        .chunks_exact_mut(out_bpp)
+                        .zip(src.as_chunks::<2>().0.iter())
+                    {
                         let v = u16::from_le_bytes([s[0], s[1]]);
                         d[0] = expand5(((v >> 10) & 0x1F) as u8);
                         d[1] = expand5(((v >> 5) & 0x1F) as u8);
@@ -740,7 +755,10 @@ impl BmpImage {
                     }
                 }
                 PixelFormat::Rgb565 => {
-                    for (d, s) in dst.chunks_exact_mut(out_bpp).zip(src.chunks_exact(2)) {
+                    for (d, s) in dst
+                        .chunks_exact_mut(out_bpp)
+                        .zip(src.as_chunks::<2>().0.iter())
+                    {
                         let v = u16::from_le_bytes([s[0], s[1]]);
                         d[0] = expand5(((v >> 11) & 0x1F) as u8);
                         d[1] = expand6(((v >> 5) & 0x3F) as u8);

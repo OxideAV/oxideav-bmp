@@ -25,8 +25,8 @@
 #![allow(deprecated)]
 
 use oxideav_bmp::{
-    decode_bmp, decode_bmp_with_metadata, decode_dib, decode_dib_with_metadata, BitmapFileHeader,
-    BitmapInfoHeader, BITMAPFILEHEADER_SIZE,
+    BITMAPFILEHEADER_SIZE, BitmapFileHeader, BitmapInfoHeader, decode_bmp,
+    decode_bmp_with_metadata, decode_dib, decode_dib_with_metadata,
 };
 use std::path::PathBuf;
 

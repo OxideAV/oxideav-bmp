@@ -85,21 +85,20 @@ pub use options::{CalibratedRgb, DecodeOptions, EncodeOptions};
 
 // ---- BMP-specific depth (the contract is a floor, not a ceiling) ----------
 pub use decoder::{decode_dib, decode_dib_with};
-pub use encoder::{encode_dib, BmpBitfields, EncodedBmpFormat};
+pub use encoder::{BmpBitfields, EncodedBmpFormat, encode_dib};
 pub use metadata::{
     BmpColorSpace, BmpIccProfileRef, BmpMetadata, BmpOs2Halftone, BmpOs2Header2, BmpRenderingIntent,
 };
 pub use types::{
-    row_stride, BitmapFileHeader, BitmapInfoHeader, BmpFileMagic, DibHeader, DibHeaderKind,
-    BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE, BITMAPV2INFOHEADER_SIZE,
-    BITMAPV3INFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE, BI_ALPHABITFIELDS,
-    BI_BITFIELDS, BI_CMYK, BI_CMYKRLE4, BI_CMYKRLE8, BI_JPEG, BI_PNG, BI_RGB, BI_RLE4, BI_RLE8,
-    BMP_MAGIC, LCS_CALIBRATED_RGB, LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS, LCS_GM_GRAPHICS,
-    LCS_GM_IMAGES, LCS_S_RGB, LCS_WINDOWS_COLOR_SPACE, OS22XBITMAPHEADER_SIZE,
-    OS2_COLOR_ENCODING_RGB, OS2_HALFTONE_ERROR_DIFFUSION, OS2_HALFTONE_NONE, OS2_HALFTONE_PANDA,
-    OS2_HALFTONE_SUPER_CIRCLE, OS2_MAGIC_BA, OS2_MAGIC_CI, OS2_MAGIC_CP, OS2_MAGIC_IC,
-    OS2_MAGIC_PT, OS2_RECORDING_BOTTOM_UP, OS2_UNITS_PELS_PER_METER, PROFILE_EMBEDDED,
-    PROFILE_LINKED,
+    BI_ALPHABITFIELDS, BI_BITFIELDS, BI_CMYK, BI_CMYKRLE4, BI_CMYKRLE8, BI_JPEG, BI_PNG, BI_RGB,
+    BI_RLE4, BI_RLE8, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE,
+    BITMAPV2INFOHEADER_SIZE, BITMAPV3INFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE,
+    BMP_MAGIC, BitmapFileHeader, BitmapInfoHeader, BmpFileMagic, DibHeader, DibHeaderKind,
+    LCS_CALIBRATED_RGB, LCS_GM_ABS_COLORIMETRIC, LCS_GM_BUSINESS, LCS_GM_GRAPHICS, LCS_GM_IMAGES,
+    LCS_S_RGB, LCS_WINDOWS_COLOR_SPACE, OS2_COLOR_ENCODING_RGB, OS2_HALFTONE_ERROR_DIFFUSION,
+    OS2_HALFTONE_NONE, OS2_HALFTONE_PANDA, OS2_HALFTONE_SUPER_CIRCLE, OS2_MAGIC_BA, OS2_MAGIC_CI,
+    OS2_MAGIC_CP, OS2_MAGIC_IC, OS2_MAGIC_PT, OS2_RECORDING_BOTTOM_UP, OS2_UNITS_PELS_PER_METER,
+    OS22XBITMAPHEADER_SIZE, PROFILE_EMBEDDED, PROFILE_LINKED, row_stride,
 };
 
 // ---- Deprecated pre-contract names (one release) --------------------------
@@ -119,9 +118,9 @@ pub use options::BmpEncodeOptions;
 // ---- Registry-gated framework surface -------------------------------------
 #[cfg(feature = "registry")]
 pub use registry::{
-    __oxideav_entry, from_color_signal, from_core_pixel_format, make_decoder, make_encoder,
-    register, register_codecs, register_containers, to_color_signal, to_core_pixel_format,
-    BmpDecoder, BmpEncoder,
+    __oxideav_entry, BmpDecoder, BmpEncoder, from_color_signal, from_core_pixel_format,
+    make_decoder, make_encoder, register, register_codecs, register_containers, to_color_signal,
+    to_core_pixel_format,
 };
 #[cfg(feature = "registry")]
 #[allow(deprecated)]

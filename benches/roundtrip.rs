@@ -30,10 +30,10 @@
 // gate until they are removed.
 #![allow(deprecated)]
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_bmp::{
-    decode_bmp, decode_dib, encode_bmp, encode_dib, BmpImage, BmpPixelFormat, Palette, Plane,
+    BmpImage, BmpPixelFormat, Palette, Plane, decode_bmp, decode_dib, encode_bmp, encode_dib,
 };
 
 fn xorshift_byte(state: &mut u32) -> u8 {

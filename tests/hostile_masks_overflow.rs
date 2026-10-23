@@ -30,8 +30,8 @@
 
 use oxideav_bmp::types::{BI_RLE4, BI_RLE8};
 use oxideav_bmp::{
-    decode_bmp, decode_dib, encode_bmp, BmpImage, BmpPixelFormat, Plane, BITMAPFILEHEADER_SIZE,
-    BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BI_ALPHABITFIELDS, BI_BITFIELDS,
+    BI_ALPHABITFIELDS, BI_BITFIELDS, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE,
+    BITMAPV4HEADER_SIZE, BmpImage, BmpPixelFormat, Plane, decode_bmp, decode_dib, encode_bmp,
 };
 
 // ---------------------------------------------------------------------------
@@ -88,7 +88,10 @@ fn bitfields_bmp(width: i32, height: i32, bpp: u16, masks: [u32; 3]) -> Vec<u8> 
         tail.extend_from_slice(&m.to_le_bytes());
     }
     let row = ((width.unsigned_abs() as usize * bpp as usize).div_ceil(8) + 3) & !3;
-    tail.extend(std::iter::repeat(0xA5u8).take(row * height.unsigned_abs() as usize));
+    tail.extend(std::iter::repeat_n(
+        0xA5u8,
+        row * height.unsigned_abs() as usize,
+    ));
     raw_bmp_v3(
         width,
         height,
@@ -166,7 +169,7 @@ fn alphabitfields_hostile_alpha_does_not_panic() {
         }
         tail.extend_from_slice(&alpha.to_le_bytes());
         let row = 4 * 4; // 4 px × 32 bpp
-        tail.extend(std::iter::repeat(0x3Cu8).take(row * 2));
+        tail.extend(std::iter::repeat_n(0x3Cu8, row * 2));
         let file = raw_bmp_v3(4, 2, 32, BI_ALPHABITFIELDS, 0, 0, v3_off_bits(16), &tail);
         let _ = decode_bmp(&file); // must not panic
     }
@@ -289,7 +292,7 @@ fn size_image_saturated_rle_does_not_allocate() {
 /// RLE stream.
 fn rle4_bmp(width: i32, height: i32, stream: &[u8]) -> Vec<u8> {
     let mut tail = vec![0u8; 4 * 16];
-    for (i, chunk) in tail.chunks_exact_mut(4).enumerate() {
+    for (i, chunk) in tail.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         chunk[0] = i as u8 * 16;
         chunk[1] = 255 - i as u8 * 16;
         chunk[2] = i as u8;
@@ -329,7 +332,7 @@ fn rle4_delta_beyond_edges_does_not_panic() {
 fn rle4_absolute_mode_overruns_do_not_panic() {
     // count=255 nibbles at a 8-px row: massively past the row end.
     let mut overrun = vec![0x00, 0xFF];
-    overrun.extend(std::iter::repeat(0x12u8).take(128)); // 255 nibbles = 128 B
+    overrun.extend(std::iter::repeat_n(0x12u8, 128)); // 255 nibbles = 128 B
     overrun.extend_from_slice(&[0x00, 0x01]);
 
     // count=5 (odd nibble count, 3 data bytes, needs 1 pad byte) but the

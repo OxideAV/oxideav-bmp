@@ -43,7 +43,7 @@
 //!     palette entries (3 B each) for indexed formats.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::{decode_dib, encode_dib, BmpImage, Palette, BmpPixelFormat, Plane};
+use oxideav_bmp::{BmpImage, BmpPixelFormat, Palette, Plane, decode_dib, encode_dib};
 
 const MAX_DIM: u32 = 64;
 
@@ -103,7 +103,7 @@ fuzz_target!(|data: &[u8]| {
         } else {
             let pal_src = &tail[pixel_len.min(tail.len())..];
             let mut entries = Vec::with_capacity(cap);
-            let mut chunks = pal_src.chunks_exact(3);
+            let mut chunks = pal_src.as_chunks::<3>().0.iter();
             for chunk in chunks.by_ref().take(cap) {
                 entries.push([chunk[0], chunk[1], chunk[2]]);
             }
@@ -114,7 +114,9 @@ fuzz_target!(|data: &[u8]| {
         }
     };
 
-    let image = BmpImage::new(width, height, format, vec![Plane::new(stride, pixels)]).unwrap().with_palette(palette);
+    let image = BmpImage::new(width, height, format, vec![Plane::new(stride, pixels)])
+        .unwrap()
+        .with_palette(palette);
 
     let encoded = match encode_dib(&image, ico_mask) {
         Ok(bytes) => bytes,

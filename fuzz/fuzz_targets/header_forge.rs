@@ -52,7 +52,7 @@
 //! intentionally discarded.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::{decode, decode_dib, info, BmpMetadata};
+use oxideav_bmp::{BmpMetadata, decode, decode_dib, info};
 
 /// Declared `biSize` for each generation selector. Selector 7 reads an
 /// arbitrary size from the body instead.

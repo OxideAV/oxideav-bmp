@@ -9,10 +9,10 @@ use oxideav_core::{
     CodecId, CodecParameters, CodecResolver, Error, MediaType, Packet, Result, StreamInfo, TimeBase,
 };
 use oxideav_core::{
-    ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
+    ContainerRegistry, Demuxer, MAX_PROBE_SCORE, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek,
 };
 
-use crate::types::{read_u16_le, read_u32_le, BMP_MAGIC};
+use crate::types::{BMP_MAGIC, read_u16_le, read_u32_le};
 
 pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("bmp", open_demuxer);

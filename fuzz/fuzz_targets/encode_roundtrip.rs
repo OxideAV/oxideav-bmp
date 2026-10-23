@@ -56,8 +56,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_bmp::{
-    decode, encode_with_report, BmpImage, BmpPixelFormat, EncodeOptions, EncodedBmpFormat,
-    Palette, Plane,
+    BmpImage, BmpPixelFormat, EncodeOptions, EncodedBmpFormat, Palette, Plane, decode,
+    encode_with_report,
 };
 
 /// Maximum picture dimension in pixels. See module docs for rationale.
@@ -142,7 +142,7 @@ fn make_palette(tail: &[u8], format: BmpPixelFormat) -> Option<Palette> {
         return None;
     }
     let mut entries = Vec::with_capacity(cap);
-    let mut chunks = tail.chunks_exact(3);
+    let mut chunks = tail.as_chunks::<3>().0.iter();
     for chunk in chunks.by_ref() {
         if entries.len() == cap {
             break;
@@ -240,7 +240,9 @@ fuzz_target!(|data: &[u8]| {
     };
     let palette = make_palette(palette_tail, format);
 
-    let image = BmpImage::new(width, height, format, vec![plane]).unwrap().with_palette(palette);
+    let image = BmpImage::new(width, height, format, vec![plane])
+        .unwrap()
+        .with_palette(palette);
 
     let options = EncodeOptions::default()
         .with_top_down(opts_byte & 0b01 != 0)

@@ -456,12 +456,12 @@ fn validate_header(h: &DibHeader) -> Result<()> {
         BI_CMYKRLE8 => {
             return Err(Error::invalid(
                 "BMP: CMYK RLE-8 (BI_CMYKRLE8) not supported",
-            ))
+            ));
         }
         BI_CMYKRLE4 => {
             return Err(Error::invalid(
                 "BMP: CMYK RLE-4 (BI_CMYKRLE4) not supported",
-            ))
+            ));
         }
         c => return Err(Error::invalid(format!("BMP: unknown compression {c}"))),
     }
@@ -602,13 +602,7 @@ fn decode_pixels(h: &DibHeader, pixels: &[u8], kernel: Kernel, out_stride: usize
     let stride = h.row_stride();
     let mut out = vec![0u8; out_stride.saturating_mul(height)];
     let top_down = h.is_top_down();
-    let row_dst = |y: usize| -> usize {
-        if top_down {
-            y
-        } else {
-            height - 1 - y
-        }
-    };
+    let row_dst = |y: usize| -> usize { if top_down { y } else { height - 1 - y } };
 
     match kernel {
         Kernel::Indexed => {
@@ -658,7 +652,7 @@ fn decode_pixels(h: &DibHeader, pixels: &[u8], kernel: Kernel, out_stride: usize
                 let d = row_dst(y) * out_stride;
                 let dst = &mut out[d..d + out_stride];
                 dst.copy_from_slice(row);
-                for px in dst.chunks_exact_mut(4) {
+                for px in dst.as_chunks_mut::<4>().0.iter_mut() {
                     px[3] = 0xFF;
                 }
             }
@@ -670,7 +664,7 @@ fn decode_pixels(h: &DibHeader, pixels: &[u8], kernel: Kernel, out_stride: usize
                 let dst = &mut out[d..d + out_stride];
                 dst.copy_from_slice(row);
                 if alpha == Alpha::Opaque {
-                    for px in dst.chunks_exact_mut(4) {
+                    for px in dst.as_chunks_mut::<4>().0.iter_mut() {
                         px[3] = 0xFF;
                     }
                 }
@@ -719,7 +713,7 @@ fn expand_masked(
             let (bs, bn) = shift_len(mb);
             let (as_, an) = shift_len(ma);
             let mut lut = vec![0u8; 65_536 * 4];
-            for (v, slot) in lut.chunks_exact_mut(4).enumerate() {
+            for (v, slot) in lut.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let v = v as u32;
                 slot[0] = expand(((v & mr) >> rs) as u8, rn);
                 slot[1] = expand(((v & mg) >> gs) as u8, gn);
@@ -734,7 +728,7 @@ fn expand_masked(
                 let row = &pixels[y * stride..y * stride + width * 2];
                 let d = row_dst(y) * out_stride;
                 let dst = &mut out[d..d + out_stride];
-                for (x, px) in dst.chunks_exact_mut(4).enumerate() {
+                for (x, px) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                     let v = u16::from_le_bytes([row[x * 2], row[x * 2 + 1]]) as usize;
                     px.copy_from_slice(&lut[v * 4..v * 4 + 4]);
                 }
@@ -749,7 +743,12 @@ fn expand_masked(
                 let row = &pixels[y * stride..y * stride + width * 2];
                 let d = row_dst(y) * out_stride;
                 let dst = &mut out[d..d + out_stride];
-                for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(2)) {
+                for (px, src) in dst
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(row.as_chunks::<2>().0.iter())
+                {
                     let v = u16::from_le_bytes([src[0], src[1]]) as u32;
                     px[0] = rl.get(v);
                     px[1] = gl.get(v);
@@ -768,7 +767,12 @@ fn expand_masked(
             let row = &pixels[y * stride..y * stride + width * 4];
             let d = row_dst(y) * out_stride;
             let dst = &mut out[d..d + out_stride];
-            for (px, src) in dst.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+            for (px, src) in dst
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(row.as_chunks::<4>().0.iter())
+            {
                 let v = u32::from_le_bytes([src[0], src[1], src[2], src[3]]);
                 px[0] = rl.get(v);
                 px[1] = gl.get(v);
@@ -858,7 +862,7 @@ fn decode_rle8(data: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
     let mut i = 0usize;
 
     macro_rules! put_pixel {
-        ($idx:expr) => {
+        ($idx:expr_2021) => {
             if x < width && y < height {
                 out[(height - 1 - y) * width + x] = $idx;
                 x += 1;
@@ -927,7 +931,7 @@ fn decode_rle4(data: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
     let mut i = 0usize;
 
     macro_rules! put_pixel {
-        ($idx:expr) => {
+        ($idx:expr_2021) => {
             if x < width && y < height {
                 out[(height - 1 - y) * width + x] = $idx & 0x0F;
                 x += 1;

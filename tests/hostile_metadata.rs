@@ -28,10 +28,10 @@
 #![allow(deprecated)]
 
 use oxideav_bmp::{
-    decode_bmp_with_metadata, decode_dib_with_metadata, encode_bmp_with_calibrated_rgb,
-    encode_bmp_with_icc_profile, encode_bmp_with_linked_icc_profile, BmpColorSpace, BmpImage,
-    BmpPixelFormat, BmpRenderingIntent, EncodeOptions, Palette, Plane, BITMAPFILEHEADER_SIZE,
-    PROFILE_EMBEDDED, PROFILE_LINKED,
+    BITMAPFILEHEADER_SIZE, BmpColorSpace, BmpImage, BmpPixelFormat, BmpRenderingIntent,
+    EncodeOptions, PROFILE_EMBEDDED, PROFILE_LINKED, Palette, Plane, decode_bmp_with_metadata,
+    decode_dib_with_metadata, encode_bmp_with_calibrated_rgb, encode_bmp_with_icc_profile,
+    encode_bmp_with_linked_icc_profile,
 };
 
 // ---------------------------------------------------------------------------

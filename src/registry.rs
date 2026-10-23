@@ -22,10 +22,10 @@ use oxideav_core::Decoder;
 use oxideav_core::Encoder;
 use oxideav_core::RuntimeContext;
 use oxideav_core::{
-    parse_options, CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters,
-    CodecRegistry, ColorPrimaries, ColorSignal, ContainerRegistry, Frame, MatrixCoefficients,
-    OptionField, OptionKind, OptionValue, Packet, PixelFormat, TimeBase, TransferCharacteristics,
-    VideoFrame, VideoPlane,
+    CodecCapabilities, CodecId, CodecInfo, CodecOptionsStruct, CodecParameters, CodecRegistry,
+    ColorPrimaries, ColorSignal, ContainerRegistry, Frame, MatrixCoefficients, OptionField,
+    OptionKind, OptionValue, Packet, PixelFormat, TimeBase, TransferCharacteristics, VideoFrame,
+    VideoPlane, parse_options,
 };
 
 use crate::container;
@@ -75,7 +75,7 @@ pub fn from_core_pixel_format(pf: PixelFormat) -> oxideav_core::Result<BmpPixelF
         other => {
             return Err(oxideav_core::Error::unsupported(format!(
                 "BMP: pixel format {other:?} not supported"
-            )))
+            )));
         }
     })
 }
@@ -233,7 +233,12 @@ impl BmpImage {
             let rgb = frame.palette().ok_or_else(|| {
                 BmpError::invalid("BMP: Pal8 frame without a palette side-channel")
             })?;
-            let entries: Vec<[u8; 3]> = rgb.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            let entries: Vec<[u8; 3]> = rgb
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|c| [c[0], c[1], c[2]])
+                .collect();
             img.palette = Some(Palette::from_rgb(&entries));
         }
         if let Some(sig) = frame.color_signal() {
@@ -392,7 +397,7 @@ impl Encoder for BmpEncoder {
             _ => {
                 return Err(oxideav_core::Error::invalid(
                     "BMP encoder: expected video frame",
-                ))
+                ));
             }
         };
         let image = BmpImage::from_video_frame(vf, &self.out_params)?;
@@ -604,7 +609,7 @@ mod tests {
 
     #[test]
     fn decoder_emits_native_layouts_not_rgba() {
-        use crate::{encode, EncodeOptions};
+        use crate::{EncodeOptions, encode};
         // Pal8: index plane + palette side-channel.
         let pal = BmpImage::packed(3, 2, BmpPixelFormat::Pal8, 3, vec![0, 1, 2, 2, 1, 0])
             .unwrap()
@@ -663,7 +668,7 @@ mod tests {
 
     #[test]
     fn demuxer_declares_the_native_layout() {
-        use crate::{encode, EncodeOptions};
+        use crate::{EncodeOptions, encode};
         let pal = BmpImage::packed(2, 1, BmpPixelFormat::Pal8, 2, vec![0, 1])
             .unwrap()
             .with_palette(Palette::from_rgb(&[[1, 2, 3], [4, 5, 6]]));

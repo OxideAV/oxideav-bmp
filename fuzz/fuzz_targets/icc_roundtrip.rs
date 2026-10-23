@@ -50,8 +50,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_bmp::{
-    decode, encode, BmpColorSpace, BmpImage, BmpMetadata, CalibratedRgb, EncodeOptions, Palette,
-    BmpPixelFormat, Plane,
+    BmpColorSpace, BmpImage, BmpMetadata, BmpPixelFormat, CalibratedRgb, EncodeOptions, Palette,
+    Plane, decode, encode,
 };
 
 const MAX_DIM: u32 = 32;
@@ -101,7 +101,9 @@ fuzz_target!(|data: &[u8]| {
     }
     let path_selector = data[0] % 3;
     let format = pick_format(data[1]);
-    let options = EncodeOptions::default().with_top_down(data[2] & 1 != 0).with_minimal_palette(data[2] & 2 != 0);
+    let options = EncodeOptions::default()
+        .with_top_down(data[2] & 1 != 0)
+        .with_minimal_palette(data[2] & 2 != 0);
     let width = 1 + (data[3] as u32) % MAX_DIM;
     let height = 1 + (data[4] as u32) % MAX_DIM;
     let intent = data[5] as u32;
@@ -143,7 +145,7 @@ fuzz_target!(|data: &[u8]| {
         } else {
             let pal_src = &rest[pixel_len.min(rest.len())..];
             let mut entries = Vec::with_capacity(cap);
-            let mut chunks = pal_src.chunks_exact(3);
+            let mut chunks = pal_src.as_chunks::<3>().0.iter();
             for chunk in chunks.by_ref().take(cap) {
                 entries.push([chunk[0], chunk[1], chunk[2]]);
             }
@@ -154,7 +156,9 @@ fuzz_target!(|data: &[u8]| {
         }
     };
 
-    let image = BmpImage::new(width, height, format, vec![plane]).unwrap().with_palette(palette);
+    let image = BmpImage::new(width, height, format, vec![plane])
+        .unwrap()
+        .with_palette(palette);
 
     let mut image = image;
     let options = options.with_rendering_intent(intent);

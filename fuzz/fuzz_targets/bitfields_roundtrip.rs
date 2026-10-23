@@ -33,10 +33,7 @@
 //!     follows.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_bmp::{
-    decode, encode, BmpBitfields, BmpImage, BmpPixelFormat, EncodeOptions,
-    Plane,
-};
+use oxideav_bmp::{BmpBitfields, BmpImage, BmpPixelFormat, EncodeOptions, Plane, decode, encode};
 
 const MAX_DIM: u32 = 64;
 

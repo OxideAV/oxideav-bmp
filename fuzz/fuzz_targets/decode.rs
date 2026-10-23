@@ -35,8 +35,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_bmp::{
-    decode, decode_dib, decode_dib_with, decode_rgb8, decode_rgba8, decode_with, info, probe,
-    DecodeOptions,
+    DecodeOptions, decode, decode_dib, decode_dib_with, decode_rgb8, decode_rgba8, decode_with,
+    info, probe,
 };
 
 fuzz_target!(|data: &[u8]| {

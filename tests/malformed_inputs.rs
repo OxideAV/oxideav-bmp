@@ -25,9 +25,9 @@
 #![allow(deprecated)]
 
 use oxideav_bmp::{
-    decode_bmp, decode_dib, encode_bmp, encode_bmp_with_options, encode_dib, BmpImage,
-    BmpPixelFormat, EncodeOptions, Palette, Plane, BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE,
-    BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE, BITMAPV5HEADER_SIZE,
+    BITMAPCOREHEADER_SIZE, BITMAPFILEHEADER_SIZE, BITMAPINFOHEADER_SIZE, BITMAPV4HEADER_SIZE,
+    BITMAPV5HEADER_SIZE, BmpImage, BmpPixelFormat, EncodeOptions, Palette, Plane, decode_bmp,
+    decode_dib, encode_bmp, encode_bmp_with_options, encode_dib,
 };
 
 // ---------------------------------------------------------------------------
