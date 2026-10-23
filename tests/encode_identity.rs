@@ -46,11 +46,12 @@
 #![allow(deprecated)]
 
 use oxideav_bmp::{
-    decode, encode, encode_bmp, encode_bmp_bitfields, encode_bmp_plane, encode_bmp_plane_bitfields,
-    encode_bmp_plane_with_options, encode_bmp_with_calibrated_rgb, encode_bmp_with_icc_profile,
+    BmpBitfields, BmpImage, BmpPalette, CalibratedRgb, EncodeOptions, EncodedBmpFormat, Error,
+    LCS_GM_BUSINESS, Palette, PixelFormat, decode, encode, encode_bmp, encode_bmp_bitfields,
+    encode_bmp_plane, encode_bmp_plane_bitfields, encode_bmp_plane_with_options,
+    encode_bmp_with_calibrated_rgb, encode_bmp_with_icc_profile,
     encode_bmp_with_linked_icc_profile, encode_bmp_with_options, encode_dib, encode_dib_plane,
-    encode_rgb8, encode_rgba8, encode_to, encode_with_report, BmpBitfields, BmpImage, BmpPalette,
-    CalibratedRgb, EncodeOptions, EncodedBmpFormat, Error, Palette, PixelFormat, LCS_GM_BUSINESS,
+    encode_rgb8, encode_rgba8, encode_to, encode_with_report,
 };
 
 const FORMATS: [PixelFormat; 10] = [
@@ -546,10 +547,10 @@ fn digest_all(name: &str, image: &BmpImage, seen: &mut Vec<EncodedBmpFormat>) ->
             &result,
             &mut digest,
         );
-        if let Ok((_, format)) = &result {
-            if !seen.contains(format) {
-                seen.push(*format);
-            }
+        if let Ok((_, format)) = &result
+            && !seen.contains(format)
+        {
+            seen.push(*format);
         }
     }
     digest
