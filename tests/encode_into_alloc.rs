@@ -5,7 +5,7 @@
 mod counting_alloc;
 
 use counting_alloc::*;
-use oxideav_bmp::{encode, encode_into, encoded_size_bound, EncodeOptions};
+use oxideav_bmp::{EncodeOptions, encode, encode_into, encoded_size_bound};
 
 /// A caller that reserves `encoded_size_bound` bytes of spare capacity
 /// encodes with no allocation at all, whatever the layout and whether
