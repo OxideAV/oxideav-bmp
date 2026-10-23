@@ -7,7 +7,7 @@
 mod counting_alloc;
 
 use counting_alloc::*;
-use oxideav_bmp::{decode_dib_with, decode_with, encode, DecodeOptions, EncodeOptions, Metadata};
+use oxideav_bmp::{DecodeOptions, EncodeOptions, Metadata, decode_dib_with, decode_with, encode};
 
 /// The embedded profile: 1 MiB, a quarter of the pixel plane.
 const PROFILE: usize = 1 << 20;
