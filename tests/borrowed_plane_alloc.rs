@@ -10,7 +10,7 @@ mod counting_alloc;
 
 use counting_alloc::*;
 use oxideav_bmp::{
-    encode_bmp_plane, encode_bmp_with_icc_profile, BmpPixelFormat, EncodeOptions, LCS_GM_IMAGES,
+    BmpPixelFormat, EncodeOptions, LCS_GM_IMAGES, encode_bmp_plane, encode_bmp_with_icc_profile,
 };
 
 /// The deprecated plane-level names read the caller's plane in place
