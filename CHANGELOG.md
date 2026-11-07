@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `BmpMetadata::new(header_size)` and `DibHeader::new(header_size, width,
+  height, bpp)` plus `with_*` setters for every field of both.
+
+### Changed
+
+- API hygiene: `#[non_exhaustive]` on `DibHeaderKind`, `BmpMetadata` and
+  `DibHeader`. The spec-fixed enums with an `Unknown(..)` tail
+  (`BmpFileMagic`, `BmpColorSpace`, `BmpRenderingIntent`,
+  `BmpOs2Halftone`), `BmpIccProfileRef`, the `BmpBitfields` mask value
+  and the fixed-layout wire records (`BitmapFileHeader`,
+  `BitmapInfoHeader`, `Os2Header2Raw`, `BmpOs2Header2`) stay exhaustive.
+
 ## [0.1.9](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.8...v0.1.9) - 2026-10-24
 
 ### Fixed

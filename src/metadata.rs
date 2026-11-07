@@ -282,6 +282,7 @@ impl BmpOs2Header2 {
 /// [`BmpIccProfileRef`] discriminated view of whichever variant is
 /// present.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BmpMetadata {
     /// Reported DIB header size. 12 = OS/2 `BITMAPCOREHEADER`, 40 = V3
     /// `BITMAPINFOHEADER`, 108 = V4 `BITMAPV4HEADER`, 124 = V5
@@ -377,6 +378,127 @@ pub struct BmpMetadata {
     /// `BITMAPCOREHEADER`, and the truncated OS/2 2.x forms (`biSize`
     /// 16..40) which have no room for these fields.
     pub os2_header2: Option<BmpOs2Header2>,
+}
+
+impl BmpMetadata {
+    /// Build a [`BmpMetadata`] from its mandatory fields; every other field
+    /// starts at its default and can be set with the `with_*` builders.
+    pub fn new(header_size: u32) -> Self {
+        Self {
+            header_size,
+            color_space: Default::default(),
+            endpoints: Default::default(),
+            gamma_rgb: Default::default(),
+            rendering_intent: Default::default(),
+            profile_data_offset: Default::default(),
+            profile_size: Default::default(),
+            icc_profile: Default::default(),
+            linked_profile_path: Default::default(),
+            pixels_per_meter_x: Default::default(),
+            pixels_per_meter_y: Default::default(),
+            colors_used: Default::default(),
+            colors_important: Default::default(),
+            os2_header2: Default::default(),
+        }
+    }
+
+    /// Set [`BmpMetadata::header_size`].
+    #[must_use]
+    pub fn with_header_size(mut self, v: u32) -> Self {
+        self.header_size = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::color_space`].
+    #[must_use]
+    pub fn with_color_space(mut self, v: Option<BmpColorSpace>) -> Self {
+        self.color_space = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::endpoints`].
+    #[must_use]
+    pub fn with_endpoints(mut self, v: Option<[i32; 9]>) -> Self {
+        self.endpoints = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::gamma_rgb`].
+    #[must_use]
+    pub fn with_gamma_rgb(mut self, v: Option<[u32; 3]>) -> Self {
+        self.gamma_rgb = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::rendering_intent`].
+    #[must_use]
+    pub fn with_rendering_intent(mut self, v: Option<BmpRenderingIntent>) -> Self {
+        self.rendering_intent = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::profile_data_offset`].
+    #[must_use]
+    pub fn with_profile_data_offset(mut self, v: Option<u32>) -> Self {
+        self.profile_data_offset = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::profile_size`].
+    #[must_use]
+    pub fn with_profile_size(mut self, v: Option<u32>) -> Self {
+        self.profile_size = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::icc_profile`].
+    #[must_use]
+    pub fn with_icc_profile(mut self, v: Option<Vec<u8>>) -> Self {
+        self.icc_profile = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::linked_profile_path`].
+    #[must_use]
+    pub fn with_linked_profile_path(mut self, v: Option<Vec<u8>>) -> Self {
+        self.linked_profile_path = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::pixels_per_meter_x`].
+    #[must_use]
+    pub fn with_pixels_per_meter_x(mut self, v: Option<i32>) -> Self {
+        self.pixels_per_meter_x = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::pixels_per_meter_y`].
+    #[must_use]
+    pub fn with_pixels_per_meter_y(mut self, v: Option<i32>) -> Self {
+        self.pixels_per_meter_y = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::colors_used`].
+    #[must_use]
+    pub fn with_colors_used(mut self, v: Option<u32>) -> Self {
+        self.colors_used = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::colors_important`].
+    #[must_use]
+    pub fn with_colors_important(mut self, v: Option<u32>) -> Self {
+        self.colors_important = v;
+        self
+    }
+
+    /// Set [`BmpMetadata::os2_header2`].
+    #[must_use]
+    pub fn with_os2_header2(mut self, v: Option<BmpOs2Header2>) -> Self {
+        self.os2_header2 = v;
+        self
+    }
 }
 
 impl BmpMetadata {

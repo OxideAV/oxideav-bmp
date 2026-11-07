@@ -303,6 +303,7 @@ pub const LCS_GM_ABS_COLORIMETRIC: u32 = 8;
 /// header when present). All integer fields kept in their native BMP
 /// types so callers can roundtrip byte-for-byte.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct DibHeader {
     /// Reported header size — 40 for v3, 108 for v4, 124 for v5.
     pub header_size: u32,
@@ -365,6 +366,191 @@ pub struct DibHeader {
     /// every Windows header generation and for the truncated OS/2 2.x
     /// forms (`biSize < 40`), which have no room for these fields.
     pub os2_header2: Option<Os2Header2Raw>,
+}
+
+impl DibHeader {
+    /// Build a [`DibHeader`] from its mandatory fields; every other field
+    /// starts at its default and can be set with the `with_*` builders.
+    pub fn new(header_size: u32, width: i32, height: i32, bpp: u16) -> Self {
+        Self {
+            header_size,
+            width,
+            height,
+            planes: 1,
+            bpp,
+            compression: Default::default(),
+            image_size: Default::default(),
+            x_pels_per_meter: Default::default(),
+            y_pels_per_meter: Default::default(),
+            clr_used: Default::default(),
+            clr_important: Default::default(),
+            mask_r: Default::default(),
+            mask_g: Default::default(),
+            mask_b: Default::default(),
+            mask_a: Default::default(),
+            cs_type: Default::default(),
+            endpoints: Default::default(),
+            gamma_rgb: Default::default(),
+            intent: Default::default(),
+            profile_data_offset: Default::default(),
+            profile_size: Default::default(),
+            os2_header2: Default::default(),
+        }
+    }
+
+    /// Set [`DibHeader::header_size`].
+    #[must_use]
+    pub fn with_header_size(mut self, v: u32) -> Self {
+        self.header_size = v;
+        self
+    }
+
+    /// Set [`DibHeader::width`].
+    #[must_use]
+    pub fn with_width(mut self, v: i32) -> Self {
+        self.width = v;
+        self
+    }
+
+    /// Set [`DibHeader::height`].
+    #[must_use]
+    pub fn with_height(mut self, v: i32) -> Self {
+        self.height = v;
+        self
+    }
+
+    /// Set [`DibHeader::planes`].
+    #[must_use]
+    pub fn with_planes(mut self, v: u16) -> Self {
+        self.planes = v;
+        self
+    }
+
+    /// Set [`DibHeader::bpp`].
+    #[must_use]
+    pub fn with_bpp(mut self, v: u16) -> Self {
+        self.bpp = v;
+        self
+    }
+
+    /// Set [`DibHeader::compression`].
+    #[must_use]
+    pub fn with_compression(mut self, v: u32) -> Self {
+        self.compression = v;
+        self
+    }
+
+    /// Set [`DibHeader::image_size`].
+    #[must_use]
+    pub fn with_image_size(mut self, v: u32) -> Self {
+        self.image_size = v;
+        self
+    }
+
+    /// Set [`DibHeader::x_pels_per_meter`].
+    #[must_use]
+    pub fn with_x_pels_per_meter(mut self, v: i32) -> Self {
+        self.x_pels_per_meter = v;
+        self
+    }
+
+    /// Set [`DibHeader::y_pels_per_meter`].
+    #[must_use]
+    pub fn with_y_pels_per_meter(mut self, v: i32) -> Self {
+        self.y_pels_per_meter = v;
+        self
+    }
+
+    /// Set [`DibHeader::clr_used`].
+    #[must_use]
+    pub fn with_clr_used(mut self, v: u32) -> Self {
+        self.clr_used = v;
+        self
+    }
+
+    /// Set [`DibHeader::clr_important`].
+    #[must_use]
+    pub fn with_clr_important(mut self, v: u32) -> Self {
+        self.clr_important = v;
+        self
+    }
+
+    /// Set [`DibHeader::mask_r`].
+    #[must_use]
+    pub fn with_mask_r(mut self, v: Option<u32>) -> Self {
+        self.mask_r = v;
+        self
+    }
+
+    /// Set [`DibHeader::mask_g`].
+    #[must_use]
+    pub fn with_mask_g(mut self, v: Option<u32>) -> Self {
+        self.mask_g = v;
+        self
+    }
+
+    /// Set [`DibHeader::mask_b`].
+    #[must_use]
+    pub fn with_mask_b(mut self, v: Option<u32>) -> Self {
+        self.mask_b = v;
+        self
+    }
+
+    /// Set [`DibHeader::mask_a`].
+    #[must_use]
+    pub fn with_mask_a(mut self, v: Option<u32>) -> Self {
+        self.mask_a = v;
+        self
+    }
+
+    /// Set [`DibHeader::cs_type`].
+    #[must_use]
+    pub fn with_cs_type(mut self, v: Option<u32>) -> Self {
+        self.cs_type = v;
+        self
+    }
+
+    /// Set [`DibHeader::endpoints`].
+    #[must_use]
+    pub fn with_endpoints(mut self, v: Option<[i32; 9]>) -> Self {
+        self.endpoints = v;
+        self
+    }
+
+    /// Set [`DibHeader::gamma_rgb`].
+    #[must_use]
+    pub fn with_gamma_rgb(mut self, v: Option<[u32; 3]>) -> Self {
+        self.gamma_rgb = v;
+        self
+    }
+
+    /// Set [`DibHeader::intent`].
+    #[must_use]
+    pub fn with_intent(mut self, v: Option<u32>) -> Self {
+        self.intent = v;
+        self
+    }
+
+    /// Set [`DibHeader::profile_data_offset`].
+    #[must_use]
+    pub fn with_profile_data_offset(mut self, v: Option<u32>) -> Self {
+        self.profile_data_offset = v;
+        self
+    }
+
+    /// Set [`DibHeader::profile_size`].
+    #[must_use]
+    pub fn with_profile_size(mut self, v: Option<u32>) -> Self {
+        self.profile_size = v;
+        self
+    }
+
+    /// Set [`DibHeader::os2_header2`].
+    #[must_use]
+    pub fn with_os2_header2(mut self, v: Option<Os2Header2Raw>) -> Self {
+        self.os2_header2 = v;
+        self
+    }
 }
 
 /// Raw decode of the 24 trailing bytes of a full 64-byte OS/2 2.x
@@ -586,6 +772,7 @@ impl BitmapFileHeader {
 /// Wikipedia file-format page) slot between INFO and V4 and share the
 /// 40-byte INFO prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DibHeaderKind {
     /// 12-byte OS/2 `BITMAPCOREHEADER` — `WORD` width / height, no
     /// compression field, `RGBTRIPLE` colour table.
