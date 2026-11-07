@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/OxideAV/oxideav-bmp/compare/v0.1.8...v0.1.9) - 2026-10-24
+
+### Fixed
+
+- fixup for #18: rustfmt 2024 import order on the ICC allocation test
+- fixup for #16: rustfmt 2024 import order on the streaming test
+- fixup for #14: rustfmt 2024 import order on the borrowed-plane test
+- fixup for #13: rustfmt 2024 import order on the new allocation test
+- fixup for #12: edition-2024 lint wave
+- fixup for #11: edition-2024 lint wave on the pin test
+
+### Other
+
+- add encode_into_with_icc_profile, which borrows the profile
+- decode without copying the embedded ICC profile, under DecodeOptions::copy_icc
+- copy only the plane in VideoFrame::from(&BmpImage)
+- stream encode_to as it encodes
+- refuse a plane stride below the row width
+- read the caller's plane in place in the plane-level and registry encoders
+- add encode_into and encoded_size_bound
+- write encoded rows straight into the output buffer
+- pin encoder output bytes against v0.1.8 digests
+- edition 2024, MSRV 1.95
+
 ### Added
 
 - `encode_into_with_icc_profile(&BmpImage, &EncodeOptions, &[u8],
